@@ -1,7 +1,12 @@
 #!/bin/sh
 set -eu
 
-ROOT="${1:-runtime/chroots/calculator}"
+if [ "$#" -ne 1 ]; then
+    echo "usage: $0 <chroot-relative-path>" >&2
+    exit 64
+fi
+
+ROOT="$1"
 BASE="$(cd "$(dirname "$0")/.." && pwd)"
 ROOT="$BASE/$ROOT"
 
@@ -22,4 +27,3 @@ make_link usr/lib64 "$ROOT/lib64"
 make_link usr/etc "$ROOT/etc"
 
 echo "$ROOT"
-

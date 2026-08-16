@@ -15,6 +15,22 @@ use std::sync::{Arc, Mutex};
 const REMOTE: &str = "https://dl.flathub.org/repo";
 
 #[derive(Debug, Clone)]
+pub struct FlatpakApp {
+    pub app_id: String,
+    pub app_dir: PathBuf,
+    pub runtime_ref: String,
+    pub runtime_dir: PathBuf,
+    pub command: String,
+}
+
+#[derive(Debug, Default)]
+pub struct ResolveAppOptions {
+    pub app_dir: Option<PathBuf>,
+    pub runtime_dir: Option<PathBuf>,
+    pub entry: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 struct Commit {
     checksum: String,
     tree: String,
@@ -32,15 +48,21 @@ struct FileEntry {
 struct DirEntry {
     name: String,
     tree: String,
-    dirmeta: String,
+    _dirmeta: String,
 }
 
-pub fn inspect_refs() -> Result<()> {
-    for ref_name in [
-        "app/org.gnome.Calculator/x86_64/stable",
-        "runtime/org.gnome.Platform/x86_64/50",
-    ] {
-        let checksum = fetch_ref(ref_name)?;
+pub fn inspect_refs(refs: &[String]) -> Result<()> {
+    let refs: Vec<String> = if refs.is_empty() {
+        vec![
+            "app/org.gnome.Calculator/x86_64/stable".to_string(),
+            "runtime/org.gnome.Platform/x86_64/50".to_string(),
+        ]
+    } else {
+        refs.to_vec()
+    };
+
+    for ref_name in refs {
+        let checksum = fetch_ref(&ref_name)?;
         let commit = fetch_commit(&checksum)?;
         println!("{ref_name}");
         println!("  commit: {}", commit.checksum);
@@ -54,6 +76,69 @@ pub fn inspect_refs() -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn resolve_app(
+    project_root: &Path,
+    app_id: &str,
+    options: ResolveAppOptions,
+) -> Result<FlatpakApp> {
+    if app_id.contains('/') {
+        bail!("app id must not contain '/': {app_id}");
+    }
+
+    let app_dir = options
+        .app_dir
+        .unwrap_or_else(|| project_root.join("runtime").join("app").join(app_id));
+    let metadata_path = app_dir.join("metadata");
+    let metadata = fs::read_to_string(&metadata_path)
+        .with_context(|| format!("read Flatpak metadata {}", metadata_path.display()))?;
+
+    let metadata_app_id = metadata_value(&metadata, "Application", "name").with_context(|| {
+        format!(
+            "metadata has no Application/name in {}",
+            metadata_path.display()
+        )
+    })?;
+    if metadata_app_id != app_id {
+        bail!("metadata app id mismatch: requested {app_id}, checkout contains {metadata_app_id}");
+    }
+
+    let runtime_ref = metadata_value(&metadata, "Application", "runtime").with_context(|| {
+        format!(
+            "metadata has no Application/runtime in {}",
+            metadata_path.display()
+        )
+    })?;
+    let command = options
+        .entry
+        .or_else(|| metadata_value(&metadata, "Application", "command"))
+        .with_context(|| {
+            format!(
+                "metadata has no Application/command in {}",
+                metadata_path.display()
+            )
+        })?;
+    if command.split_whitespace().count() != 1 {
+        bail!("entry command must be a single executable for this POC: {command:?}");
+    }
+
+    let runtime_dir = options.runtime_dir.unwrap_or_else(|| {
+        project_root
+            .join("runtime")
+            .join(runtime_checkout_dir(&runtime_ref))
+    });
+
+    validate_checkout_dir("app", &app_dir)?;
+    validate_checkout_dir("runtime", &runtime_dir)?;
+
+    Ok(FlatpakApp {
+        app_id: app_id.to_string(),
+        app_dir,
+        runtime_ref,
+        runtime_dir,
+        command,
+    })
 }
 
 pub fn checkout_ref(ref_name: &str, dest: PathBuf) -> Result<()> {
@@ -101,7 +186,7 @@ pub fn checkout_ref(ref_name: &str, dest: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn metadata_value(metadata: &str, section: &str, key: &str) -> Option<String> {
+pub fn metadata_value(metadata: &str, section: &str, key: &str) -> Option<String> {
     let mut current = "";
     for line in metadata.lines() {
         let line = line.trim();
@@ -119,6 +204,31 @@ fn metadata_value(metadata: &str, section: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+pub fn runtime_checkout_dir(runtime_ref: &str) -> String {
+    let mut parts = runtime_ref.split('/');
+    let name = parts.next().unwrap_or(runtime_ref);
+    let _arch = parts.next();
+    let branch = parts.next().unwrap_or("stable");
+    format!("{name}-{}", branch.replace('/', "_"))
+}
+
+fn validate_checkout_dir(kind: &str, dir: &Path) -> Result<()> {
+    if !dir.is_dir() {
+        bail!(
+            "{kind} checkout directory does not exist: {}",
+            dir.display()
+        );
+    }
+    let files = dir.join("files");
+    if !files.is_dir() {
+        bail!(
+            "{kind} checkout is missing files directory: {}",
+            files.display()
+        );
+    }
+    Ok(())
 }
 
 struct Dirtree {
@@ -252,7 +362,7 @@ fn fetch_dirtree(checksum: &str) -> Result<Dirtree> {
         dirs.push(DirEntry {
             name: item.child_value(0).str().unwrap_or_default().to_string(),
             tree: bytes_to_checksum(&item.child_value(1))?,
-            dirmeta: bytes_to_checksum(&item.child_value(2))?,
+            _dirmeta: bytes_to_checksum(&item.child_value(2))?,
         });
     }
 
