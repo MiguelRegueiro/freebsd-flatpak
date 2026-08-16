@@ -1,0 +1,14 @@
+/target/
+
+# Downloaded Flatpak metadata, OSTree objects, and extracted runtimes/apps.
+/downloads/*
+!/downloads/.gitkeep
+/runtime/*
+!/runtime/.gitkeep
+
+# Temporary mount/chroot scratch space.
+/mounts/*
+!/mounts/.gitkeep
+
+*.tmp
+*.log
