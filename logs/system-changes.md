@@ -97,3 +97,26 @@ them.
 
 Post-test checks found no remaining project mounts, no run records, and no
 Flatpak app processes.
+
+## 2026-08-16 Desktop Integration Follow-up
+
+No persistent system configuration changes were made.
+
+Additional ignored project-local data was created under this repository:
+
+- `exports/share/applications/*.desktop`
+- `exports/share/icons/hicolor/...`
+- `exports/share/metainfo/*.xml`
+- `exports/share/applications/mimeinfo.cache`
+- `exports/share/icons/hicolor/icon-theme.cache`
+- `state/exports/*.list`
+
+A temporary Hyprland runtime environment variable was set so newly launched
+session processes can discover the project-local desktop exports:
+
+```sh
+hyprctl keyword env XDG_DATA_DIRS,/home/regueiro/freebsd-flatpak-poc/exports/share:/usr/local/share:/usr/share
+```
+
+This changes only the current Hyprland session environment. It is reversible by
+setting `XDG_DATA_DIRS` back to the desired value or by restarting the session.

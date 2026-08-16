@@ -21,6 +21,7 @@ pub struct FlatpakApp {
     pub runtime_ref: String,
     pub runtime_dir: PathBuf,
     pub command: String,
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -28,6 +29,7 @@ pub struct ResolveAppOptions {
     pub app_dir: Option<PathBuf>,
     pub runtime_dir: Option<PathBuf>,
     pub entry: Option<String>,
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -307,6 +309,7 @@ pub fn resolve_app(
         runtime_ref,
         runtime_dir,
         command,
+        args: options.args,
     })
 }
 

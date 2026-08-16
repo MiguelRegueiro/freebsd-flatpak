@@ -30,6 +30,7 @@ pub fn ensure_layout(project_root: &Path) -> Result<()> {
     fs::create_dir_all(apps_dir(project_root)).context("create app state directory")?;
     fs::create_dir_all(runtimes_dir(project_root)).context("create runtime state directory")?;
     fs::create_dir_all(runs_dir(project_root)).context("create run state directory")?;
+    fs::create_dir_all(exports_dir(project_root)).context("create export state directory")?;
     Ok(())
 }
 
@@ -191,6 +192,43 @@ pub fn read_run_records(project_root: &Path) -> Result<Vec<BTreeMap<String, Stri
     Ok(records)
 }
 
+pub fn export_record_path(project_root: &Path, app_id: &str) -> Result<PathBuf> {
+    Ok(exports_dir(project_root).join(format!("{}.list", safe_name(app_id)?)))
+}
+
+pub fn write_export_record(project_root: &Path, app_id: &str, paths: &[PathBuf]) -> Result<()> {
+    ensure_layout(project_root)?;
+    let path = export_record_path(project_root, app_id)?;
+    let mut data = String::new();
+    for path in paths {
+        data.push_str(&path.display().to_string());
+        data.push('\n');
+    }
+    write_atomic(&path, data.as_bytes())
+}
+
+pub fn read_export_record(project_root: &Path, app_id: &str) -> Result<Vec<PathBuf>> {
+    let path = export_record_path(project_root, app_id)?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let data = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    Ok(data
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(PathBuf::from)
+        .collect())
+}
+
+pub fn remove_export_record(project_root: &Path, app_id: &str) -> Result<()> {
+    let path = export_record_path(project_root, app_id)?;
+    if path.exists() {
+        fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    }
+    Ok(())
+}
+
 pub fn absolute(project_root: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
@@ -321,6 +359,10 @@ fn runtimes_dir(project_root: &Path) -> PathBuf {
 
 fn runs_dir(project_root: &Path) -> PathBuf {
     project_root.join("state").join("runs")
+}
+
+fn exports_dir(project_root: &Path) -> PathBuf {
+    project_root.join("state").join("exports")
 }
 
 fn relative_to(project_root: &Path, path: &Path) -> Result<PathBuf> {

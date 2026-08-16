@@ -9,6 +9,8 @@
 !/runtime/.gitkeep
 /state/*
 !/state/.gitkeep
+/exports/*
+!/exports/.gitkeep
 
 # Temporary mount/chroot scratch space.
 /mounts/*

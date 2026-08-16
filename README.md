@@ -39,6 +39,18 @@ Installed-app state is stored under `state/`, while downloaded OSTree objects,
 extracted app/runtime payloads, chroots, and caches remain self-contained under
 this repository.
 
+`install` and `update` export each app's real Flatpak desktop metadata into the
+project-local XDG data directory at `exports/share`. Exported desktop entries
+preserve names, icons, categories, MIME associations, metainfo, and desktop
+actions where possible, but rewrite `Exec=` so launchers call:
+
+```text
+/home/regueiro/freebsd-flatpak-poc/bin/flatpak run <app-id>
+```
+
+`uninstall` removes only the exported files recorded for that app. Generated
+desktop/icon caches may remain under `exports/share`.
+
 `run` reads installed app state, resolves the extracted Flatpak metadata, builds
 a per-app chroot under `runtime/chroots/<app-id>`, then uses read-only nullfs
 mounts for `/app` and `/usr`, exposes the host Wayland runtime directory, and
@@ -86,6 +98,12 @@ bin/flatpak update
 bin/flatpak uninstall org.gnome.Characters
 ```
 
+Use the project-local desktop exports for launcher testing:
+
+```sh
+export XDG_DATA_DIRS=/home/regueiro/freebsd-flatpak-poc/exports/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}
+```
+
 ## Still Hardcoded
 
 - The remote is fixed to Flathub.
@@ -94,6 +112,12 @@ bin/flatpak uninstall org.gnome.Characters
 - The Linux dynamic loader path is `/lib64/ld-linux-x86-64.so.2`.
 - Runtime checkout paths default to `runtime/<runtime-name>-<branch>`.
 - App commands are limited to a single executable name or absolute path.
+- Exported desktop `Exec=` rewriting drops the original executable token and
+  preserves only trailing arguments/field codes.
+- `DBusActivatable=true` is rewritten to `false` so host launchers use our
+  `Exec=` path instead of trying host D-Bus activation.
+- Exported D-Bus service files and GNOME Shell search providers are skipped for
+  now because they point at `/app/...` host-incompatible commands.
 - The environment is a small GTK-oriented V1 profile, including
   `GDK_BACKEND=wayland`, `GTK_USE_PORTAL=0`, and `GSK_RENDERER=cairo`.
 - `/tmp` is exposed to preserve the current host session D-Bus socket path.

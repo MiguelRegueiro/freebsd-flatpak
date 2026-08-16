@@ -214,7 +214,7 @@ impl ChrootInstance {
             app.runtime_dir.display()
         );
         eprintln!("  app: {}", app.app_dir.display());
-        eprintln!("  entry: {}", entry.display());
+        eprintln!("  entry: {}", entry.display(&app.args));
 
         let mut command = Command::new("doas");
         command
@@ -229,7 +229,7 @@ impl ChrootInstance {
         for (key, value) in env {
             command.arg(format!("{key}={value}"));
         }
-        entry.append_command_args(&mut command);
+        entry.append_command_args(&mut command, &app.args);
         command
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
@@ -384,16 +384,21 @@ enum EntryLaunchMode {
 }
 
 impl EntryLaunch {
-    fn display(&self) -> String {
-        match self.mode {
+    fn display(&self, args: &[String]) -> String {
+        let mut display = match self.mode {
             EntryLaunchMode::LinuxElf => {
                 format!("/lib64/ld-linux-x86-64.so.2 {}", self.chroot_path)
             }
             EntryLaunchMode::Direct => self.chroot_path.clone(),
+        };
+        for arg in args {
+            display.push(' ');
+            display.push_str(arg);
         }
+        display
     }
 
-    fn append_command_args(&self, command: &mut Command) {
+    fn append_command_args(&self, command: &mut Command, args: &[String]) {
         match self.mode {
             EntryLaunchMode::LinuxElf => {
                 command
@@ -404,6 +409,7 @@ impl EntryLaunch {
                 command.arg(&self.chroot_path);
             }
         }
+        command.args(args);
     }
 }
 

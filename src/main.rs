@@ -68,13 +68,15 @@ fn cmd_install(project_root: &Path, args: Vec<String>) -> Result<()> {
         bail!("usage: flatpak install <app-id>");
     }
     let installed = runtime::install_app(project_root, &args[0])?;
-    state::record_install(project_root, &installed)?;
+    let record = state::record_install(project_root, &installed)?;
+    let export = desktop::export_app(project_root, &record)?;
     println!("Installed {}", installed.app_id);
     println!("  app ref: {}", installed.app_ref);
     println!("  app commit: {}", installed.app_commit);
     println!("  runtime: {}", installed.runtime_ref);
     println!("  runtime commit: {}", installed.runtime_commit);
     println!("  command: {}", installed.command);
+    print_export_report(project_root, &export);
     Ok(())
 }
 
@@ -128,10 +130,19 @@ fn cmd_uninstall(project_root: &Path, args: Vec<String>) -> Result<()> {
     if sandbox::app_has_mounts(project_root, app_id)? {
         bail!("{app_id} still has active sandbox mounts; stop it before uninstalling");
     }
-    let Some(record) = state::remove_app_record(project_root, app_id)? else {
+    let record = match state::get_app(project_root, app_id) {
+        Ok(record) => record,
+        Err(_) => {
+            desktop::remove_export(project_root, app_id)?;
+            println!("{app_id} is not installed");
+            return Ok(());
+        }
+    };
+    desktop::remove_export(project_root, app_id)?;
+    if state::remove_app_record(project_root, app_id)?.is_none() {
         println!("{app_id} is not installed");
         return Ok(());
-    };
+    }
 
     state::safe_remove_dir(project_root, &record.app_dir)?;
     let chroot_dir = project_root.join("runtime").join("chroots").join(app_id);
@@ -188,12 +199,15 @@ fn cmd_update(project_root: &Path, args: Vec<String>) -> Result<()> {
 
         if !app_changed && !runtime_changed {
             println!("{} is up to date", record.app_id);
+            let export = desktop::export_app(project_root, &record)?;
+            print_export_report(project_root, &export);
             continue;
         }
 
         let force_runtime = runtime_changed && touched_runtimes.insert(remote.runtime_ref.clone());
         let installed = runtime::update_app(project_root, &remote, app_changed, force_runtime)?;
-        state::record_install(project_root, &installed)?;
+        let installed_record = state::record_install(project_root, &installed)?;
+        let export = desktop::export_app(project_root, &installed_record)?;
         println!("Updated {}", installed.app_id);
         if app_changed {
             println!(
@@ -207,6 +221,7 @@ fn cmd_update(project_root: &Path, args: Vec<String>) -> Result<()> {
                 current_runtime_commit, installed.runtime_commit
             );
         }
+        print_export_report(project_root, &export);
 
         if record.runtime_ref != installed.runtime_ref
             && !state::runtime_is_required(project_root, &record.runtime_ref)?
@@ -219,6 +234,24 @@ fn cmd_update(project_root: &Path, args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+fn print_export_report(project_root: &Path, export: &desktop::ExportReport) {
+    println!("  exported files: {}", export.files);
+    println!("  desktop entries: {}", export.desktop_entries);
+    println!(
+        "  export data dir: {}",
+        desktop::export_data_dir(project_root).display()
+    );
+    if !export.skipped.is_empty() {
+        let skipped = export
+            .skipped
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  skipped host-incompatible exports: {skipped}");
+    }
+}
+
 fn parse_run_args(args: Vec<String>) -> Result<(String, runtime::ResolveAppOptions)> {
     let mut args = args.into_iter();
     let app_id = args.next().context("missing app id")?;
@@ -226,6 +259,10 @@ fn parse_run_args(args: Vec<String>) -> Result<(String, runtime::ResolveAppOptio
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--" => {
+                options.args.extend(args);
+                break;
+            }
             "--app-dir" => options.app_dir = Some(next_path(&mut args, "--app-dir")?),
             "--runtime-dir" => options.runtime_dir = Some(next_path(&mut args, "--runtime-dir")?),
             "--entry" => options.entry = Some(args.next().context("missing value for --entry")?),
@@ -238,7 +275,11 @@ fn parse_run_args(args: Vec<String>) -> Result<(String, runtime::ResolveAppOptio
             _ if arg.starts_with("--entry=") => {
                 options.entry = Some(value_after_equals(&arg).to_string())
             }
-            _ => anyhow::bail!("unknown run option: {arg}"),
+            _ => {
+                options.args.push(arg);
+                options.args.extend(args);
+                break;
+            }
         }
     }
 
@@ -304,7 +345,7 @@ fn print_usage() {
     eprintln!("  flatpak search <query>");
     eprintln!("  flatpak install <app-id>");
     eprintln!("  flatpak list");
-    eprintln!("  flatpak run <app-id>");
+    eprintln!("  flatpak run <app-id> [-- app-args...]");
     eprintln!("  flatpak uninstall <app-id>");
     eprintln!("  flatpak update [app-id...]");
 }
