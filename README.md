@@ -19,22 +19,30 @@ code live here unless a system-level dependency is unavoidable.
 
 ## Current Status
 
-The POC now has a narrow app-ID installer and generic payload launcher:
+The POC now has a project-local `flatpak` CLI:
 
 ```sh
-cargo run -- install <app-id>
-cargo run -- run <app-id>
+bin/flatpak search <query>
+bin/flatpak install <app-id>
+bin/flatpak list
+bin/flatpak run <app-id>
+bin/flatpak update
+bin/flatpak uninstall <app-id>
 ```
 
 `install` resolves the app from the Flathub summary for the host architecture,
 selects the stable branch when present, reads the remote app metadata to find
 the required runtime and command, and checks out both app and runtime into this
-project. Existing checkouts are reused.
+project. Existing checkouts and shared runtimes are reused.
 
-`run` reads `runtime/app/<app-id>/metadata`, resolves the app command and
-runtime ref, builds a per-app chroot under `runtime/chroots/<app-id>`, then uses
-read-only nullfs mounts for `/app` and `/usr`, exposes the host Wayland runtime
-directory, and starts the Linux app. Linux ELF entries use:
+Installed-app state is stored under `state/`, while downloaded OSTree objects,
+extracted app/runtime payloads, chroots, and caches remain self-contained under
+this repository.
+
+`run` reads installed app state, resolves the extracted Flatpak metadata, builds
+a per-app chroot under `runtime/chroots/<app-id>`, then uses read-only nullfs
+mounts for `/app` and `/usr`, exposes the host Wayland runtime directory, and
+starts the Linux app. Linux ELF entries use:
 
 ```text
 /lib64/ld-linux-x86-64.so.2 /app/bin/<command>
@@ -50,36 +58,38 @@ Validated GUI payloads:
 - `org.gnome.Characters`
 
 The user visually confirmed all three apps created working windows on the host
-FreeBSD Hyprland desktop.
+FreeBSD Hyprland desktop. `org.gnome.Characters` and `org.gnome.TextEditor`
+were also tested through the `bin/flatpak` CLI.
 
 ## Commands
 
-Inspect Flathub refs:
+Build/install the local CLI:
 
 ```sh
-cargo run -- inspect app/org.gnome.TextEditor/x86_64/stable
+cargo build --bin flatpak
+install -m 755 target/debug/flatpak bin/flatpak
 ```
 
-Extract an app or runtime:
+Search and install:
 
 ```sh
-cargo run -- install org.gnome.TextEditor
+bin/flatpak search characters
+bin/flatpak install org.gnome.Characters
+bin/flatpak list
 ```
 
-Run an already-extracted app:
+Run, update, and uninstall:
 
 ```sh
-cargo run -- run org.gnome.TextEditor
-```
-
-Optional manual overrides are available for experiments:
-
-```sh
-cargo run -- run <app-id> --app-dir <path> --runtime-dir <path> --entry <executable>
+bin/flatpak run org.gnome.Characters
+bin/flatpak update
+bin/flatpak uninstall org.gnome.Characters
 ```
 
 ## Still Hardcoded
 
+- The remote is fixed to Flathub.
+- Branch resolution prefers `stable`.
 - The sandbox backend is `chroot` plus nullfs/devfs/linprocfs/linsysfs.
 - The Linux dynamic loader path is `/lib64/ld-linux-x86-64.so.2`.
 - Runtime checkout paths default to `runtime/<runtime-name>-<branch>`.
@@ -89,5 +99,5 @@ cargo run -- run <app-id> --app-dir <path> --runtime-dir <path> --entry <executa
 - `/tmp` is exposed to preserve the current host session D-Bus socket path.
 - `/run/host/font-dirs.xml`, AT-SPI, portals, audio, GPU-heavy apps, and
   richer Flatpak permissions are not handled yet.
-- Signal cleanup handles SIGINT, SIGTERM, and SIGHUP. SIGKILL and machine
-  failure still require manual mount cleanup.
+- Signal cleanup handles SIGINT, SIGTERM, and SIGHUP. Startup recovery handles
+  stale run records/mounts left by SIGKILL or crashes when possible.

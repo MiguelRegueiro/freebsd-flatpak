@@ -1,12 +1,15 @@
 use crate::desktop::DesktopSession;
 use crate::linuxulator;
 use crate::runtime::FlatpakApp;
+use crate::state;
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::thread;
+use std::time::Duration;
 
 static SIGNAL_HANDLERS_INSTALLED: AtomicBool = AtomicBool::new(false);
 static ACTIVE_CHILD_PID: AtomicI32 = AtomicI32::new(0);
@@ -14,6 +17,58 @@ static LAST_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
 pub trait SandboxBackend {
     fn run(&self, app: &FlatpakApp, desktop: &DesktopSession) -> Result<ExitStatus>;
+}
+
+pub fn recover_stale_mounts(project_root: &Path) -> Result<()> {
+    state::ensure_layout(project_root)?;
+    let mut active_roots = Vec::new();
+
+    for record in state::read_run_records(project_root)? {
+        let Some(record_path) = record.get("_path").map(PathBuf::from) else {
+            continue;
+        };
+        let launcher_pid = record
+            .get("launcher_pid")
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or(0);
+        let child_pid = record
+            .get("child_pid")
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or(0);
+        let root = record
+            .get("root")
+            .map(|path| state::absolute(project_root, Path::new(path)));
+
+        if launcher_pid > 0 && process_alive(launcher_pid) {
+            if let Some(root) = root {
+                active_roots.push(root);
+            }
+            continue;
+        }
+
+        if child_pid > 0 && process_alive(child_pid) {
+            eprintln!("recovering stale sandbox child pid {child_pid}");
+            terminate_process(child_pid);
+        }
+        if let Some(root) = root {
+            unmount_under(&root)?;
+        }
+        state::remove_run_record(&record_path)?;
+    }
+
+    let chroot_root = project_root.join("runtime").join("chroots");
+    let mut stale_mounts = mount_points_under(&chroot_root)?;
+    stale_mounts.retain(|mountpoint| !active_roots.iter().any(|root| mountpoint.starts_with(root)));
+    unmount_mountpoints(stale_mounts)?;
+    Ok(())
+}
+
+pub fn app_has_mounts(project_root: &Path, app_id: &str) -> Result<bool> {
+    let root = project_root
+        .join("runtime")
+        .join("chroots")
+        .join(sandbox_name(app_id));
+    Ok(!mount_points_under(&root)?.is_empty())
 }
 
 #[derive(Debug, Clone)]
@@ -36,7 +91,13 @@ impl ChrootNullfsBackend {
             .join(sandbox_name(&app.app_id));
 
         prepare_root(&root, uid)?;
-        let mut instance = ChrootInstance::new(root, uid, gid);
+        let mut instance = ChrootInstance::new(
+            self.project_root.clone(),
+            app.app_id.clone(),
+            root,
+            uid,
+            gid,
+        );
 
         instance.mount_nullfs(&app.runtime_dir.join("files"), "usr", true)?;
         instance.mount_nullfs(&app.app_dir.join("files"), "app", true)?;
@@ -69,20 +130,26 @@ impl SandboxBackend for ChrootNullfsBackend {
 
 #[derive(Debug)]
 struct ChrootInstance {
+    project_root: PathBuf,
+    app_id: String,
     root: PathBuf,
     uid: u32,
     gid: u32,
     owned_mounts: Vec<PathBuf>,
+    run_record: Option<PathBuf>,
     cleaned: bool,
 }
 
 impl ChrootInstance {
-    fn new(root: PathBuf, uid: u32, gid: u32) -> Self {
+    fn new(project_root: PathBuf, app_id: String, root: PathBuf, uid: u32, gid: u32) -> Self {
         Self {
+            project_root,
+            app_id,
             root,
             uid,
             gid,
             owned_mounts: Vec::new(),
+            run_record: None,
             cleaned: false,
         }
     }
@@ -131,7 +198,7 @@ impl ChrootInstance {
     }
 
     fn launch(
-        &self,
+        &mut self,
         app: &FlatpakApp,
         desktop: &DesktopSession,
         entry: &EntryLaunch,
@@ -171,6 +238,13 @@ impl ChrootInstance {
         LAST_SIGNAL.store(0, Ordering::SeqCst);
         let mut child = command.spawn().context("launch app through chroot")?;
         ACTIVE_CHILD_PID.store(child.id() as i32, Ordering::SeqCst);
+        self.run_record = Some(state::write_run_record(
+            &self.project_root,
+            &self.app_id,
+            &self.root,
+            std::process::id(),
+            child.id(),
+        )?);
         let status = child.wait().context("wait for app process")?;
         ACTIVE_CHILD_PID.store(0, Ordering::SeqCst);
 
@@ -191,9 +265,11 @@ impl ChrootInstance {
                 errors.push(format!("{error:#}"));
             }
         }
-        self.cleaned = true;
-
         if errors.is_empty() {
+            if let Some(path) = &self.run_record {
+                state::remove_run_record(path)?;
+            }
+            self.cleaned = true;
             Ok(())
         } else {
             bail!("cleanup failed:\n{}", errors.join("\n"));
@@ -430,18 +506,63 @@ fn ensure_mountpoint_free(target: &Path) -> Result<()> {
 }
 
 fn is_mounted(target: &Path) -> Result<bool> {
+    Ok(mount_points()?
+        .iter()
+        .any(|mountpoint| mountpoint == target))
+}
+
+fn mount_points_under(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut mounts: Vec<PathBuf> = mount_points()?
+        .into_iter()
+        .filter(|mountpoint| mountpoint.starts_with(root))
+        .collect();
+    mounts.sort_by(|left, right| {
+        right
+            .components()
+            .count()
+            .cmp(&left.components().count())
+            .then_with(|| right.cmp(left))
+    });
+    Ok(mounts)
+}
+
+fn mount_points() -> Result<Vec<PathBuf>> {
     let output = Command::new("mount").output().context("read mount table")?;
     if !output.status.success() {
         bail!("mount command failed with status {}", output.status);
     }
-    let target = target.to_string_lossy();
     let mount_table = String::from_utf8(output.stdout)?;
-    Ok(mount_table.lines().any(|line| {
-        line.split_once(" on ")
-            .and_then(|(_, rest)| rest.split_once(" ("))
-            .map(|(mountpoint, _)| mountpoint == target)
-            .unwrap_or(false)
-    }))
+    Ok(mount_table
+        .lines()
+        .filter_map(|line| {
+            line.split_once(" on ")
+                .and_then(|(_, rest)| rest.split_once(" ("))
+                .map(|(mountpoint, _)| PathBuf::from(mountpoint))
+        })
+        .collect())
+}
+
+fn unmount_under(root: &Path) -> Result<()> {
+    unmount_mountpoints(mount_points_under(root)?)
+}
+
+fn unmount_mountpoints(mountpoints: Vec<PathBuf>) -> Result<()> {
+    let mut errors = Vec::new();
+    for mountpoint in mountpoints {
+        let mut command = Command::new("doas");
+        command.arg("umount").arg(&mountpoint);
+        if let Err(error) =
+            run_command(command, &format!("recover umount {}", mountpoint.display()))
+        {
+            errors.push(format!("{error:#}"));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!("stale mount recovery failed:\n{}", errors.join("\n"));
+    }
 }
 
 fn run_command(mut command: Command, action: &str) -> Result<()> {
@@ -488,5 +609,31 @@ extern "C" fn handle_signal(signal: libc::c_int) {
         unsafe {
             libc::kill(pid, signal);
         }
+    }
+}
+
+fn process_alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+fn terminate_process(pid: i32) {
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
+    for _ in 0..20 {
+        if !process_alive(pid) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+    for _ in 0..20 {
+        if !process_alive(pid) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
     }
 }

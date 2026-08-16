@@ -12,4 +12,4 @@ fi
 
 cargo build
 
-target/debug/freebsd-flatpak-poc install "$1"
+target/debug/flatpak install "$1"

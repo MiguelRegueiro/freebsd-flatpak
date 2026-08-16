@@ -45,6 +45,26 @@ pub struct InstalledApp {
 }
 
 #[derive(Debug, Clone)]
+pub struct SearchResult {
+    pub app_id: String,
+    pub app_ref: String,
+    pub arch: String,
+    pub branch: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteApp {
+    pub app_id: String,
+    pub app_ref: String,
+    pub app_commit: String,
+    pub arch: String,
+    pub branch: String,
+    pub runtime_ref: String,
+    pub runtime_commit: String,
+    pub command: String,
+}
+
+#[derive(Debug, Clone)]
 struct RemoteRef {
     name: String,
     checksum: String,
@@ -99,6 +119,20 @@ pub fn inspect_refs(refs: &[String]) -> Result<()> {
 }
 
 pub fn install_app(project_root: &Path, app_id: &str) -> Result<InstalledApp> {
+    let remote = resolve_remote_app(app_id)?;
+    checkout_remote_app(project_root, &remote, false, false)
+}
+
+pub fn update_app(
+    project_root: &Path,
+    remote: &RemoteApp,
+    force_app: bool,
+    force_runtime: bool,
+) -> Result<InstalledApp> {
+    checkout_remote_app(project_root, remote, force_app, force_runtime)
+}
+
+pub fn resolve_remote_app(app_id: &str) -> Result<RemoteApp> {
     if app_id.contains('/') {
         bail!("app id must not contain '/': {app_id}");
     }
@@ -107,7 +141,6 @@ pub fn install_app(project_root: &Path, app_id: &str) -> Result<InstalledApp> {
     let summary_path = fetch_summary()?;
     let refs = parse_summary_refs(&summary_path)?;
     let app_remote_ref = choose_app_ref(&refs, app_id, &arch)?;
-    let app_ref_parts = split_flatpak_ref(&app_remote_ref.name)?;
     let app_commit = fetch_commit(&app_remote_ref.checksum)?;
     let metadata_app_id = metadata_value(&app_commit.metadata, "Application", "name")
         .context("remote app metadata has no Application/name")?;
@@ -133,25 +166,84 @@ pub fn install_app(project_root: &Path, app_id: &str) -> Result<InstalledApp> {
         })?;
     let runtime_commit = fetch_commit(&runtime_remote_ref.checksum)?;
 
-    let app_dir = project_root.join("runtime").join("app").join(app_id);
-    let runtime_dir = project_root
-        .join("runtime")
-        .join(runtime_checkout_dir(&runtime_ref));
-
-    checkout_if_missing(&app_remote_ref.name, &app_dir)?;
-    checkout_if_missing(&runtime_remote_ref.name, &runtime_dir)?;
-
-    Ok(InstalledApp {
+    let app_ref_parts = split_flatpak_ref(&app_remote_ref.name)?;
+    Ok(RemoteApp {
         app_id: app_id.to_string(),
         app_ref: app_remote_ref.name,
         app_commit: app_remote_ref.checksum,
-        app_dir,
         arch,
         branch: app_ref_parts.branch,
         runtime_ref,
         runtime_commit: runtime_commit.checksum,
-        runtime_dir,
         command,
+    })
+}
+
+pub fn search_apps(query: &str) -> Result<Vec<SearchResult>> {
+    let query = query.to_ascii_lowercase();
+    let arch = host_flatpak_arch()?;
+    let summary_path = fetch_summary()?;
+    let refs = parse_summary_refs(&summary_path)?;
+    let mut results = Vec::new();
+
+    for remote_ref in refs {
+        let Ok(parts) = split_flatpak_ref(&remote_ref.name) else {
+            continue;
+        };
+        if parts.kind != "app" || parts.arch != arch {
+            continue;
+        }
+        if !parts.name.to_ascii_lowercase().contains(&query) {
+            continue;
+        }
+        results.push(SearchResult {
+            app_id: parts.name,
+            app_ref: remote_ref.name,
+            arch: parts.arch,
+            branch: parts.branch,
+        });
+    }
+
+    results.sort_by(|left, right| {
+        left.app_id
+            .cmp(&right.app_id)
+            .then_with(|| left.branch.cmp(&right.branch))
+    });
+    Ok(results)
+}
+
+fn checkout_remote_app(
+    project_root: &Path,
+    remote: &RemoteApp,
+    force_app: bool,
+    force_runtime: bool,
+) -> Result<InstalledApp> {
+    let app_dir = project_root
+        .join("runtime")
+        .join("app")
+        .join(&remote.app_id);
+    let runtime_dir = project_root
+        .join("runtime")
+        .join(runtime_checkout_dir(&remote.runtime_ref));
+
+    checkout_if_missing(&remote.app_ref, &app_dir, force_app)?;
+    checkout_if_missing(
+        &format!("runtime/{}", remote.runtime_ref),
+        &runtime_dir,
+        force_runtime,
+    )?;
+
+    Ok(InstalledApp {
+        app_id: remote.app_id.clone(),
+        app_ref: remote.app_ref.clone(),
+        app_commit: remote.app_commit.clone(),
+        app_dir,
+        arch: remote.arch.clone(),
+        branch: remote.branch.clone(),
+        runtime_ref: remote.runtime_ref.clone(),
+        runtime_commit: remote.runtime_commit.clone(),
+        runtime_dir,
+        command: remote.command.clone(),
     })
 }
 
@@ -218,10 +310,14 @@ pub fn resolve_app(
     })
 }
 
-fn checkout_if_missing(ref_name: &str, dest: &Path) -> Result<()> {
-    if dest.join("metadata").is_file() && dest.join("files").is_dir() {
+fn checkout_if_missing(ref_name: &str, dest: &Path, force: bool) -> Result<()> {
+    if !force && dest.join("metadata").is_file() && dest.join("files").is_dir() {
         println!("reusing checkout for {ref_name}: {}", dest.display());
         return Ok(());
+    }
+    if force && dest.exists() {
+        fs::remove_dir_all(dest)
+            .with_context(|| format!("remove old checkout {}", dest.display()))?;
     }
     checkout_ref(ref_name, dest.to_path_buf())
 }

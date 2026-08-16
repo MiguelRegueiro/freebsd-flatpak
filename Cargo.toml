@@ -3,6 +3,10 @@ name = "freebsd-flatpak-poc"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "flatpak"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0"
 glib = "0.21"

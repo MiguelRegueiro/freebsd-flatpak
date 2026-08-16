@@ -9,4 +9,4 @@ fi
 BASE="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$BASE"
 
-exec cargo run -- run "$@"
+exec "$BASE/bin/flatpak" run "$@"

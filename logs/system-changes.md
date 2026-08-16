@@ -74,3 +74,26 @@ Temporary mounts used by the generic launcher for Characters:
 
 Normal-exit cleanup and a controlled SIGTERM cleanup test both removed all
 project mounts.
+
+## 2026-08-16 Flatpak CLI Follow-up
+
+No persistent system configuration changes were made.
+
+The project-local CLI binary was built and installed inside the repository:
+
+- `target/debug/flatpak`
+- `bin/flatpak`
+
+Additional ignored project-local state was created:
+
+- `state/apps/org.gnome.Characters.ini`
+- `state/apps/org.gnome.TextEditor.ini`
+- `state/runtimes/org.gnome.Platform_x86_64_50.ini`
+
+Lifecycle tests temporarily mounted Characters and Text Editor chroots and then
+cleaned them up. A controlled SIGKILL recovery test left stale Text Editor
+mounts intentionally, then verified `bin/flatpak list` startup recovery removed
+them.
+
+Post-test checks found no remaining project mounts, no run records, and no
+Flatpak app processes.
