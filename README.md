@@ -19,28 +19,37 @@ code live here unless a system-level dependency is unavoidable.
 
 ## Current Status
 
-The POC now has a generic payload launcher for already-extracted Flatpak app
-and runtime checkouts:
+The POC now has a narrow app-ID installer and generic payload launcher:
 
 ```sh
+cargo run -- install <app-id>
 cargo run -- run <app-id>
 ```
 
-The launcher reads `runtime/app/<app-id>/metadata`, resolves the app command
-and runtime ref, builds a per-app chroot under `runtime/chroots/<app-id>`, then
-uses read-only nullfs mounts for `/app` and `/usr`, exposes the host Wayland
-runtime directory, and starts the Linux app through the runtime loader:
+`install` resolves the app from the Flathub summary for the host architecture,
+selects the stable branch when present, reads the remote app metadata to find
+the required runtime and command, and checks out both app and runtime into this
+project. Existing checkouts are reused.
+
+`run` reads `runtime/app/<app-id>/metadata`, resolves the app command and
+runtime ref, builds a per-app chroot under `runtime/chroots/<app-id>`, then uses
+read-only nullfs mounts for `/app` and `/usr`, exposes the host Wayland runtime
+directory, and starts the Linux app. Linux ELF entries use:
 
 ```text
 /lib64/ld-linux-x86-64.so.2 /app/bin/<command>
 ```
 
+Script/shebang entries are executed directly inside the chroot so their Linux
+runtime interpreter handles them.
+
 Validated GUI payloads:
 
 - `org.gnome.Calculator`
 - `org.gnome.TextEditor`
+- `org.gnome.Characters`
 
-The user visually confirmed both apps created working windows on the host
+The user visually confirmed all three apps created working windows on the host
 FreeBSD Hyprland desktop.
 
 ## Commands
@@ -54,8 +63,7 @@ cargo run -- inspect app/org.gnome.TextEditor/x86_64/stable
 Extract an app or runtime:
 
 ```sh
-cargo run -- checkout app/org.gnome.TextEditor/x86_64/stable runtime/app/org.gnome.TextEditor
-cargo run -- checkout runtime/org.gnome.Platform/x86_64/50 runtime/org.gnome.Platform-50
+cargo run -- install org.gnome.TextEditor
 ```
 
 Run an already-extracted app:
@@ -81,3 +89,5 @@ cargo run -- run <app-id> --app-dir <path> --runtime-dir <path> --entry <executa
 - `/tmp` is exposed to preserve the current host session D-Bus socket path.
 - `/run/host/font-dirs.xml`, AT-SPI, portals, audio, GPU-heavy apps, and
   richer Flatpak permissions are not handled yet.
+- Signal cleanup handles SIGINT, SIGTERM, and SIGHUP. SIGKILL and machine
+  failure still require manual mount cleanup.

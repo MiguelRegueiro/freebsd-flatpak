@@ -19,6 +19,25 @@ fn main() -> Result<()> {
             let refs: Vec<String> = args.collect();
             runtime::inspect_refs(&refs)
         }
+        Some("install") => {
+            let project_root = std::env::current_dir().context("determine project root")?;
+            let app_id = args.next().context("missing app id")?;
+            if let Some(extra) = args.next() {
+                anyhow::bail!("unexpected install argument: {extra}");
+            }
+            let installed = runtime::install_app(&project_root, &app_id)?;
+            println!("installed {}", installed.app_id);
+            println!("  app ref: {}", installed.app_ref);
+            println!("  app commit: {}", installed.app_commit);
+            println!("  app dir: {}", installed.app_dir.display());
+            println!("  arch: {}", installed.arch);
+            println!("  branch: {}", installed.branch);
+            println!("  runtime: {}", installed.runtime_ref);
+            println!("  runtime commit: {}", installed.runtime_commit);
+            println!("  runtime dir: {}", installed.runtime_dir.display());
+            println!("  command: {}", installed.command);
+            Ok(())
+        }
         Some("run") => {
             let project_root = std::env::current_dir().context("determine project root")?;
             let (app_id, options) = parse_run_args(args.collect())?;
@@ -38,6 +57,7 @@ fn main() -> Result<()> {
             eprintln!("  freebsd-flatpak-poc inspect");
             eprintln!("  freebsd-flatpak-poc inspect <ostree-ref>...");
             eprintln!("  freebsd-flatpak-poc checkout <ostree-ref> <destination>");
+            eprintln!("  freebsd-flatpak-poc install <app-id>");
             eprintln!("  freebsd-flatpak-poc run <app-id> [--app-dir PATH] [--runtime-dir PATH] [--entry EXECUTABLE]");
             Ok(())
         }

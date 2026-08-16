@@ -31,6 +31,26 @@ pub struct ResolveAppOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct InstalledApp {
+    pub app_id: String,
+    pub app_ref: String,
+    pub app_commit: String,
+    pub app_dir: PathBuf,
+    pub arch: String,
+    pub branch: String,
+    pub runtime_ref: String,
+    pub runtime_commit: String,
+    pub runtime_dir: PathBuf,
+    pub command: String,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteRef {
+    name: String,
+    checksum: String,
+}
+
+#[derive(Debug, Clone)]
 struct Commit {
     checksum: String,
     tree: String,
@@ -76,6 +96,63 @@ pub fn inspect_refs(refs: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn install_app(project_root: &Path, app_id: &str) -> Result<InstalledApp> {
+    if app_id.contains('/') {
+        bail!("app id must not contain '/': {app_id}");
+    }
+
+    let arch = host_flatpak_arch()?;
+    let summary_path = fetch_summary()?;
+    let refs = parse_summary_refs(&summary_path)?;
+    let app_remote_ref = choose_app_ref(&refs, app_id, &arch)?;
+    let app_ref_parts = split_flatpak_ref(&app_remote_ref.name)?;
+    let app_commit = fetch_commit(&app_remote_ref.checksum)?;
+    let metadata_app_id = metadata_value(&app_commit.metadata, "Application", "name")
+        .context("remote app metadata has no Application/name")?;
+    if metadata_app_id != app_id {
+        bail!("remote metadata app id mismatch: requested {app_id}, found {metadata_app_id}");
+    }
+
+    let runtime_ref = metadata_value(&app_commit.metadata, "Application", "runtime")
+        .context("remote app metadata has no Application/runtime")?;
+    let command = metadata_value(&app_commit.metadata, "Application", "command")
+        .context("remote app metadata has no Application/command")?;
+    if command.split_whitespace().count() != 1 {
+        bail!("entry command must be a single executable for this POC: {command:?}");
+    }
+
+    let runtime_full_ref = format!("runtime/{runtime_ref}");
+    let runtime_remote_ref = refs
+        .iter()
+        .find(|remote_ref| remote_ref.name == runtime_full_ref)
+        .cloned()
+        .with_context(|| {
+            format!("required runtime ref not found in Flathub summary: {runtime_full_ref}")
+        })?;
+    let runtime_commit = fetch_commit(&runtime_remote_ref.checksum)?;
+
+    let app_dir = project_root.join("runtime").join("app").join(app_id);
+    let runtime_dir = project_root
+        .join("runtime")
+        .join(runtime_checkout_dir(&runtime_ref));
+
+    checkout_if_missing(&app_remote_ref.name, &app_dir)?;
+    checkout_if_missing(&runtime_remote_ref.name, &runtime_dir)?;
+
+    Ok(InstalledApp {
+        app_id: app_id.to_string(),
+        app_ref: app_remote_ref.name,
+        app_commit: app_remote_ref.checksum,
+        app_dir,
+        arch,
+        branch: app_ref_parts.branch,
+        runtime_ref,
+        runtime_commit: runtime_commit.checksum,
+        runtime_dir,
+        command,
+    })
 }
 
 pub fn resolve_app(
@@ -139,6 +216,144 @@ pub fn resolve_app(
         runtime_dir,
         command,
     })
+}
+
+fn checkout_if_missing(ref_name: &str, dest: &Path) -> Result<()> {
+    if dest.join("metadata").is_file() && dest.join("files").is_dir() {
+        println!("reusing checkout for {ref_name}: {}", dest.display());
+        return Ok(());
+    }
+    checkout_ref(ref_name, dest.to_path_buf())
+}
+
+fn fetch_summary() -> Result<PathBuf> {
+    let path = PathBuf::from("downloads").join("summary");
+    fs::create_dir_all("downloads").context("create downloads directory")?;
+    let tmp = path.with_file_name(format!(
+        ".summary.{}.{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    ));
+
+    let status = Command::new("fetch")
+        .arg("-qo")
+        .arg(&tmp)
+        .arg(format!("{REMOTE}/summary"))
+        .status()
+        .context("fetch Flathub summary")?;
+    if status.success() {
+        fs::rename(&tmp, &path)
+            .with_context(|| format!("move {} to {}", tmp.display(), path.display()))?;
+        return Ok(path);
+    }
+
+    let _ = fs::remove_file(&tmp);
+    if path.exists() {
+        eprintln!(
+            "warning: could not refresh Flathub summary, using cached {}",
+            path.display()
+        );
+        return Ok(path);
+    }
+
+    bail!("fetch Flathub summary failed with status {status}");
+}
+
+fn parse_summary_refs(path: &Path) -> Result<Vec<RemoteRef>> {
+    let variant = variant_from_file(path, "(a(s(taya{sv}))a{sv})")
+        .with_context(|| format!("parse Flathub summary {}", path.display()))?;
+    let refs_v = variant.child_value(0);
+    let mut refs = Vec::with_capacity(refs_v.n_children());
+
+    for i in 0..refs_v.n_children() {
+        let item = refs_v.child_value(i);
+        let name = item.child_value(0).str().unwrap_or_default().to_string();
+        let info = item.child_value(1);
+        refs.push(RemoteRef {
+            name,
+            checksum: bytes_to_checksum(&info.child_value(1))?,
+        });
+    }
+
+    Ok(refs)
+}
+
+fn choose_app_ref(refs: &[RemoteRef], app_id: &str, arch: &str) -> Result<RemoteRef> {
+    let mut candidates: Vec<(FlatpakRefParts, RemoteRef)> = refs
+        .iter()
+        .filter_map(|remote_ref| {
+            let parts = split_flatpak_ref(&remote_ref.name).ok()?;
+            if parts.kind == "app" && parts.name == app_id && parts.arch == arch {
+                Some((parts, remote_ref.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    candidates.sort_by(|left, right| left.0.branch.cmp(&right.0.branch));
+
+    if let Some((_, remote_ref)) = candidates
+        .iter()
+        .find(|(parts, _)| parts.branch == "stable")
+    {
+        return Ok(remote_ref.clone());
+    }
+
+    if candidates.len() == 1 {
+        return Ok(candidates[0].1.clone());
+    }
+
+    if candidates.is_empty() {
+        bail!("no Flathub ref found for app id {app_id} on architecture {arch}");
+    }
+
+    let branches = candidates
+        .iter()
+        .map(|(parts, _)| parts.branch.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!("multiple Flathub branches found for {app_id} on {arch}, and none is stable: {branches}");
+}
+
+#[derive(Debug, Clone)]
+struct FlatpakRefParts {
+    kind: String,
+    name: String,
+    arch: String,
+    branch: String,
+}
+
+fn split_flatpak_ref(ref_name: &str) -> Result<FlatpakRefParts> {
+    let mut parts = ref_name.splitn(4, '/');
+    let kind = parts.next().context("missing ref kind")?;
+    let name = parts.next().context("missing ref name")?;
+    let arch = parts.next().context("missing ref arch")?;
+    let branch = parts.next().context("missing ref branch")?;
+    Ok(FlatpakRefParts {
+        kind: kind.to_string(),
+        name: name.to_string(),
+        arch: arch.to_string(),
+        branch: branch.to_string(),
+    })
+}
+
+fn host_flatpak_arch() -> Result<String> {
+    let output = Command::new("uname")
+        .arg("-m")
+        .output()
+        .context("determine host architecture")?;
+    if !output.status.success() {
+        bail!("uname -m failed with status {}", output.status);
+    }
+    let machine = String::from_utf8(output.stdout)?.trim().to_string();
+    match machine.as_str() {
+        "amd64" | "x86_64" => Ok("x86_64".to_string()),
+        "aarch64" | "arm64" => Ok("aarch64".to_string()),
+        _ => bail!("unsupported host architecture for Flatpak POC: {machine}"),
+    }
 }
 
 pub fn checkout_ref(ref_name: &str, dest: PathBuf) -> Result<()> {

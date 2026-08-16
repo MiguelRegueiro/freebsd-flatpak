@@ -6,6 +6,11 @@ use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+
+static SIGNAL_HANDLERS_INSTALLED: AtomicBool = AtomicBool::new(false);
+static ACTIVE_CHILD_PID: AtomicI32 = AtomicI32::new(0);
+static LAST_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
 pub trait SandboxBackend {
     fn run(&self, app: &FlatpakApp, desktop: &DesktopSession) -> Result<ExitStatus>;
@@ -54,9 +59,9 @@ impl SandboxBackend for ChrootNullfsBackend {
             );
         }
 
-        validate_entry(app)?;
+        let entry = resolve_entry(app)?;
         let mut instance = self.prepare(app, desktop)?;
-        let status = instance.launch(app, desktop)?;
+        let status = instance.launch(app, desktop, &entry)?;
         instance.cleanup()?;
         Ok(status)
     }
@@ -125,9 +130,14 @@ impl ChrootInstance {
         Ok(())
     }
 
-    fn launch(&self, app: &FlatpakApp, desktop: &DesktopSession) -> Result<ExitStatus> {
+    fn launch(
+        &self,
+        app: &FlatpakApp,
+        desktop: &DesktopSession,
+        entry: &EntryLaunch,
+    ) -> Result<ExitStatus> {
+        install_signal_handlers();
         let user = std::env::var("USER").unwrap_or_else(|_| self.uid.to_string());
-        let entry = chroot_entry_path(&app.command);
         let env = launch_env(app, desktop, self.uid, &user);
 
         eprintln!("launching {} from {}", app.app_id, self.root.display());
@@ -137,7 +147,7 @@ impl ChrootInstance {
             app.runtime_dir.display()
         );
         eprintln!("  app: {}", app.app_dir.display());
-        eprintln!("  entry: /lib64/ld-linux-x86-64.so.2 {entry}");
+        eprintln!("  entry: {}", entry.display());
 
         let mut command = Command::new("doas");
         command
@@ -152,14 +162,24 @@ impl ChrootInstance {
         for (key, value) in env {
             command.arg(format!("{key}={value}"));
         }
+        entry.append_command_args(&mut command);
         command
-            .arg("/lib64/ld-linux-x86-64.so.2")
-            .arg(entry)
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
 
-        command.status().context("launch app through chroot")
+        LAST_SIGNAL.store(0, Ordering::SeqCst);
+        let mut child = command.spawn().context("launch app through chroot")?;
+        ACTIVE_CHILD_PID.store(child.id() as i32, Ordering::SeqCst);
+        let status = child.wait().context("wait for app process")?;
+        ACTIVE_CHILD_PID.store(0, Ordering::SeqCst);
+
+        let signal = LAST_SIGNAL.swap(0, Ordering::SeqCst);
+        if signal != 0 {
+            eprintln!("received signal {signal}; app process exited, cleaning up sandbox");
+        }
+
+        Ok(status)
     }
 
     fn cleanup(&mut self) -> Result<()> {
@@ -275,24 +295,94 @@ fn launch_env(
     env
 }
 
-fn validate_entry(app: &FlatpakApp) -> Result<()> {
-    let host_entry = if app.command.starts_with('/') {
-        app.app_dir
-            .join("files")
-            .join(app.command.trim_start_matches('/'))
-    } else {
-        app.app_dir.join("files").join("bin").join(&app.command)
-    };
-    if !host_entry.exists() {
+#[derive(Debug, Clone)]
+struct EntryLaunch {
+    chroot_path: String,
+    mode: EntryLaunchMode,
+}
+
+#[derive(Debug, Clone)]
+enum EntryLaunchMode {
+    LinuxElf,
+    Direct,
+}
+
+impl EntryLaunch {
+    fn display(&self) -> String {
+        match self.mode {
+            EntryLaunchMode::LinuxElf => {
+                format!("/lib64/ld-linux-x86-64.so.2 {}", self.chroot_path)
+            }
+            EntryLaunchMode::Direct => self.chroot_path.clone(),
+        }
+    }
+
+    fn append_command_args(&self, command: &mut Command) {
+        match self.mode {
+            EntryLaunchMode::LinuxElf => {
+                command
+                    .arg("/lib64/ld-linux-x86-64.so.2")
+                    .arg(&self.chroot_path);
+            }
+            EntryLaunchMode::Direct => {
+                command.arg(&self.chroot_path);
+            }
+        }
+    }
+}
+
+fn resolve_entry(app: &FlatpakApp) -> Result<EntryLaunch> {
+    let app_files = app.app_dir.join("files");
+    let chroot_path = chroot_entry_path(&app.command);
+    let host_entry = host_app_path(&app_files, &chroot_path)?;
+    if fs::symlink_metadata(&host_entry).is_err() {
         bail!("entry executable does not exist: {}", host_entry.display());
     }
-    if !linuxulator::is_linux_elf(&host_entry) {
-        eprintln!(
-            "warning: entry is not a Linux ELF according to the shallow probe: {}",
-            host_entry.display()
-        );
+    let probe_entry =
+        resolve_app_symlink_for_probe(&app_files, &host_entry).unwrap_or(host_entry.clone());
+    let mode = if linuxulator::is_linux_elf(&probe_entry) {
+        EntryLaunchMode::LinuxElf
+    } else {
+        EntryLaunchMode::Direct
+    };
+    Ok(EntryLaunch { chroot_path, mode })
+}
+
+fn host_app_path(app_files: &Path, chroot_path: &str) -> Result<PathBuf> {
+    if let Some(relative) = chroot_path.strip_prefix("/app/") {
+        return Ok(app_files.join(relative));
     }
-    Ok(())
+    if chroot_path.starts_with('/') {
+        bail!("entry path must be inside /app for this POC: {chroot_path}");
+    }
+    Ok(app_files.join("bin").join(chroot_path))
+}
+
+fn resolve_app_symlink_for_probe(app_files: &Path, path: &Path) -> Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..8 {
+        let metadata = fs::symlink_metadata(&current)
+            .with_context(|| format!("read metadata for {}", current.display()))?;
+        if !metadata.file_type().is_symlink() {
+            return Ok(current);
+        }
+
+        let target = fs::read_link(&current)
+            .with_context(|| format!("read symlink {}", current.display()))?;
+        current = if target.is_absolute() {
+            let target = target
+                .to_str()
+                .context("absolute symlink target is not UTF-8")?;
+            host_app_path(app_files, target)?
+        } else {
+            current
+                .parent()
+                .context("symlink has no parent")?
+                .join(target)
+        };
+    }
+
+    bail!("too many symlink hops resolving {}", path.display());
 }
 
 fn chroot_entry_path(command: &str) -> String {
@@ -365,4 +455,38 @@ fn run_command(mut command: Command, action: &str) -> Result<()> {
         bail!("{action} failed with status {status}");
     }
     Ok(())
+}
+
+fn install_signal_handlers() {
+    if SIGNAL_HANDLERS_INSTALLED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            handle_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            handle_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGHUP,
+            handle_signal as *const () as libc::sighandler_t,
+        );
+    }
+}
+
+extern "C" fn handle_signal(signal: libc::c_int) {
+    LAST_SIGNAL.store(signal, Ordering::SeqCst);
+    let pid = ACTIVE_CHILD_PID.load(Ordering::SeqCst);
+    if pid > 0 {
+        unsafe {
+            libc::kill(pid, signal);
+        }
+    }
 }

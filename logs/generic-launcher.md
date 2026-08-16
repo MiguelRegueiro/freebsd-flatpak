@@ -106,5 +106,5 @@ mounts in reverse order.
 - The host `/tmp` mount is still required for this session's D-Bus address.
 - Fontconfig still warns about missing `/run/host/font-dirs.xml`.
 - AT-SPI still tries the host absolute path and is not cleanly mapped yet.
-- Cleanup runs after normal app exit and after setup/launch errors. Signal-time
-  cleanup is not implemented yet.
+- Cleanup runs after normal app exit, setup/launch errors, SIGINT, SIGTERM, and
+  SIGHUP. SIGKILL cannot be handled in-process.

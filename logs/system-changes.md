@@ -49,3 +49,28 @@ Temporary mounts used by the generic launcher for Text Editor:
 
 These mounts are created by `cargo run -- run <app-id>` and are unmounted by
 the Rust launcher after normal app exit.
+
+## 2026-08-16 App-ID Install Follow-up
+
+No persistent system configuration changes were made.
+
+Additional non-system project data was created under this repository:
+
+- refreshed Flathub summary at `downloads/summary`
+- additional Flathub OSTree objects under `downloads/objects`
+- `runtime/app/org.gnome.Characters`
+- per-app chroot directory `runtime/chroots/org.gnome.Characters`
+
+Temporary mounts used by the generic launcher for Characters:
+
+- `runtime/org.gnome.Platform-50/files` mounted read-only at
+  `runtime/chroots/org.gnome.Characters/usr`
+- `runtime/app/org.gnome.Characters/files` mounted read-only at
+  `runtime/chroots/org.gnome.Characters/app`
+- `/var/run/xdg/regueiro` mounted at
+  `runtime/chroots/org.gnome.Characters/run/user/1001`
+- `/tmp` mounted at `runtime/chroots/org.gnome.Characters/tmp`
+- `devfs`, `linprocfs`, and `linsysfs` mounted in the chroot
+
+Normal-exit cleanup and a controlled SIGTERM cleanup test both removed all
+project mounts.
