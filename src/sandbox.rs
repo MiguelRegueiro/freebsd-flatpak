@@ -1,3 +1,4 @@
+use crate::audio::HostAudio;
 use crate::desktop::DesktopSession;
 use crate::filesystem::HostFilesystem;
 use crate::linuxulator;
@@ -97,9 +98,15 @@ impl ChrootNullfsBackend {
             &self.project_root,
             &root,
         )?;
+        let host_audio = HostAudio::from_metadata_file(
+            &app.app_dir.join("metadata"),
+            &desktop.xdg_runtime_dir,
+            uid,
+        )?;
 
         prepare_root(&root, uid)?;
         host_filesystem.write_xdg_user_dirs_config(&root)?;
+        host_audio.prepare(&root)?;
         let mut instance = ChrootInstance::new(
             self.project_root.clone(),
             app.app_id.clone(),
@@ -107,6 +114,7 @@ impl ChrootNullfsBackend {
             uid,
             gid,
             host_filesystem,
+            host_audio,
         );
 
         instance.mount_nullfs(&app.runtime_dir.join("files"), "usr", true)?;
@@ -154,6 +162,7 @@ struct ChrootInstance {
     uid: u32,
     gid: u32,
     host_filesystem: HostFilesystem,
+    host_audio: HostAudio,
     owned_mounts: Vec<OwnedMount>,
     run_record: Option<PathBuf>,
     cleaned: bool,
@@ -173,6 +182,7 @@ impl ChrootInstance {
         uid: u32,
         gid: u32,
         host_filesystem: HostFilesystem,
+        host_audio: HostAudio,
     ) -> Self {
         Self {
             project_root,
@@ -181,6 +191,7 @@ impl ChrootInstance {
             uid,
             gid,
             host_filesystem,
+            host_audio,
             owned_mounts: Vec::new(),
             run_record: None,
             cleaned: false,
@@ -253,6 +264,7 @@ impl ChrootInstance {
             self.host_filesystem.sandbox_home_env("/var/data"),
         ));
         env.extend(self.host_filesystem.user_dir_env());
+        env.extend(self.host_audio.env());
         let app_args = self.host_filesystem.translate_args(&app.args)?;
 
         eprintln!("launching {} from {}", app.app_id, self.root.display());
@@ -273,6 +285,12 @@ impl ChrootInstance {
         }
         for warning in self.host_filesystem.warnings() {
             eprintln!("  host fs warning: {warning}");
+        }
+        for line in self.host_audio.describe() {
+            eprintln!("  audio: {line}");
+        }
+        for warning in self.host_audio.warnings() {
+            eprintln!("  audio warning: {warning}");
         }
         eprintln!("  entry: {}", entry.display(&app_args));
 
@@ -325,6 +343,10 @@ impl ChrootInstance {
                 errors.push(format!("{error:#}"));
             }
         }
+        if let Err(error) = self.host_audio.cleanup(&self.root) {
+            errors.push(format!("{error:#}"));
+        }
+
         if errors.is_empty() {
             if let Some(path) = &self.run_record {
                 state::remove_run_record(path)?;

@@ -163,3 +163,37 @@ The project directory `/home/regueiro/freebsd-flatpak-poc` was deliberately
 skipped during broad `host` expansion to avoid a recursive nullfs mount.
 
 Post-run checks found no remaining project chroot mounts and no run records.
+
+## 2026-08-17 Host Audio Follow-up
+
+No persistent system configuration changes were made.
+
+The current host audio setup was inspected only. The host is running PulseAudio
+17.0 with its native socket at:
+
+```text
+/var/run/xdg/regueiro/pulse/native
+```
+
+PipeWire and WirePlumber were also present, but no global audio service was
+changed or restarted.
+
+Additional ignored project-local data was created:
+
+- `runtime/app/org.gnome.Decibels`
+- `state/apps/org.gnome.Decibels.ini`
+- `state/exports/org.gnome.Decibels.list`
+- exported Decibels desktop/icon/metainfo files under `exports/share`
+- additional Flathub OSTree objects under `downloads/objects`
+- `runtime/test-media/audio-test-tone.wav`
+- `runtime/chroots/org.gnome.Decibels/var/data/audio-test-tone.wav`
+
+The launcher now creates temporary PulseAudio files only inside the app chroot
+when the app metadata declares `sockets=pulseaudio`:
+
+- `runtime/chroots/<app-id>/var/config/pulse/client.conf`
+- `runtime/chroots/<app-id>/var/config/pulse/cookie`
+
+Those files are removed during sandbox cleanup. Post-test checks found no
+remaining project chroot mounts, no run records, and no temporary PulseAudio
+config or cookie files inside the Decibels chroot.

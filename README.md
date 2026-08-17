@@ -87,15 +87,27 @@ For broad `home`/`host` access, the resolver expands directories into child
 nullfs mounts when a direct mount would recurse into this project directory.
 The project directory itself is skipped.
 
+Host audio access is derived from each app's Flatpak metadata
+`[Context] sockets=` entry. Apps declaring `pulseaudio` receive a per-run
+PulseAudio bridge to the host socket under the mounted host runtime directory,
+plus a temporary sandbox-local PulseAudio client config and cookie copy. Apps
+without the `pulseaudio` socket permission do not receive audio environment
+variables from this layer.
+
 Validated GUI payloads:
 
 - `org.gnome.Calculator`
 - `org.gnome.TextEditor`
 - `org.gnome.Characters`
+- `org.gnome.Decibels`
 
-The user visually confirmed all three apps created working windows on the host
-FreeBSD Hyprland desktop. `org.gnome.Characters` and `org.gnome.TextEditor`
-were also tested through the `bin/flatpak` CLI.
+The user visually confirmed the Calculator, Text Editor, Characters, and
+Decibels apps created working windows on the host FreeBSD Hyprland desktop.
+`org.gnome.Characters` and `org.gnome.TextEditor` were also tested through the
+`bin/flatpak` CLI.
+
+The user audibly confirmed `org.gnome.Decibels` played a WAV test tone through
+the normal FreeBSD desktop audio output using the PulseAudio bridge.
 
 ## Commands
 
@@ -155,8 +167,13 @@ export XDG_DATA_DIRS=/home/regueiro/freebsd-flatpak-poc/exports/share:${XDG_DATA
   mount the project into its own chroot.
 - File arguments outside the metadata-derived grants are left unchanged with a
   warning; they are not made visible by mounting broader host paths.
-- `/run/host/font-dirs.xml`, AT-SPI, portals, audio, GPU-heavy apps, and
-  richer Flatpak permissions are not handled yet.
+- Audio support is currently PulseAudio-only and metadata-driven from
+  `sockets=pulseaudio`. PipeWire-native Flatpak audio is only detected as a
+  future hook.
+- Apps that rely on portals for picking files, such as Decibels opening music
+  from `~/Downloads`, still need a later portal or per-app override layer.
+- `/run/host/font-dirs.xml`, AT-SPI, portals, GPU-heavy apps, and richer
+  Flatpak permissions are not handled yet.
 - Signal cleanup handles SIGINT and SIGTERM by forwarding them to the app and
   unmounting afterward. SIGHUP is caught but not forwarded so desktop launcher
   parent exits do not kill GUI apps. Startup recovery handles stale run

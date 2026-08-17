@@ -297,6 +297,10 @@ XDG_VIDEOS_DIR=\"{videos}\"
 
     fn translate_file_uri(&self, arg: &str) -> Result<String> {
         let host_path = local_file_uri_path(arg)?;
+        if is_sandbox_internal_path(&host_path) {
+            return Ok(arg.to_string());
+        }
+
         let Some(sandbox_path) = self.map_host_path(&host_path)? else {
             warn_unmapped_file_arg(arg);
             return Ok(arg.to_string());
@@ -306,6 +310,10 @@ XDG_VIDEOS_DIR=\"{videos}\"
 
     fn translate_path_arg(&self, arg: &str) -> Result<String> {
         let host_path = host_path_from_arg(arg)?;
+        if is_sandbox_internal_path(&host_path) {
+            return Ok(arg.to_string());
+        }
+
         let Some(sandbox_path) = self.map_host_path(&host_path)? else {
             warn_unmapped_file_arg(arg);
             return Ok(arg.to_string());
@@ -889,6 +897,15 @@ fn looks_like_path_arg(arg: &str) -> bool {
     arg.starts_with('/') || arg.starts_with("./") || arg.starts_with("../") || arg.starts_with("~/")
 }
 
+fn is_sandbox_internal_path(path: &Path) -> bool {
+    [
+        "/app", "/bin", "/dev", "/etc", "/lib", "/lib64", "/proc", "/run", "/sys", "/tmp", "/usr",
+        "/var",
+    ]
+    .iter()
+    .any(|prefix| path.starts_with(prefix))
+}
+
 fn is_standalone_desktop_field_code(arg: &str) -> bool {
     matches!(arg, "%f" | "%F" | "%u" | "%U" | "%i" | "%c" | "%k" | "%%")
 }
@@ -1024,6 +1041,24 @@ filesystems={filesystems}
             .translate_args(&["file:///host/home/user/Documents/a%20b.txt".to_string()])
             .unwrap();
         assert_eq!(args, ["file:///home/user/Documents/a%20b.txt"]);
+    }
+
+    #[test]
+    fn preserves_sandbox_internal_absolute_path() {
+        let fs = test_filesystem();
+        let args = fs
+            .translate_args(&["/var/data/audio-test-tone.wav".to_string()])
+            .unwrap();
+        assert_eq!(args, ["/var/data/audio-test-tone.wav"]);
+    }
+
+    #[test]
+    fn preserves_sandbox_internal_file_uri() {
+        let fs = test_filesystem();
+        let args = fs
+            .translate_args(&["file:///var/data/audio-test-tone.wav".to_string()])
+            .unwrap();
+        assert_eq!(args, ["file:///var/data/audio-test-tone.wav"]);
     }
 
     #[test]

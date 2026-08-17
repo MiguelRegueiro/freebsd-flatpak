@@ -1,3 +1,4 @@
+mod audio;
 mod desktop;
 mod filesystem;
 mod linuxulator;
@@ -114,12 +115,18 @@ fn cmd_permissions(project_root: &Path, args: Vec<String>) -> Result<()> {
         .join("runtime")
         .join("chroots")
         .join(&record.app_id);
+    let uid = numeric_id("id", "-u")?;
+    let xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("/run/user/{uid}")));
+    let metadata_path = state::absolute(project_root, &record.app_dir).join("metadata");
     let host_filesystem = filesystem::HostFilesystem::from_metadata_file_for_user(
-        &state::absolute(project_root, &record.app_dir).join("metadata"),
+        &metadata_path,
         &user,
         project_root,
         &sandbox_root,
     )?;
+    let host_audio = audio::HostAudio::from_metadata_file(&metadata_path, &xdg_runtime_dir, uid)?;
 
     println!("Filesystem permissions for {}", record.app_id);
     println!("Metadata filesystems:");
@@ -155,6 +162,31 @@ fn cmd_permissions(project_root: &Path, args: Vec<String>) -> Result<()> {
     if !host_filesystem.warnings().is_empty() {
         println!("Warnings:");
         for warning in host_filesystem.warnings() {
+            println!("  {warning}");
+        }
+    }
+
+    println!("Socket permissions:");
+    if host_audio.sockets().is_empty() {
+        println!("  <none>");
+    } else {
+        for socket in host_audio.sockets() {
+            println!("  {socket}");
+        }
+    }
+
+    println!("Resolved audio bridge:");
+    let audio_lines = host_audio.describe();
+    if audio_lines.is_empty() {
+        println!("  <none>");
+    } else {
+        for line in audio_lines {
+            println!("  {line}");
+        }
+    }
+    if !host_audio.warnings().is_empty() {
+        println!("Audio warnings:");
+        for warning in host_audio.warnings() {
             println!("  {warning}");
         }
     }
@@ -357,6 +389,19 @@ fn next_path(args: &mut impl Iterator<Item = String>, option: &str) -> Result<Pa
 
 fn value_after_equals(arg: &str) -> &str {
     arg.split_once('=').map(|(_, value)| value).unwrap_or("")
+}
+
+fn numeric_id(program: &str, arg: &str) -> Result<u32> {
+    let output = std::process::Command::new(program)
+        .arg(arg)
+        .output()
+        .with_context(|| format!("run {program} {arg}"))?;
+    if !output.status.success() {
+        bail!("{program} {arg} failed with status {}", output.status);
+    }
+    let text = String::from_utf8(output.stdout)?.trim().to_string();
+    text.parse::<u32>()
+        .with_context(|| format!("parse numeric id from {text:?}"))
 }
 
 fn find_project_root() -> Result<PathBuf> {
