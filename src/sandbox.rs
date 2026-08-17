@@ -86,12 +86,17 @@ impl ChrootNullfsBackend {
         let uid = numeric_id("id", "-u")?;
         let gid = numeric_id("id", "-g")?;
         let user = host_user(uid);
-        let host_filesystem = HostFilesystem::default_for_user(&user)?;
         let root = self
             .project_root
             .join("runtime")
             .join("chroots")
             .join(sandbox_name(&app.app_id));
+        let host_filesystem = HostFilesystem::from_metadata_file_for_user(
+            &app.app_dir.join("metadata"),
+            &user,
+            &self.project_root,
+            &root,
+        )?;
 
         prepare_root(&root, uid)?;
         host_filesystem.write_xdg_user_dirs_config(&root)?;
@@ -242,6 +247,11 @@ impl ChrootInstance {
         install_signal_handlers();
         let user = host_user(self.uid);
         let mut env = launch_env(app, desktop, self.uid, &user);
+        env.retain(|(key, _)| key != "HOME");
+        env.push((
+            "HOME".to_string(),
+            self.host_filesystem.sandbox_home_env("/var/data"),
+        ));
         env.extend(self.host_filesystem.user_dir_env());
         let app_args = self.host_filesystem.translate_args(&app.args)?;
 
@@ -254,11 +264,15 @@ impl ChrootInstance {
         eprintln!("  app: {}", app.app_dir.display());
         for grant in self.host_filesystem.grants() {
             eprintln!(
-                "  host fs: {} -> {} ({})",
+                "  host fs: {} -> {} ({}, from {})",
                 grant.host_path().display(),
                 grant.sandbox_path().display(),
-                grant.access().label()
+                grant.access().label(),
+                grant.source_permission()
             );
+        }
+        for warning in self.host_filesystem.warnings() {
+            eprintln!("  host fs warning: {warning}");
         }
         eprintln!("  entry: {}", entry.display(&app_args));
 

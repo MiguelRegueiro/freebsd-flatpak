@@ -22,6 +22,7 @@ fn main() -> Result<()> {
         Some("search") => cmd_search(args.collect()),
         Some("install") => cmd_install(&project_root, args.collect()),
         Some("list") => cmd_list(&project_root, args.collect()),
+        Some("permissions") => cmd_permissions(&project_root, args.collect()),
         Some("run") => cmd_run(&project_root, args.collect()),
         Some("uninstall") => cmd_uninstall(&project_root, args.collect()),
         Some("update") => cmd_update(&project_root, args.collect()),
@@ -100,6 +101,64 @@ fn cmd_list(project_root: &Path, args: Vec<String>) -> Result<()> {
             app.app_id, app.arch, app.branch, app.runtime_ref, app.command
         );
     }
+    Ok(())
+}
+
+fn cmd_permissions(project_root: &Path, args: Vec<String>) -> Result<()> {
+    if args.len() != 1 {
+        bail!("usage: flatpak permissions <app-id>");
+    }
+    let record = state::get_app(project_root, &args[0])?;
+    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+    let sandbox_root = project_root
+        .join("runtime")
+        .join("chroots")
+        .join(&record.app_id);
+    let host_filesystem = filesystem::HostFilesystem::from_metadata_file_for_user(
+        &state::absolute(project_root, &record.app_dir).join("metadata"),
+        &user,
+        project_root,
+        &sandbox_root,
+    )?;
+
+    println!("Filesystem permissions for {}", record.app_id);
+    println!("Metadata filesystems:");
+    if host_filesystem.permissions().is_empty() {
+        println!("  <none>");
+    } else {
+        for permission in host_filesystem.permissions() {
+            let create = if permission.create() { ", create" } else { "" };
+            println!(
+                "  {:<28} {}{}",
+                permission.original(),
+                permission.access().label(),
+                create
+            );
+        }
+    }
+
+    println!("Resolved nullfs grants:");
+    if host_filesystem.grants().is_empty() {
+        println!("  <none>");
+    } else {
+        for grant in host_filesystem.grants() {
+            println!(
+                "  {:<42} -> {:<42} {} ({})",
+                grant.host_path().display(),
+                grant.sandbox_path().display(),
+                grant.access().label(),
+                grant.source_permission()
+            );
+        }
+    }
+
+    if !host_filesystem.warnings().is_empty() {
+        println!("Warnings:");
+        for warning in host_filesystem.warnings() {
+            println!("  {warning}");
+        }
+    }
+
     Ok(())
 }
 
@@ -346,6 +405,7 @@ fn print_usage() {
     eprintln!("  flatpak search <query>");
     eprintln!("  flatpak install <app-id>");
     eprintln!("  flatpak list");
+    eprintln!("  flatpak permissions <app-id>");
     eprintln!("  flatpak run <app-id> [-- app-args...]");
     eprintln!("  flatpak uninstall <app-id>");
     eprintln!("  flatpak update [app-id...]");

@@ -80,3 +80,54 @@ wrapper are not a valid GUI-lifetime test here: `ktrace` showed the spawned
 `flatpak` process receiving `SIGKILL` while waiting for the app child, which
 necessarily leaves stale mounts for startup recovery. Recovery cleaned that
 state successfully.
+
+## Metadata-Derived Permissions
+
+The fixed V1 profile was replaced with a resolver for each installed app's
+Flatpak metadata:
+
+```ini
+[Context]
+filesystems=...
+```
+
+Supported filesystem names:
+
+- `home`
+- `host`
+- `xdg-desktop`
+- `xdg-documents`
+- `xdg-download`
+- `xdg-music`
+- `xdg-pictures`
+- `xdg-public-share`
+- `xdg-videos`
+
+The resolver parses `:ro`, `:rw`, and `:create`. Read-only permissions become
+read-only nullfs mounts; read-write and create permissions become read-write
+nullfs mounts. Missing paths are skipped unless `:create` is present.
+
+`home` maps to the user's home path inside the sandbox at `/home/<user>`.
+`host` is implemented as a V1-safe expansion of common host roots and home child
+directories. It does not mount `/` over the chroot and skips the project
+directory to avoid recursive nullfs mounts.
+
+Unsupported entries such as `xdg-run/gvfsd` are reported by the launcher and the
+inspector, but are not treated as host filesystem grants.
+
+Inspection command:
+
+```sh
+bin/flatpak permissions <app-id>
+```
+
+Validation:
+
+- `org.gnome.Calculator` has no metadata `filesystems=` entry. A run created no
+  user-file nullfs mounts, only the runtime/app/session mounts.
+- `org.gnome.TextEditor` declares `filesystems=xdg-run/gvfsd;host;xdg-run/gvfs;`.
+  A run mounted metadata-derived `host` grants including `Documents`,
+  `Downloads`, `Pictures`, `/media`, and `/mnt`. The project directory was not
+  mounted into the sandbox.
+- After both apps exited, no mounts remained under `runtime/chroots` and no run
+  records remained under `state/runs`.

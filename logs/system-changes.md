@@ -143,3 +143,23 @@ Validation created two host files under `/home/regueiro/Documents`:
 Both were edited/saved by Linux Flatpak Text Editor through the per-run
 read-write `Documents` nullfs mount. Post-run checks found no remaining project
 chroot mounts and no run records.
+
+## 2026-08-17 Filesystem Permission Semantics Follow-up
+
+No persistent system configuration changes were made.
+
+The launcher now derives host filesystem nullfs mounts from each app's extracted
+Flatpak metadata instead of using a fixed Downloads/Documents/Pictures profile.
+
+Temporary validation mounts:
+
+- `org.gnome.Calculator` declared no `filesystems=` permissions, so no
+  user-file nullfs mounts were created.
+- `org.gnome.TextEditor` declared `host`, so the run temporarily mounted common
+  host roots and home child directories including `/home/regueiro/Documents`,
+  `/home/regueiro/Downloads`, `/home/regueiro/Pictures`, `/media`, and `/mnt`.
+
+The project directory `/home/regueiro/freebsd-flatpak-poc` was deliberately
+skipped during broad `host` expansion to avoid a recursive nullfs mount.
+
+Post-run checks found no remaining project chroot mounts and no run records.

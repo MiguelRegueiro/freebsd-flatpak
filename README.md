@@ -25,6 +25,7 @@ The POC now has a project-local `flatpak` CLI:
 bin/flatpak search <query>
 bin/flatpak install <app-id>
 bin/flatpak list
+bin/flatpak permissions <app-id>
 bin/flatpak run <app-id>
 bin/flatpak update
 bin/flatpak uninstall <app-id>
@@ -63,17 +64,28 @@ starts the Linux app. Linux ELF entries use:
 Script/shebang entries are executed directly inside the chroot so their Linux
 runtime interpreter handles them.
 
-The V1 host filesystem profile exposes only selected user directories through
-per-run nullfs mounts:
+Host filesystem access is derived from each installed app's Flatpak metadata
+`[Context] filesystems=` entry. The V1 resolver supports:
 
-- `~/Downloads` -> `/home/<user>/Downloads` read-write
-- `~/Documents` -> `/home/<user>/Documents` read-write
-- `~/Pictures` -> `/home/<user>/Pictures` read-only
+- `home`
+- `host`
+- `xdg-desktop`
+- `xdg-documents`
+- `xdg-download`
+- `xdg-music`
+- `xdg-pictures`
+- `xdg-public-share`
+- `xdg-videos`
 
-The launcher does not mount the whole home directory. File and `file://` URI
-arguments under those granted directories are translated to the sandbox-visible
+The `:ro`, `:rw`, and `:create` suffixes are parsed. Access is mapped to
+per-run nullfs mounts, with read-only nullfs used for `:ro`. File and `file://`
+URI arguments under granted directories are translated to the sandbox-visible
 path before the Linux app starts. The sandbox also writes
 `/var/config/user-dirs.dirs` so GTK file UI has sensible user directory paths.
+
+For broad `home`/`host` access, the resolver expands directories into child
+nullfs mounts when a direct mount would recurse into this project directory.
+The project directory itself is skipped.
 
 Validated GUI payloads:
 
@@ -100,6 +112,7 @@ Search and install:
 bin/flatpak search characters
 bin/flatpak install org.gnome.Characters
 bin/flatpak list
+bin/flatpak permissions org.gnome.Characters
 ```
 
 Run, update, and uninstall:
@@ -133,10 +146,15 @@ export XDG_DATA_DIRS=/home/regueiro/freebsd-flatpak-poc/exports/share:${XDG_DATA
 - The environment is a small GTK-oriented V1 profile, including
   `GDK_BACKEND=wayland`, `GTK_USE_PORTAL=0`, and `GSK_RENDERER=cairo`.
 - `/tmp` is exposed to preserve the current host session D-Bus socket path.
-- Host filesystem grants are currently a fixed V1 profile:
-  `Downloads`/`Documents` read-write and `Pictures` read-only.
-- File arguments outside that grant profile are left unchanged with a warning;
-  they are not made visible by mounting broader host paths.
+- Host filesystem grants are derived from app metadata, but only the common
+  V1 filesystem names listed above are implemented. `xdg-run/...`,
+  `host-os`, `host-etc`, `host-root`, arbitrary absolute paths, and
+  homedir-relative arbitrary paths are reported as unsupported for now.
+- `host` is not a single `/` mount. It expands to common host roots and child
+  home-directory mounts so it cannot overwrite the Linux runtime or recursively
+  mount the project into its own chroot.
+- File arguments outside the metadata-derived grants are left unchanged with a
+  warning; they are not made visible by mounting broader host paths.
 - `/run/host/font-dirs.xml`, AT-SPI, portals, audio, GPU-heavy apps, and
   richer Flatpak permissions are not handled yet.
 - Signal cleanup handles SIGINT and SIGTERM by forwarding them to the app and
