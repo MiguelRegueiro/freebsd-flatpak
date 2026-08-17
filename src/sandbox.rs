@@ -57,7 +57,7 @@ pub fn recover_stale_mounts(project_root: &Path) -> Result<()> {
             terminate_process(child_pid);
         }
         if let Some(root) = root {
-            terminate_chroot_mount_holders(&root)?;
+            terminate_chroot_processes(&root)?;
             unmount_under(&root)?;
         }
         state::remove_run_record(&record_path)?;
@@ -73,6 +73,7 @@ pub fn recover_stale_mounts(project_root: &Path) -> Result<()> {
         }
     }
     for root in stale_roots {
+        terminate_chroot_processes(&root)?;
         terminate_chroot_mount_holders(&root)?;
     }
     let mut stale_mounts = mount_points_under(&chroot_root)?;
@@ -402,6 +403,9 @@ impl ChrootInstance {
 
     fn cleanup(&mut self) -> Result<()> {
         let mut errors = Vec::new();
+        if let Err(error) = terminate_chroot_processes(&self.root) {
+            errors.push(format!("{error:#}"));
+        }
         if let Err(error) = self.host_portal.cleanup() {
             errors.push(format!("{error:#}"));
         }
@@ -850,6 +854,35 @@ fn terminate_chroot_mount_holders(root: &Path) -> Result<()> {
 
     for pid in pids {
         eprintln!("recovering stale sandbox mount holder pid {pid}");
+        terminate_process(pid);
+    }
+    Ok(())
+}
+
+fn terminate_chroot_processes(root: &Path) -> Result<()> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid"])
+        .output()
+        .context("list processes for sandbox cleanup")?;
+    if !output.status.success() {
+        bail!("ps -axo pid failed with status {}", output.status);
+    }
+    let text = String::from_utf8(output.stdout)?;
+    let mut pids = BTreeSet::new();
+    for line in text.lines().skip(1) {
+        let Ok(pid) = line.trim().parse::<i32>() else {
+            continue;
+        };
+        if pid == std::process::id() as i32 {
+            continue;
+        }
+        if process_rooted_in(pid, root)? {
+            pids.insert(pid);
+        }
+    }
+
+    for pid in pids {
+        eprintln!("terminating remaining sandbox process pid {pid}");
         terminate_process(pid);
     }
     Ok(())

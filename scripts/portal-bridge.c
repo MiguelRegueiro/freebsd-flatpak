@@ -188,6 +188,124 @@ static const char *REQUEST_XML =
     "  </interface>"
     "</node>";
 
+static const char *STATUS_WATCHER_XML =
+    "<node>"
+    "  <interface name='org.kde.StatusNotifierWatcher'>"
+    "    <property name='RegisteredStatusNotifierItems' type='as' access='read'/>"
+    "    <property name='IsStatusNotifierHostRegistered' type='b' access='read'/>"
+    "    <property name='ProtocolVersion' type='i' access='read'/>"
+    "    <method name='RegisterStatusNotifierItem'>"
+    "      <arg type='s' name='service' direction='in'/>"
+    "    </method>"
+    "    <method name='RegisterStatusNotifierHost'>"
+    "      <arg type='s' name='service' direction='in'/>"
+    "    </method>"
+    "    <signal name='StatusNotifierItemRegistered'>"
+    "      <arg type='s' name='service'/>"
+    "    </signal>"
+    "    <signal name='StatusNotifierItemUnregistered'>"
+    "      <arg type='s' name='service'/>"
+    "    </signal>"
+    "    <signal name='StatusNotifierHostRegistered'/>"
+    "    <signal name='StatusNotifierHostUnregistered'/>"
+    "  </interface>"
+    "</node>";
+
+static const char *STATUS_ITEM_XML =
+    "<node>"
+    "  <interface name='org.kde.StatusNotifierItem'>"
+    "    <property name='Category' type='s' access='read'/>"
+    "    <property name='Id' type='s' access='read'/>"
+    "    <property name='Title' type='s' access='read'/>"
+    "    <property name='Status' type='s' access='read'/>"
+    "    <property name='WindowId' type='u' access='read'/>"
+    "    <property name='IconName' type='s' access='read'/>"
+    "    <property name='IconPixmap' type='a(iiay)' access='read'/>"
+    "    <property name='OverlayIconName' type='s' access='read'/>"
+    "    <property name='OverlayIconPixmap' type='a(iiay)' access='read'/>"
+    "    <property name='AttentionIconName' type='s' access='read'/>"
+    "    <property name='AttentionIconPixmap' type='a(iiay)' access='read'/>"
+    "    <property name='AttentionMovieName' type='s' access='read'/>"
+    "    <property name='ToolTip' type='(sa(iiay)ss)' access='read'/>"
+    "    <property name='ItemIsMenu' type='b' access='read'/>"
+    "    <property name='Menu' type='o' access='read'/>"
+    "    <method name='ContextMenu'>"
+    "      <arg type='i' name='x' direction='in'/>"
+    "      <arg type='i' name='y' direction='in'/>"
+    "    </method>"
+    "    <method name='Activate'>"
+    "      <arg type='i' name='x' direction='in'/>"
+    "      <arg type='i' name='y' direction='in'/>"
+    "    </method>"
+    "    <method name='SecondaryActivate'>"
+    "      <arg type='i' name='x' direction='in'/>"
+    "      <arg type='i' name='y' direction='in'/>"
+    "    </method>"
+    "    <method name='Scroll'>"
+    "      <arg type='i' name='delta' direction='in'/>"
+    "      <arg type='s' name='orientation' direction='in'/>"
+    "    </method>"
+    "    <signal name='NewTitle'/>"
+    "    <signal name='NewIcon'/>"
+    "    <signal name='NewAttentionIcon'/>"
+    "    <signal name='NewOverlayIcon'/>"
+    "    <signal name='NewToolTip'/>"
+    "    <signal name='NewStatus'>"
+    "      <arg type='s' name='status'/>"
+    "    </signal>"
+    "  </interface>"
+    "</node>";
+
+static const char *DBUSMENU_XML =
+    "<node>"
+    "  <interface name='com.canonical.dbusmenu'>"
+    "    <method name='GetLayout'>"
+    "      <arg type='i' name='parentId' direction='in'/>"
+    "      <arg type='i' name='recursionDepth' direction='in'/>"
+    "      <arg type='as' name='propertyNames' direction='in'/>"
+    "      <arg type='u' name='revision' direction='out'/>"
+    "      <arg type='(ia{sv}av)' name='layout' direction='out'/>"
+    "    </method>"
+    "    <method name='GetGroupProperties'>"
+    "      <arg type='ai' name='ids' direction='in'/>"
+    "      <arg type='as' name='propertyNames' direction='in'/>"
+    "      <arg type='a(ia{sv})' name='properties' direction='out'/>"
+    "    </method>"
+    "    <method name='GetProperty'>"
+    "      <arg type='i' name='id' direction='in'/>"
+    "      <arg type='s' name='name' direction='in'/>"
+    "      <arg type='v' name='value' direction='out'/>"
+    "    </method>"
+    "    <method name='Event'>"
+    "      <arg type='i' name='id' direction='in'/>"
+    "      <arg type='s' name='eventId' direction='in'/>"
+    "      <arg type='v' name='data' direction='in'/>"
+    "      <arg type='u' name='timestamp' direction='in'/>"
+    "    </method>"
+    "    <method name='EventGroup'>"
+    "      <arg type='a(isvu)' name='events' direction='in'/>"
+    "      <arg type='ai' name='idErrors' direction='out'/>"
+    "    </method>"
+    "    <method name='AboutToShow'>"
+    "      <arg type='i' name='id' direction='in'/>"
+    "      <arg type='b' name='needUpdate' direction='out'/>"
+    "    </method>"
+    "    <method name='AboutToShowGroup'>"
+    "      <arg type='ai' name='ids' direction='in'/>"
+    "      <arg type='ai' name='updatesNeeded' direction='out'/>"
+    "      <arg type='ai' name='idErrors' direction='out'/>"
+    "    </method>"
+    "    <signal name='ItemsPropertiesUpdated'>"
+    "      <arg type='a(ia{sv})' name='updatedProps'/>"
+    "      <arg type='a(ias)' name='removedProps'/>"
+    "    </signal>"
+    "    <signal name='LayoutUpdated'>"
+    "      <arg type='u' name='revision'/>"
+    "      <arg type='i' name='parent'/>"
+    "    </signal>"
+    "  </interface>"
+    "</node>";
+
 typedef struct {
     char *doc_id;
     char *host_path;
@@ -198,6 +316,26 @@ typedef struct {
 } DocumentGrant;
 
 typedef struct _BridgeState BridgeState;
+typedef struct _StatusItem StatusItem;
+
+typedef struct {
+    StatusItem *item;
+    char *local_path;
+    char *host_path;
+    guint host_registration_id;
+    guint local_signal_id;
+} MenuProxy;
+
+struct _StatusItem {
+    BridgeState *state;
+    char *local_service;
+    char *local_path;
+    char *local_registration;
+    char *host_path;
+    guint host_registration_id;
+    guint local_signal_id;
+    GPtrArray *menus;
+};
 
 typedef struct {
     BridgeState *state;
@@ -215,14 +353,19 @@ struct _BridgeState {
     char *mountpoint;
     GPtrArray *grants;
     GPtrArray *requests;
+    GPtrArray *status_items;
     guint64 counter;
     guint64 request_counter;
+    guint64 status_counter;
     GMainLoop *loop;
     GDBusConnection *host_bus;
     GDBusConnection *local_bus;
     GDBusNodeInfo *desktop_node;
     GDBusNodeInfo *documents_node;
     GDBusNodeInfo *request_node;
+    GDBusNodeInfo *status_watcher_node;
+    GDBusNodeInfo *status_item_node;
+    GDBusNodeInfo *dbusmenu_node;
     bool local_objects_registered;
 };
 
@@ -346,6 +489,46 @@ static void free_request(RequestRecord *request)
     g_free(request->client_sender);
     g_free(request->local_path);
     g_free(request);
+}
+
+static void free_menu_proxy(MenuProxy *menu)
+{
+    if (menu == NULL) {
+        return;
+    }
+    if (menu->local_signal_id != 0 && menu->item->state->local_bus != NULL) {
+        g_dbus_connection_signal_unsubscribe(menu->item->state->local_bus,
+                                             menu->local_signal_id);
+    }
+    if (menu->host_registration_id != 0 && menu->item->state->host_bus != NULL) {
+        g_dbus_connection_unregister_object(menu->item->state->host_bus,
+                                            menu->host_registration_id);
+    }
+    g_free(menu->local_path);
+    g_free(menu->host_path);
+    g_free(menu);
+}
+
+static void free_status_item(StatusItem *item)
+{
+    if (item == NULL) {
+        return;
+    }
+    if (item->local_signal_id != 0 && item->state->local_bus != NULL) {
+        g_dbus_connection_signal_unsubscribe(item->state->local_bus, item->local_signal_id);
+    }
+    if (item->host_registration_id != 0 && item->state->host_bus != NULL) {
+        g_dbus_connection_unregister_object(item->state->host_bus,
+                                            item->host_registration_id);
+    }
+    if (item->menus != NULL) {
+        g_ptr_array_free(item->menus, TRUE);
+    }
+    g_free(item->local_service);
+    g_free(item->local_path);
+    g_free(item->local_registration);
+    g_free(item->host_path);
+    g_free(item);
 }
 
 static void cleanup_all(BridgeState *state)
@@ -843,6 +1026,211 @@ static void on_forward_call(GObject *source_object, GAsyncResult *result, gpoint
     g_object_unref(invocation);
 }
 
+static GVariant *empty_icon_pixmap(void)
+{
+    GVariantBuilder builder;
+    g_variant_builder_init(&builder, G_VARIANT_TYPE("a(iiay)"));
+    return g_variant_builder_end(&builder);
+}
+
+static GVariant *empty_tooltip(void)
+{
+    GVariantBuilder pixmap;
+    g_variant_builder_init(&pixmap, G_VARIANT_TYPE("a(iiay)"));
+    return g_variant_new("(s@a(iiay)ss)", "", g_variant_builder_end(&pixmap), "", "");
+}
+
+static GVariant *default_status_property(StatusItem *item, const char *property_name)
+{
+    if (g_strcmp0(property_name, "Category") == 0) {
+        return g_variant_new_string("ApplicationStatus");
+    }
+    if (g_strcmp0(property_name, "Id") == 0 || g_strcmp0(property_name, "Title") == 0) {
+        return g_variant_new_string(item->state->app_id);
+    }
+    if (g_strcmp0(property_name, "Status") == 0) {
+        return g_variant_new_string("Active");
+    }
+    if (g_strcmp0(property_name, "WindowId") == 0) {
+        return g_variant_new_uint32(0);
+    }
+    if (g_str_has_suffix(property_name, "IconName") ||
+        g_strcmp0(property_name, "AttentionMovieName") == 0) {
+        return g_variant_new_string("");
+    }
+    if (g_str_has_suffix(property_name, "IconPixmap")) {
+        return empty_icon_pixmap();
+    }
+    if (g_strcmp0(property_name, "ToolTip") == 0) {
+        return empty_tooltip();
+    }
+    if (g_strcmp0(property_name, "ItemIsMenu") == 0) {
+        return g_variant_new_boolean(FALSE);
+    }
+    if (g_strcmp0(property_name, "Menu") == 0) {
+        return g_variant_new_object_path("/");
+    }
+    return NULL;
+}
+
+static void on_local_status_signal(GDBusConnection *connection, const gchar *sender_name,
+                                   const gchar *object_path, const gchar *interface_name,
+                                   const gchar *signal_name, GVariant *parameters,
+                                   gpointer user_data)
+{
+    (void)connection;
+    (void)sender_name;
+    (void)object_path;
+    StatusItem *item = user_data;
+    if (!g_dbus_connection_emit_signal(item->state->host_bus, NULL, item->host_path,
+                                       interface_name, signal_name, g_variant_ref(parameters),
+                                       NULL)) {
+        log_line("forward StatusNotifier signal %s failed", signal_name);
+    }
+}
+
+static void on_local_menu_signal(GDBusConnection *connection, const gchar *sender_name,
+                                 const gchar *object_path, const gchar *interface_name,
+                                 const gchar *signal_name, GVariant *parameters,
+                                 gpointer user_data)
+{
+    (void)connection;
+    (void)sender_name;
+    (void)object_path;
+    MenuProxy *menu = user_data;
+    if (!g_dbus_connection_emit_signal(menu->item->state->host_bus, NULL, menu->host_path,
+                                       interface_name, signal_name, g_variant_ref(parameters),
+                                       NULL)) {
+        log_line("forward DBusMenu signal %s failed", signal_name);
+    }
+}
+
+static void handle_menu_method(GDBusConnection *connection, const gchar *sender,
+                               const gchar *object_path, const gchar *interface_name,
+                               const gchar *method_name, GVariant *parameters,
+                               GDBusMethodInvocation *invocation, gpointer user_data)
+{
+    (void)connection;
+    (void)sender;
+    (void)object_path;
+    MenuProxy *menu = user_data;
+    g_dbus_connection_call(menu->item->state->local_bus, menu->item->local_service,
+                           menu->local_path, interface_name, method_name, parameters, NULL,
+                           G_DBUS_CALL_FLAGS_NONE, -1, NULL, on_forward_call,
+                           g_object_ref(invocation));
+}
+
+static const GDBusInterfaceVTable MENU_VTABLE = {
+    .method_call = handle_menu_method,
+};
+
+static MenuProxy *ensure_menu_proxy(StatusItem *item, const char *menu_path)
+{
+    if (menu_path == NULL || g_strcmp0(menu_path, "/") == 0 || *menu_path == '\0') {
+        return NULL;
+    }
+    for (guint i = 0; i < item->menus->len; i++) {
+        MenuProxy *menu = g_ptr_array_index(item->menus, i);
+        if (g_strcmp0(menu->local_path, menu_path) == 0) {
+            return menu;
+        }
+    }
+
+    GDBusInterfaceInfo *iface =
+        g_dbus_node_info_lookup_interface(item->state->dbusmenu_node,
+                                          "com.canonical.dbusmenu");
+    MenuProxy *menu = g_new0(MenuProxy, 1);
+    menu->item = item;
+    menu->local_path = g_strdup(menu_path);
+    menu->host_path =
+        g_strdup_printf("%s/Menu%u", item->host_path, item->menus->len + 1);
+
+    GError *error = NULL;
+    menu->host_registration_id =
+        g_dbus_connection_register_object(item->state->host_bus, menu->host_path, iface,
+                                          &MENU_VTABLE, menu, NULL, &error);
+    if (menu->host_registration_id == 0) {
+        log_line("register host DBusMenu proxy %s failed: %s", menu->host_path,
+                 error->message);
+        g_error_free(error);
+        free_menu_proxy(menu);
+        return NULL;
+    }
+    menu->local_signal_id = g_dbus_connection_signal_subscribe(
+        item->state->local_bus, item->local_service, "com.canonical.dbusmenu", NULL,
+        menu->local_path, NULL, G_DBUS_SIGNAL_FLAGS_NONE, on_local_menu_signal, menu, NULL);
+
+    g_ptr_array_add(item->menus, menu);
+    log_line("bridged DBusMenu %s -> host %s", menu->local_path, menu->host_path);
+    return menu;
+}
+
+static GVariant *local_status_property(StatusItem *item, const char *property_name)
+{
+    GError *error = NULL;
+    GVariant *reply = g_dbus_connection_call_sync(
+        item->state->local_bus, item->local_service, item->local_path,
+        "org.freedesktop.DBus.Properties", "Get",
+        g_variant_new("(ss)", "org.kde.StatusNotifierItem", property_name),
+        G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, 1000, NULL, &error);
+    if (reply == NULL) {
+        log_line("StatusNotifier property %s.%s unavailable: %s", item->local_service,
+                 property_name, error->message);
+        g_error_free(error);
+        return default_status_property(item, property_name);
+    }
+
+    GVariant *boxed = g_variant_get_child_value(reply, 0);
+    GVariant *value = g_variant_get_variant(boxed);
+    g_variant_unref(boxed);
+    g_variant_unref(reply);
+
+    if (g_strcmp0(property_name, "Menu") == 0 &&
+        g_variant_is_of_type(value, G_VARIANT_TYPE_OBJECT_PATH)) {
+        MenuProxy *menu = ensure_menu_proxy(item, g_variant_get_string(value, NULL));
+        if (menu != NULL) {
+            g_variant_unref(value);
+            return g_variant_new_object_path(menu->host_path);
+        }
+    }
+    return value;
+}
+
+static void handle_status_item_method(GDBusConnection *connection, const gchar *sender,
+                                      const gchar *object_path, const gchar *interface_name,
+                                      const gchar *method_name, GVariant *parameters,
+                                      GDBusMethodInvocation *invocation, gpointer user_data)
+{
+    (void)connection;
+    (void)sender;
+    (void)object_path;
+    StatusItem *item = user_data;
+    g_dbus_connection_call(item->state->local_bus, item->local_service, item->local_path,
+                           interface_name, method_name, parameters, NULL,
+                           G_DBUS_CALL_FLAGS_NONE, -1, NULL, on_forward_call,
+                           g_object_ref(invocation));
+}
+
+static GVariant *handle_status_item_property(GDBusConnection *connection, const gchar *sender,
+                                             const gchar *object_path,
+                                             const gchar *interface_name,
+                                             const gchar *property_name, GError **error,
+                                             gpointer user_data)
+{
+    (void)connection;
+    (void)sender;
+    (void)object_path;
+    (void)interface_name;
+    (void)error;
+    StatusItem *item = user_data;
+    return local_status_property(item, property_name);
+}
+
+static const GDBusInterfaceVTable STATUS_ITEM_VTABLE = {
+    .method_call = handle_status_item_method,
+    .get_property = handle_status_item_property,
+};
+
 static char *fresh_request_path(BridgeState *state, const char *label)
 {
     return g_strdup_printf("/org/freedesktop/portal/desktop/request/freebsd_flatpak_poc/%s_%" G_GUINT64_FORMAT,
@@ -1158,6 +1546,173 @@ static const GDBusInterfaceVTable DOCUMENTS_VTABLE = {
     .get_property = handle_get_property,
 };
 
+static char *status_registration_string(const char *service)
+{
+    return g_strdup(service);
+}
+
+static StatusItem *find_status_item(BridgeState *state, const char *local_service,
+                                    const char *local_path)
+{
+    for (guint i = 0; i < state->status_items->len; i++) {
+        StatusItem *item = g_ptr_array_index(state->status_items, i);
+        if (g_strcmp0(item->local_service, local_service) == 0 &&
+            g_strcmp0(item->local_path, local_path) == 0) {
+            return item;
+        }
+    }
+    return NULL;
+}
+
+static bool register_host_status_item(StatusItem *item, GError **error)
+{
+    GDBusInterfaceInfo *iface =
+        g_dbus_node_info_lookup_interface(item->state->status_item_node,
+                                          "org.kde.StatusNotifierItem");
+    item->host_registration_id =
+        g_dbus_connection_register_object(item->state->host_bus, item->host_path, iface,
+                                          &STATUS_ITEM_VTABLE, item, NULL, error);
+    if (item->host_registration_id == 0) {
+        return false;
+    }
+
+    item->local_signal_id = g_dbus_connection_signal_subscribe(
+        item->state->local_bus, item->local_service, "org.kde.StatusNotifierItem", NULL,
+        item->local_path, NULL, G_DBUS_SIGNAL_FLAGS_NONE, on_local_status_signal, item, NULL);
+    return true;
+}
+
+static bool register_with_host_watcher(StatusItem *item, GError **error)
+{
+    GVariant *reply = g_dbus_connection_call_sync(
+        item->state->host_bus, "org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher",
+        "org.kde.StatusNotifierWatcher", "RegisterStatusNotifierItem",
+        g_variant_new("(s)", item->host_path), NULL, G_DBUS_CALL_FLAGS_NONE, 2000, NULL,
+        error);
+    if (reply == NULL) {
+        return false;
+    }
+    g_variant_unref(reply);
+    return true;
+}
+
+static void emit_local_status_item_registered(StatusItem *item)
+{
+    g_dbus_connection_emit_signal(
+        item->state->local_bus, NULL, "/StatusNotifierWatcher",
+        "org.kde.StatusNotifierWatcher", "StatusNotifierItemRegistered",
+        g_variant_new("(s)", item->local_registration), NULL);
+}
+
+static void handle_register_status_item(BridgeState *state, const char *sender,
+                                        GVariant *parameters,
+                                        GDBusMethodInvocation *invocation)
+{
+    const char *service = NULL;
+    g_variant_get(parameters, "(&s)", &service);
+    const char *local_service = service;
+    const char *local_path = "/StatusNotifierItem";
+    if (g_str_has_prefix(service, "/")) {
+        local_service = sender;
+        local_path = service;
+    }
+
+    StatusItem *existing = find_status_item(state, local_service, local_path);
+    if (existing != NULL) {
+        emit_local_status_item_registered(existing);
+        g_dbus_method_invocation_return_value(invocation, NULL);
+        return;
+    }
+
+    StatusItem *item = g_new0(StatusItem, 1);
+    item->state = state;
+    item->local_service = g_strdup(local_service);
+    item->local_path = g_strdup(local_path);
+    item->local_registration = status_registration_string(service);
+    item->host_path =
+        g_strdup_printf("/StatusNotifierItem/freebsd_flatpak_poc_%" G_GUINT64_FORMAT,
+                        ++state->status_counter);
+    item->menus = g_ptr_array_new_with_free_func((GDestroyNotify)free_menu_proxy);
+
+    GError *error = NULL;
+    if (!register_host_status_item(item, &error)) {
+        g_dbus_method_invocation_take_error(invocation, error);
+        free_status_item(item);
+        return;
+    }
+    if (!register_with_host_watcher(item, &error)) {
+        g_dbus_method_invocation_take_error(invocation, error);
+        free_status_item(item);
+        return;
+    }
+
+    g_ptr_array_add(state->status_items, item);
+    emit_local_status_item_registered(item);
+    g_dbus_method_invocation_return_value(invocation, NULL);
+    log_line("bridged StatusNotifierItem %s%s -> host %s", item->local_service,
+             item->local_path, item->host_path);
+}
+
+static void handle_status_watcher_method(GDBusConnection *connection, const gchar *sender,
+                                         const gchar *object_path,
+                                         const gchar *interface_name,
+                                         const gchar *method_name, GVariant *parameters,
+                                         GDBusMethodInvocation *invocation,
+                                         gpointer user_data)
+{
+    (void)connection;
+    (void)object_path;
+    (void)interface_name;
+    BridgeState *state = user_data;
+    if (g_strcmp0(method_name, "RegisterStatusNotifierItem") == 0) {
+        handle_register_status_item(state, sender, parameters, invocation);
+        return;
+    }
+    if (g_strcmp0(method_name, "RegisterStatusNotifierHost") == 0) {
+        g_dbus_method_invocation_return_value(invocation, NULL);
+        return;
+    }
+    g_dbus_method_invocation_return_error(invocation, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                                          "%s is not implemented", method_name);
+}
+
+static GVariant *handle_status_watcher_property(GDBusConnection *connection,
+                                                const gchar *sender,
+                                                const gchar *object_path,
+                                                const gchar *interface_name,
+                                                const gchar *property_name, GError **error,
+                                                gpointer user_data)
+{
+    (void)connection;
+    (void)sender;
+    (void)object_path;
+    (void)interface_name;
+    BridgeState *state = user_data;
+    if (g_strcmp0(property_name, "RegisteredStatusNotifierItems") == 0) {
+        GVariantBuilder items;
+        g_variant_builder_init(&items, G_VARIANT_TYPE("as"));
+        for (guint i = 0; i < state->status_items->len; i++) {
+            StatusItem *item = g_ptr_array_index(state->status_items, i);
+            g_variant_builder_add(&items, "s", item->local_registration);
+        }
+        return g_variant_builder_end(&items);
+    }
+    if (g_strcmp0(property_name, "IsStatusNotifierHostRegistered") == 0) {
+        return g_variant_new_boolean(TRUE);
+    }
+    if (g_strcmp0(property_name, "ProtocolVersion") == 0) {
+        return g_variant_new_int32(0);
+    }
+    g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "unknown property %s",
+                property_name);
+    return NULL;
+}
+
+static const GDBusInterfaceVTable STATUS_WATCHER_VTABLE = {
+    .method_call = handle_status_watcher_method,
+    .get_property = handle_status_watcher_property,
+};
+
 static bool register_node_interfaces(GDBusConnection *connection, const char *path,
                                      GDBusNodeInfo *node, const GDBusInterfaceVTable *vtable,
                                      BridgeState *state, GError **error)
@@ -1195,6 +1750,14 @@ static void on_bus_acquired(GDBusConnection *connection, const gchar *name, gpoi
     if (!register_node_interfaces(connection, "/org/freedesktop/portal/documents",
                                   state->documents_node, &DOCUMENTS_VTABLE, state, &error)) {
         log_line("register documents portal failed: %s", error->message);
+        g_error_free(error);
+        g_main_loop_quit(state->loop);
+        return;
+    }
+    if (!register_node_interfaces(connection, "/StatusNotifierWatcher",
+                                  state->status_watcher_node, &STATUS_WATCHER_VTABLE,
+                                  state, &error)) {
+        log_line("register StatusNotifierWatcher failed: %s", error->message);
         g_error_free(error);
         g_main_loop_quit(state->loop);
         return;
@@ -1265,14 +1828,19 @@ int main(int argc, char **argv)
         .mountpoint = g_strdup(mountpoint),
         .grants = g_ptr_array_new_with_free_func((GDestroyNotify)free_grant),
         .requests = g_ptr_array_new_with_free_func((GDestroyNotify)free_request),
+        .status_items = g_ptr_array_new_with_free_func((GDestroyNotify)free_status_item),
         .counter = 0,
         .request_counter = 0,
+        .status_counter = 0,
         .loop = g_main_loop_new(NULL, FALSE),
         .host_bus = connect_to_bus_address(host_bus_address, &error),
         .local_bus = NULL,
         .desktop_node = g_dbus_node_info_new_for_xml(DESKTOP_XML, &error),
         .documents_node = NULL,
         .request_node = NULL,
+        .status_watcher_node = NULL,
+        .status_item_node = NULL,
+        .dbusmenu_node = NULL,
     };
     if (state.host_bus == NULL || state.desktop_node == NULL) {
         fprintf(stderr, "portal bridge setup failed: %s\n", error->message);
@@ -1281,7 +1849,12 @@ int main(int argc, char **argv)
     }
     state.documents_node = g_dbus_node_info_new_for_xml(DOCUMENTS_XML, &error);
     state.request_node = g_dbus_node_info_new_for_xml(REQUEST_XML, &error);
-    if (state.documents_node == NULL || state.request_node == NULL) {
+    state.status_watcher_node = g_dbus_node_info_new_for_xml(STATUS_WATCHER_XML, &error);
+    state.status_item_node = g_dbus_node_info_new_for_xml(STATUS_ITEM_XML, &error);
+    state.dbusmenu_node = g_dbus_node_info_new_for_xml(DBUSMENU_XML, &error);
+    if (state.documents_node == NULL || state.request_node == NULL ||
+        state.status_watcher_node == NULL || state.status_item_node == NULL ||
+        state.dbusmenu_node == NULL) {
         fprintf(stderr, "portal bridge introspection failed: %s\n", error->message);
         g_error_free(error);
         return 1;
@@ -1300,10 +1873,18 @@ int main(int argc, char **argv)
                        G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT |
                            G_BUS_NAME_OWNER_FLAGS_REPLACE,
                        on_bus_acquired, on_name_acquired, on_name_lost, &state, NULL);
+    guint status_owner_id =
+        g_bus_own_name(G_BUS_TYPE_SESSION, "org.kde.StatusNotifierWatcher",
+                       G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT |
+                           G_BUS_NAME_OWNER_FLAGS_REPLACE,
+                       on_bus_acquired, on_name_acquired, on_name_lost, &state, NULL);
     log_line("serving private portal for %s at %s", state.app_id, state.doc_dir);
     g_main_loop_run(state.loop);
 
     cleanup_all(&state);
+    g_ptr_array_free(state.status_items, TRUE);
+    state.status_items = NULL;
+    g_bus_unown_name(status_owner_id);
     g_bus_unown_name(documents_owner_id);
     g_bus_unown_name(desktop_owner_id);
     if (state.local_bus != NULL) {
@@ -1315,6 +1896,9 @@ int main(int argc, char **argv)
     g_dbus_node_info_unref(state.desktop_node);
     g_dbus_node_info_unref(state.documents_node);
     g_dbus_node_info_unref(state.request_node);
+    g_dbus_node_info_unref(state.status_watcher_node);
+    g_dbus_node_info_unref(state.status_item_node);
+    g_dbus_node_info_unref(state.dbusmenu_node);
     g_main_loop_unref(state.loop);
     g_ptr_array_free(state.requests, TRUE);
     g_ptr_array_free(state.grants, TRUE);
