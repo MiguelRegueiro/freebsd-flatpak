@@ -114,8 +114,9 @@ Post-recovery checks showed:
 - no run records in `state/runs`
 - only the base `runtime/portal/doc` directory remained
 
-The initial crash reproduction generated an untracked `flatpak.core`, which
-was deleted after explicit approval.
+The initial crash reproduction generated an untracked `flatpak.core`. It was
+later inspected with LLDB and only showed the Rust launcher aborting during
+cleanup after the old Discord experiment. It was removed and was not committed.
 
 A later retry exposed one more cleanup bug: Electron/Chromium utility and
 renderer children can survive after the recorded launcher/child PIDs are gone,
