@@ -1,4 +1,5 @@
 mod audio;
+mod cursor;
 mod desktop;
 mod filesystem;
 mod linuxulator;

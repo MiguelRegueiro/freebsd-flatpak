@@ -1,4 +1,5 @@
 use crate::audio::HostAudio;
+use crate::cursor::HostCursorTheme;
 use crate::desktop::DesktopSession;
 use crate::filesystem::HostFilesystem;
 use crate::linuxulator;
@@ -119,6 +120,7 @@ impl ChrootNullfsBackend {
         )?;
         let host_audio =
             HostAudio::from_metadata_file(&metadata_path, &desktop.xdg_runtime_dir, uid)?;
+        let host_cursor = HostCursorTheme::from_host();
         let host_portal =
             HostPortal::prepare(&self.project_root, &app.app_id, desktop, uid, &root)?;
 
@@ -139,6 +141,7 @@ impl ChrootNullfsBackend {
             gid,
             host_filesystem,
             host_audio,
+            host_cursor,
             host_portal,
         );
 
@@ -150,6 +153,9 @@ impl ChrootNullfsBackend {
                 grant.sandbox_target_relative()?,
                 grant.access().is_read_only(),
             )?;
+        }
+        for mount in instance.host_cursor.mounts().to_vec() {
+            instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
         }
         instance.mount_nullfs(&desktop.xdg_runtime_dir, &format!("run/user/{uid}"), false)?;
         if let Some(doc_dir) = instance.host_portal.doc_dir().map(Path::to_path_buf) {
@@ -192,6 +198,7 @@ struct ChrootInstance {
     gid: u32,
     host_filesystem: HostFilesystem,
     host_audio: HostAudio,
+    host_cursor: HostCursorTheme,
     host_portal: HostPortal,
     owned_mounts: Vec<OwnedMount>,
     run_record: Option<PathBuf>,
@@ -213,6 +220,7 @@ impl ChrootInstance {
         gid: u32,
         host_filesystem: HostFilesystem,
         host_audio: HostAudio,
+        host_cursor: HostCursorTheme,
         host_portal: HostPortal,
     ) -> Self {
         Self {
@@ -223,6 +231,7 @@ impl ChrootInstance {
             gid,
             host_filesystem,
             host_audio,
+            host_cursor,
             host_portal,
             owned_mounts: Vec::new(),
             run_record: None,
@@ -325,8 +334,10 @@ impl ChrootInstance {
         ));
         env.extend(self.host_filesystem.user_dir_env());
         env.extend(self.host_audio.env());
+        env.extend(self.host_cursor.env());
         env.extend(self.host_portal.env());
-        let app_args = self.host_filesystem.translate_args(&app.args)?;
+        let translated_args = self.host_filesystem.translate_args(&app.args)?;
+        let app_args = launch_args(app, translated_args)?;
 
         eprintln!("launching {} from {}", app.app_id, self.root.display());
         eprintln!(
@@ -352,6 +363,12 @@ impl ChrootInstance {
         }
         for warning in self.host_audio.warnings() {
             eprintln!("  audio warning: {warning}");
+        }
+        for line in self.host_cursor.describe() {
+            eprintln!("  cursor: {line}");
+        }
+        for warning in self.host_cursor.warnings() {
+            eprintln!("  cursor warning: {warning}");
         }
         for line in self.host_portal.describe() {
             eprintln!("  portal: {line}");
@@ -604,6 +621,7 @@ fn launch_env(
         ("FLATPAK_ID".to_string(), app.app_id.clone()),
         ("XDG_RUNTIME_DIR".to_string(), format!("/run/user/{uid}")),
         ("WAYLAND_DISPLAY".to_string(), desktop.wayland_display.clone()),
+        ("XDG_SESSION_TYPE".to_string(), "wayland".to_string()),
         ("LANG".to_string(), "C.UTF-8".to_string()),
         ("LC_ALL".to_string(), "C.UTF-8".to_string()),
         ("GDK_BACKEND".to_string(), "wayland".to_string()),
@@ -631,11 +649,59 @@ fn launch_env(
     if let Some(display) = &desktop.display {
         env.push(("DISPLAY".to_string(), display.clone()));
     }
+    push_host_env(&mut env, "XDG_CURRENT_DESKTOP");
+    push_host_env(&mut env, "XDG_SESSION_DESKTOP");
     if let Some(address) = desktop.chroot_dbus_address(uid) {
         env.push(("DBUS_SESSION_BUS_ADDRESS".to_string(), address));
     }
 
     env
+}
+
+fn push_host_env(env: &mut Vec<(String, String)>, key: &str) {
+    if let Ok(value) = std::env::var(key) {
+        if !value.is_empty() {
+            env.push((key.to_string(), value));
+        }
+    }
+}
+
+fn launch_args(app: &FlatpakApp, translated_args: Vec<String>) -> Result<Vec<String>> {
+    let mut args = compatibility_args(app, &translated_args)?;
+    args.extend(translated_args);
+    Ok(args)
+}
+
+fn compatibility_args(app: &FlatpakApp, translated_args: &[String]) -> Result<Vec<String>> {
+    if has_ozone_platform_arg(translated_args) {
+        return Ok(Vec::new());
+    }
+
+    let metadata_path = app.app_dir.join("metadata");
+    let metadata = fs::read_to_string(&metadata_path)
+        .with_context(|| format!("read Flatpak metadata {}", metadata_path.display()))?;
+
+    if app_uses_electron_base(&metadata) && app_requests_socket(&metadata, "wayland") {
+        return Ok(vec!["--ozone-platform=wayland".to_string()]);
+    }
+
+    Ok(Vec::new())
+}
+
+fn app_uses_electron_base(metadata: &str) -> bool {
+    runtime::metadata_value(metadata, "Application", "base")
+        .is_some_and(|base| base.starts_with("app/org.electronjs.Electron2.BaseApp/"))
+}
+
+fn app_requests_socket(metadata: &str, socket: &str) -> bool {
+    runtime::metadata_value(metadata, "Context", "sockets")
+        .map(|sockets| sockets.split(';').any(|entry| entry == socket))
+        .unwrap_or(false)
+}
+
+fn has_ozone_platform_arg(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg == "--ozone-platform" || arg.starts_with("--ozone-platform="))
 }
 
 #[derive(Debug, Clone)]
@@ -1097,6 +1163,53 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn app_with_metadata(metadata: &str) -> FlatpakApp {
+        let app_dir = test_dir("compat-app");
+        fs::write(app_dir.join("metadata"), metadata).unwrap();
+        FlatpakApp {
+            app_id: "org.example.App".to_string(),
+            app_dir,
+            runtime_ref: "org.freedesktop.Platform/x86_64/25.08".to_string(),
+            runtime_dir: PathBuf::from("/runtime"),
+            command: "app".to_string(),
+            args: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn electron_base_app_gets_wayland_ozone_arg() {
+        let app = app_with_metadata(
+            "[Application]\nbase=app/org.electronjs.Electron2.BaseApp/x86_64/25.08\n\n[Context]\nsockets=wayland;x11;\n",
+        );
+
+        assert_eq!(
+            compatibility_args(&app, &[]).unwrap(),
+            vec!["--ozone-platform=wayland"]
+        );
+    }
+
+    #[test]
+    fn explicit_ozone_arg_is_preserved() {
+        let app = app_with_metadata(
+            "[Application]\nbase=app/org.electronjs.Electron2.BaseApp/x86_64/25.08\n\n[Context]\nsockets=wayland;x11;\n",
+        );
+
+        assert!(
+            compatibility_args(&app, &["--ozone-platform=x11".to_string()])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn non_electron_app_gets_no_ozone_arg() {
+        let app = app_with_metadata(
+            "[Application]\nbase=app/org.gnome.Platform/x86_64/49\n\n[Context]\nsockets=wayland;\n",
+        );
+
+        assert!(compatibility_args(&app, &[]).unwrap().is_empty());
     }
 
     #[test]
