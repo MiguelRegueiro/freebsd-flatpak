@@ -3,11 +3,14 @@ use crate::desktop::DesktopSession;
 use crate::filesystem::HostFilesystem;
 use crate::linuxulator;
 use crate::portal::HostPortal;
-use crate::runtime::FlatpakApp;
+use crate::runtime::{self, FlatpakApp};
 use crate::state;
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs as unix_fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -54,12 +57,24 @@ pub fn recover_stale_mounts(project_root: &Path) -> Result<()> {
             terminate_process(child_pid);
         }
         if let Some(root) = root {
+            terminate_chroot_mount_holders(&root)?;
             unmount_under(&root)?;
         }
         state::remove_run_record(&record_path)?;
     }
 
     let chroot_root = project_root.join("runtime").join("chroots");
+    let mut stale_mounts = mount_points_under(&chroot_root)?;
+    stale_mounts.retain(|mountpoint| !active_roots.iter().any(|root| mountpoint.starts_with(root)));
+    let mut stale_roots = BTreeSet::new();
+    for mountpoint in &stale_mounts {
+        if let Some(root) = chroot_root_for_mount(&chroot_root, mountpoint) {
+            stale_roots.insert(root);
+        }
+    }
+    for root in stale_roots {
+        terminate_chroot_mount_holders(&root)?;
+    }
     let mut stale_mounts = mount_points_under(&chroot_root)?;
     stale_mounts.retain(|mountpoint| !active_roots.iter().any(|root| mountpoint.starts_with(root)));
     unmount_mountpoints(stale_mounts)?;
@@ -93,21 +108,25 @@ impl ChrootNullfsBackend {
             .join("runtime")
             .join("chroots")
             .join(sandbox_name(&app.app_id));
+        let metadata_path = app.app_dir.join("metadata");
+        let network_enabled = app_allows_network(&metadata_path)?;
         let host_filesystem = HostFilesystem::from_metadata_file_for_user(
-            &app.app_dir.join("metadata"),
+            &metadata_path,
             &user,
             &self.project_root,
             &root,
         )?;
-        let host_audio = HostAudio::from_metadata_file(
-            &app.app_dir.join("metadata"),
-            &desktop.xdg_runtime_dir,
-            uid,
-        )?;
+        let host_audio =
+            HostAudio::from_metadata_file(&metadata_path, &desktop.xdg_runtime_dir, uid)?;
         let host_portal =
             HostPortal::prepare(&self.project_root, &app.app_id, desktop, uid, &root)?;
 
-        prepare_root(&root, uid)?;
+        prepare_root(
+            &root,
+            uid,
+            &app.runtime_dir.join("files").join("etc"),
+            network_enabled,
+        )?;
         write_flatpak_info(&root, app)?;
         host_filesystem.write_xdg_user_dirs_config(&root)?;
         host_audio.prepare(&root)?;
@@ -137,6 +156,7 @@ impl ChrootNullfsBackend {
         }
         instance.mount_nullfs(Path::new("/tmp"), "tmp", false)?;
         instance.mount_special("dev", "devfs", "devfs")?;
+        instance.mount_tmpfs("dev/shm", "mode=1777")?;
         instance.mount_special("proc", "linprocfs", "linprocfs")?;
         instance.mount_special("sys", "linsysfs", "linsysfs")?;
 
@@ -253,6 +273,34 @@ impl ChrootInstance {
             .arg(source)
             .arg(&target);
         run_command(command, &format!("mount {fs_type} {}", target.display()))?;
+        self.owned_mounts.push(OwnedMount {
+            path: target,
+            read_only: false,
+        });
+        Ok(())
+    }
+
+    fn mount_tmpfs(&mut self, target_relative: impl AsRef<Path>, options: &str) -> Result<()> {
+        let target = self.root.join(target_relative);
+
+        let mut mkdir = Command::new("doas");
+        mkdir.arg("mkdir").arg("-p").arg(&target);
+        run_command(
+            mkdir,
+            &format!("create tmpfs mount target {}", target.display()),
+        )?;
+        ensure_mountpoint_free(&target)?;
+
+        let mut command = Command::new("doas");
+        command
+            .arg("mount")
+            .arg("-t")
+            .arg("tmpfs")
+            .arg("-o")
+            .arg(options)
+            .arg("tmpfs")
+            .arg(&target);
+        run_command(command, &format!("mount tmpfs {}", target.display()))?;
         self.owned_mounts.push(OwnedMount {
             path: target,
             read_only: false,
@@ -391,7 +439,7 @@ impl Drop for ChrootInstance {
     }
 }
 
-fn prepare_root(root: &Path, uid: u32) -> Result<()> {
+fn prepare_root(root: &Path, uid: u32, runtime_etc: &Path, network_enabled: bool) -> Result<()> {
     for dir in [
         "app",
         "usr",
@@ -412,8 +460,100 @@ fn prepare_root(root: &Path, uid: u32) -> Result<()> {
     make_link("usr/bin", &root.join("bin"))?;
     make_link("usr/lib", &root.join("lib"))?;
     make_link("usr/lib64", &root.join("lib64"))?;
-    make_link("usr/etc", &root.join("etc"))?;
+    prepare_etc_overlay(root, runtime_etc, network_enabled)?;
     Ok(())
+}
+
+fn prepare_etc_overlay(root: &Path, runtime_etc: &Path, network_enabled: bool) -> Result<()> {
+    let etc = root.join("etc");
+    if let Ok(metadata) = fs::symlink_metadata(&etc) {
+        if metadata.file_type().is_symlink() {
+            fs::remove_file(&etc).with_context(|| format!("replace {}", etc.display()))?;
+        } else if !metadata.is_dir() {
+            bail!("{} exists and is not a directory", etc.display());
+        }
+    }
+    fs::create_dir_all(&etc).with_context(|| format!("create {}", etc.display()))?;
+
+    for entry in
+        fs::read_dir(runtime_etc).with_context(|| format!("read {}", runtime_etc.display()))?
+    {
+        let entry = entry.with_context(|| format!("read entry in {}", runtime_etc.display()))?;
+        let name = entry.file_name();
+        let Some(name_text) = name.to_str() else {
+            continue;
+        };
+        if matches!(name_text, "resolv.conf" | "hosts") {
+            continue;
+        }
+        let link = etc.join(name_text);
+        if fs::symlink_metadata(&link).is_ok() {
+            continue;
+        }
+        unix_fs::symlink(format!("/usr/etc/{name_text}"), &link)
+            .with_context(|| format!("symlink {} -> /usr/etc/{name_text}", link.display()))?;
+    }
+
+    prepare_host_resolver_file(
+        &etc,
+        "resolv.conf",
+        Path::new("/etc/resolv.conf"),
+        network_enabled,
+    )?;
+    prepare_host_resolver_file(&etc, "hosts", Path::new("/etc/hosts"), network_enabled)?;
+    Ok(())
+}
+
+fn prepare_host_resolver_file(
+    etc: &Path,
+    name: &str,
+    host_path: &Path,
+    network_enabled: bool,
+) -> Result<()> {
+    let target = etc.join(name);
+    if !network_enabled {
+        remove_regular_overlay_file(&target)?;
+        return Ok(());
+    }
+    if !host_path.exists() {
+        remove_regular_overlay_file(&target)?;
+        return Ok(());
+    }
+    if let Ok(metadata) = fs::symlink_metadata(&target) {
+        if metadata.file_type().is_symlink() || metadata.is_file() {
+            fs::remove_file(&target).with_context(|| format!("replace {}", target.display()))?;
+        } else {
+            bail!("{} exists and is not a file", target.display());
+        }
+    }
+    let data = fs::read(host_path).with_context(|| format!("read {}", host_path.display()))?;
+    fs::write(&target, data).with_context(|| format!("write {}", target.display()))?;
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o644))
+        .with_context(|| format!("set permissions on {}", target.display()))?;
+    Ok(())
+}
+
+fn remove_regular_overlay_file(path: &Path) -> Result<()> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn app_allows_network(metadata_path: &Path) -> Result<bool> {
+    let metadata = fs::read_to_string(metadata_path)
+        .with_context(|| format!("read {}", metadata_path.display()))?;
+    Ok(runtime::metadata_value(&metadata, "Context", "shared")
+        .map(|shared| {
+            shared
+                .split(';')
+                .map(str::trim)
+                .any(|permission| permission == "network")
+        })
+        .unwrap_or(false))
 }
 
 fn write_flatpak_info(root: &Path, app: &FlatpakApp) -> Result<()> {
@@ -695,6 +835,81 @@ fn unmount_under(root: &Path) -> Result<()> {
     unmount_mountpoints(mount_points_under(root)?)
 }
 
+fn terminate_chroot_mount_holders(root: &Path) -> Result<()> {
+    let mut pids = BTreeSet::new();
+    for mountpoint in mount_points_under(root)? {
+        for pid in mount_holders(&mountpoint)? {
+            if pid == std::process::id() as i32 {
+                continue;
+            }
+            if process_rooted_in(pid, root)? {
+                pids.insert(pid);
+            }
+        }
+    }
+
+    for pid in pids {
+        eprintln!("recovering stale sandbox mount holder pid {pid}");
+        terminate_process(pid);
+    }
+    Ok(())
+}
+
+fn mount_holders(mountpoint: &Path) -> Result<Vec<i32>> {
+    let output = Command::new("fstat")
+        .arg("-f")
+        .arg(mountpoint)
+        .output()
+        .with_context(|| format!("find mount holders for {}", mountpoint.display()))?;
+    if !output.status.success() {
+        bail!(
+            "fstat -f {} failed with status {}",
+            mountpoint.display(),
+            output.status
+        );
+    }
+    let text = String::from_utf8(output.stdout)?;
+    Ok(text
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_whitespace().nth(2))
+        .filter_map(|pid| pid.parse::<i32>().ok())
+        .collect())
+}
+
+fn process_rooted_in(pid: i32, root: &Path) -> Result<bool> {
+    let output = Command::new("procstat")
+        .arg("-f")
+        .arg(pid.to_string())
+        .output()
+        .with_context(|| format!("inspect process {pid} root"))?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    let text = String::from_utf8(output.stdout)?;
+    Ok(text.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        let _pid = fields.next();
+        let _comm = fields.next();
+        let Some(fd) = fields.next() else {
+            return false;
+        };
+        if fd != "root" && fd != "jail" && fd != "cwd" {
+            return false;
+        }
+        fields.last().is_some_and(|path| Path::new(path) == root)
+    }))
+}
+
+fn chroot_root_for_mount(chroot_root: &Path, mountpoint: &Path) -> Option<PathBuf> {
+    let relative = mountpoint.strip_prefix(chroot_root).ok()?;
+    let first = relative.components().next()?;
+    let Component::Normal(name) = first else {
+        return None;
+    };
+    Some(chroot_root.join(name))
+}
+
 fn unmount_mountpoints(mountpoints: Vec<PathBuf>) -> Result<()> {
     let mut errors = Vec::new();
     for mountpoint in mountpoints {
@@ -830,5 +1045,60 @@ fn terminate_process(pid: i32) {
             return;
         }
         thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_dir(name: &str) -> PathBuf {
+        let id = TEST_ID.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "freebsd-flatpak-poc-sandbox-{name}-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn shared_network_enables_resolver_overlay() {
+        let dir = test_dir("network-metadata");
+        let metadata = dir.join("metadata");
+        fs::write(&metadata, "[Context]\nshared=ipc;network;\n").unwrap();
+
+        assert!(app_allows_network(&metadata).unwrap());
+    }
+
+    #[test]
+    fn missing_network_shared_permission_disables_resolver_overlay() {
+        let dir = test_dir("non-network-metadata");
+        let metadata = dir.join("metadata");
+        fs::write(&metadata, "[Context]\nshared=ipc;\n").unwrap();
+
+        assert!(!app_allows_network(&metadata).unwrap());
+    }
+
+    #[test]
+    fn etc_overlay_preserves_runtime_etc_and_adds_network_resolver_files() {
+        let dir = test_dir("etc-overlay");
+        let root = dir.join("root");
+        let runtime_etc = dir.join("runtime-etc");
+        fs::create_dir_all(&runtime_etc).unwrap();
+        fs::write(runtime_etc.join("nsswitch.conf"), "hosts: files dns\n").unwrap();
+
+        prepare_etc_overlay(&root, &runtime_etc, true).unwrap();
+
+        assert!(root.join("etc/resolv.conf").is_file());
+        assert!(root.join("etc/hosts").is_file());
+        assert_eq!(
+            fs::read_link(root.join("etc/nsswitch.conf")).unwrap(),
+            PathBuf::from("/usr/etc/nsswitch.conf")
+        );
     }
 }
