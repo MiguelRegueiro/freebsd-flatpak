@@ -197,3 +197,31 @@ when the app metadata declares `sockets=pulseaudio`:
 Those files are removed during sandbox cleanup. Post-test checks found no
 remaining project chroot mounts, no run records, and no temporary PulseAudio
 config or cookie files inside the Decibels chroot.
+
+## 2026-08-17 Host FileChooser Portal Follow-up
+
+No persistent system configuration changes were made.
+
+The native host portal stack was inspected only. During document portal
+investigation, `vfs.usermount` was temporarily changed from `0` to `1` and
+then restored to `0`. No loader, rc, boot, `/etc`, `/usr/local`, or
+`/compat/linux` configuration was changed.
+
+Additional project-local source and generated data:
+
+- `src/portal.rs`
+- `scripts/portal-bridge.c`
+- `target/portal/portal-bridge`
+- temporary per-run document grant directories under `runtime/portal/doc`
+- temporary per-run private D-Bus directories under
+  `/var/run/xdg/regueiro/freebsd-flatpak-poc`
+
+The launcher now starts a private D-Bus session bus and portal bridge per run
+when the host session has `DBUS_SESSION_BUS_ADDRESS`. For `FileChooser.OpenFile`,
+the bridge reuses the native host picker, creates read-only single-file nullfs
+grants for selected regular files, and returns chroot-visible document URIs to
+the Linux Flatpak app.
+
+Validation used Decibels to select an MP3 from `/home/regueiro/Downloads`
+without granting Decibels blanket Downloads access. The user confirmed Decibels
+played the selected host file through the existing PulseAudio bridge.

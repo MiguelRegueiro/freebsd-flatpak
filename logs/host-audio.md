@@ -83,9 +83,8 @@ PulseAudio config or cookie files left inside the Decibels chroot.
 ## Remaining Gaps
 
 Decibels does not declare filesystem permissions, so opening arbitrary music
-from `~/Downloads` through its file picker still needs a later portal or
-project-local per-app filesystem override layer. This was deliberately left out
-of the audio milestone.
+from `~/Downloads` required a later portal layer. That follow-up is documented
+in `logs/host-filechooser-portal.md`.
 
-Audio support has only been proven for PulseAudio. GPU, camera, portals,
-boxrun, Discord, and broader compatibility remain out of scope.
+Audio support has only been proven for PulseAudio. GPU, camera, boxrun,
+Discord, and broader compatibility remain out of scope.

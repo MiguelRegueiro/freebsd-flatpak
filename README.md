@@ -156,8 +156,12 @@ export XDG_DATA_DIRS=/home/regueiro/freebsd-flatpak-poc/exports/share:${XDG_DATA
 - Exported D-Bus service files and GNOME Shell search providers are skipped for
   now because they point at `/app/...` host-incompatible commands.
 - The environment is a small GTK-oriented V1 profile, including
-  `GDK_BACKEND=wayland`, `GTK_USE_PORTAL=0`, and `GSK_RENDERER=cairo`.
+  `GDK_BACKEND=wayland`, `GTK_USE_PORTAL=1`, and `GSK_RENDERER=cairo`.
 - `/tmp` is exposed to preserve the current host session D-Bus socket path.
+- FileChooser portal support is V1-only. It starts a private per-run D-Bus
+  bus, proxies `org.freedesktop.portal.FileChooser.OpenFile` to the native host
+  portal, then rewrites returned file URIs to read-only single-file nullfs
+  grants under `/run/user/<uid>/doc`.
 - Host filesystem grants are derived from app metadata, but only the common
   V1 filesystem names listed above are implemented. `xdg-run/...`,
   `host-os`, `host-etc`, `host-root`, arbitrary absolute paths, and
@@ -170,9 +174,10 @@ export XDG_DATA_DIRS=/home/regueiro/freebsd-flatpak-poc/exports/share:${XDG_DATA
 - Audio support is currently PulseAudio-only and metadata-driven from
   `sockets=pulseaudio`. PipeWire-native Flatpak audio is only detected as a
   future hook.
-- Apps that rely on portals for picking files, such as Decibels opening music
-  from `~/Downloads`, still need a later portal or per-app override layer.
-- `/run/host/font-dirs.xml`, AT-SPI, portals, GPU-heavy apps, and richer
+- FileChooser portal V1 supports opening existing regular files. Save portals,
+  directory grants, persistent document portal state, and broader portal
+  interfaces are not implemented yet.
+- `/run/host/font-dirs.xml`, AT-SPI, GPU-heavy apps, and richer
   Flatpak permissions are not handled yet.
 - Signal cleanup handles SIGINT and SIGTERM by forwarding them to the app and
   unmounting afterward. SIGHUP is caught but not forwarded so desktop launcher

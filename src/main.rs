@@ -2,6 +2,7 @@ mod audio;
 mod desktop;
 mod filesystem;
 mod linuxulator;
+mod portal;
 mod runtime;
 mod sandbox;
 mod state;
@@ -17,6 +18,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("enter project root {}", project_root.display()))?;
     state::ensure_layout(&project_root)?;
     sandbox::recover_stale_mounts(&project_root)?;
+    portal::recover_stale_portal_mounts(&project_root)?;
 
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {

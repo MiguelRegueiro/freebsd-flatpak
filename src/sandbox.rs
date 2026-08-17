@@ -2,6 +2,7 @@ use crate::audio::HostAudio;
 use crate::desktop::DesktopSession;
 use crate::filesystem::HostFilesystem;
 use crate::linuxulator;
+use crate::portal::HostPortal;
 use crate::runtime::FlatpakApp;
 use crate::state;
 use anyhow::{bail, Context, Result};
@@ -103,8 +104,11 @@ impl ChrootNullfsBackend {
             &desktop.xdg_runtime_dir,
             uid,
         )?;
+        let host_portal =
+            HostPortal::prepare(&self.project_root, &app.app_id, desktop, uid, &root)?;
 
         prepare_root(&root, uid)?;
+        write_flatpak_info(&root, app)?;
         host_filesystem.write_xdg_user_dirs_config(&root)?;
         host_audio.prepare(&root)?;
         let mut instance = ChrootInstance::new(
@@ -115,6 +119,7 @@ impl ChrootNullfsBackend {
             gid,
             host_filesystem,
             host_audio,
+            host_portal,
         );
 
         instance.mount_nullfs(&app.runtime_dir.join("files"), "usr", true)?;
@@ -127,6 +132,9 @@ impl ChrootNullfsBackend {
             )?;
         }
         instance.mount_nullfs(&desktop.xdg_runtime_dir, &format!("run/user/{uid}"), false)?;
+        if let Some(doc_dir) = instance.host_portal.doc_dir().map(Path::to_path_buf) {
+            instance.mount_nullfs(&doc_dir, &format!("run/user/{uid}/doc"), true)?;
+        }
         instance.mount_nullfs(Path::new("/tmp"), "tmp", false)?;
         instance.mount_special("dev", "devfs", "devfs")?;
         instance.mount_special("proc", "linprocfs", "linprocfs")?;
@@ -163,6 +171,7 @@ struct ChrootInstance {
     gid: u32,
     host_filesystem: HostFilesystem,
     host_audio: HostAudio,
+    host_portal: HostPortal,
     owned_mounts: Vec<OwnedMount>,
     run_record: Option<PathBuf>,
     cleaned: bool,
@@ -183,6 +192,7 @@ impl ChrootInstance {
         gid: u32,
         host_filesystem: HostFilesystem,
         host_audio: HostAudio,
+        host_portal: HostPortal,
     ) -> Self {
         Self {
             project_root,
@@ -192,6 +202,7 @@ impl ChrootInstance {
             gid,
             host_filesystem,
             host_audio,
+            host_portal,
             owned_mounts: Vec::new(),
             run_record: None,
             cleaned: false,
@@ -265,6 +276,7 @@ impl ChrootInstance {
         ));
         env.extend(self.host_filesystem.user_dir_env());
         env.extend(self.host_audio.env());
+        env.extend(self.host_portal.env());
         let app_args = self.host_filesystem.translate_args(&app.args)?;
 
         eprintln!("launching {} from {}", app.app_id, self.root.display());
@@ -291,6 +303,12 @@ impl ChrootInstance {
         }
         for warning in self.host_audio.warnings() {
             eprintln!("  audio warning: {warning}");
+        }
+        for line in self.host_portal.describe() {
+            eprintln!("  portal: {line}");
+        }
+        for warning in self.host_portal.warnings() {
+            eprintln!("  portal warning: {warning}");
         }
         eprintln!("  entry: {}", entry.display(&app_args));
 
@@ -336,6 +354,9 @@ impl ChrootInstance {
 
     fn cleanup(&mut self) -> Result<()> {
         let mut errors = Vec::new();
+        if let Err(error) = self.host_portal.cleanup() {
+            errors.push(format!("{error:#}"));
+        }
         for mount in self.owned_mounts.iter().rev() {
             if let Err(error) =
                 unmount_mountpoint(&mount.path, mount.read_only, "umount owned mount")
@@ -395,6 +416,27 @@ fn prepare_root(root: &Path, uid: u32) -> Result<()> {
     Ok(())
 }
 
+fn write_flatpak_info(root: &Path, app: &FlatpakApp) -> Result<()> {
+    let data = format!(
+        "\
+[Application]
+name={}
+runtime={}
+
+[Instance]
+instance-id={}
+
+[Context]
+filesystems=
+",
+        app.app_id,
+        app.runtime_ref,
+        std::process::id()
+    );
+    fs::write(root.join(".flatpak-info"), data)
+        .with_context(|| format!("write {}", root.join(".flatpak-info").display()))
+}
+
 fn make_link(target: &str, link: &Path) -> Result<()> {
     if fs::symlink_metadata(link).is_ok() {
         return Ok(());
@@ -422,7 +464,6 @@ fn launch_env(
         ("LC_ALL".to_string(), "C.UTF-8".to_string()),
         ("GDK_BACKEND".to_string(), "wayland".to_string()),
         ("GSK_RENDERER".to_string(), "cairo".to_string()),
-        ("GTK_USE_PORTAL".to_string(), "0".to_string()),
         ("XDG_DATA_HOME".to_string(), "/var/data".to_string()),
         ("XDG_CONFIG_HOME".to_string(), "/var/config".to_string()),
         ("XDG_CACHE_HOME".to_string(), "/var/cache".to_string()),
