@@ -2,6 +2,7 @@ use crate::audio::HostAudio;
 use crate::cursor::HostCursorTheme;
 use crate::desktop::DesktopSession;
 use crate::filesystem::HostFilesystem;
+use crate::graphics::HostGraphics;
 use crate::linuxulator;
 use crate::portal::HostPortal;
 use crate::runtime::{self, FlatpakApp};
@@ -123,6 +124,7 @@ impl ChrootNullfsBackend {
         let host_cursor = HostCursorTheme::from_host();
         let host_portal =
             HostPortal::prepare(&self.project_root, &app.app_id, desktop, uid, &root)?;
+        let host_graphics = HostGraphics::prepare(&self.project_root, app)?;
 
         prepare_root(
             &root,
@@ -143,10 +145,14 @@ impl ChrootNullfsBackend {
             host_audio,
             host_cursor,
             host_portal,
+            host_graphics,
         );
 
         instance.mount_nullfs(&app.runtime_dir.join("files"), "usr", true)?;
         instance.mount_nullfs(&app.app_dir.join("files"), "app", true)?;
+        for mount in instance.host_graphics.runtime_mounts() {
+            instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
+        }
         for grant in instance.host_filesystem.grants().to_vec() {
             instance.mount_nullfs(
                 grant.host_path(),
@@ -166,6 +172,9 @@ impl ChrootNullfsBackend {
         instance.mount_tmpfs("dev/shm", "mode=1777")?;
         instance.mount_special("proc", "linprocfs", "linprocfs")?;
         instance.mount_special("sys", "linsysfs", "linsysfs")?;
+        for mount in instance.host_graphics.sysfs_mounts() {
+            instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
+        }
 
         Ok(instance)
     }
@@ -200,6 +209,7 @@ struct ChrootInstance {
     host_audio: HostAudio,
     host_cursor: HostCursorTheme,
     host_portal: HostPortal,
+    host_graphics: HostGraphics,
     owned_mounts: Vec<OwnedMount>,
     run_record: Option<PathBuf>,
     cleaned: bool,
@@ -222,6 +232,7 @@ impl ChrootInstance {
         host_audio: HostAudio,
         host_cursor: HostCursorTheme,
         host_portal: HostPortal,
+        host_graphics: HostGraphics,
     ) -> Self {
         Self {
             project_root,
@@ -233,6 +244,7 @@ impl ChrootInstance {
             host_audio,
             host_cursor,
             host_portal,
+            host_graphics,
             owned_mounts: Vec::new(),
             run_record: None,
             cleaned: false,
@@ -336,6 +348,7 @@ impl ChrootInstance {
         env.extend(self.host_audio.env());
         env.extend(self.host_cursor.env());
         env.extend(self.host_portal.env());
+        merge_env(&mut env, self.host_graphics.env());
         let translated_args = self.host_filesystem.translate_args(&app.args)?;
         let app_args = launch_args(app, translated_args)?;
 
@@ -375,6 +388,12 @@ impl ChrootInstance {
         }
         for warning in self.host_portal.warnings() {
             eprintln!("  portal warning: {warning}");
+        }
+        for line in self.host_graphics.describe() {
+            eprintln!("  graphics: {line}");
+        }
+        for warning in self.host_graphics.warnings() {
+            eprintln!("  graphics warning: {warning}");
         }
         eprintln!("  entry: {}", entry.display(&app_args));
 
@@ -432,6 +451,9 @@ impl ChrootInstance {
             {
                 errors.push(format!("{error:#}"));
             }
+        }
+        if let Err(error) = self.host_graphics.cleanup() {
+            errors.push(format!("{error:#}"));
         }
         if let Err(error) = self.host_audio.cleanup(&self.root) {
             errors.push(format!("{error:#}"));
@@ -662,6 +684,19 @@ fn push_host_env(env: &mut Vec<(String, String)>, key: &str) {
     if let Ok(value) = std::env::var(key) {
         if !value.is_empty() {
             env.push((key.to_string(), value));
+        }
+    }
+}
+
+fn merge_env(env: &mut Vec<(String, String)>, updates: Vec<(String, String)>) {
+    for (key, value) in updates {
+        if let Some((_, existing)) = env
+            .iter_mut()
+            .find(|(existing_key, _)| existing_key == &key)
+        {
+            *existing = value;
+        } else {
+            env.push((key, value));
         }
     }
 }

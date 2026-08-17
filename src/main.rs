@@ -2,6 +2,7 @@ mod audio;
 mod cursor;
 mod desktop;
 mod filesystem;
+mod graphics;
 mod linuxulator;
 mod portal;
 mod runtime;
@@ -20,6 +21,7 @@ fn main() -> Result<()> {
     state::ensure_layout(&project_root)?;
     sandbox::recover_stale_mounts(&project_root)?;
     portal::recover_stale_portal_mounts(&project_root)?;
+    graphics::recover_stale_graphics_dirs(&project_root)?;
 
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {

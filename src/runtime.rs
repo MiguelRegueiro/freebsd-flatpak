@@ -47,6 +47,13 @@ pub struct InstalledApp {
 }
 
 #[derive(Debug, Clone)]
+pub struct RuntimeGlExtension {
+    pub ref_name: String,
+    pub checkout_dir: PathBuf,
+    pub runtime_mount_relative: PathBuf,
+}
+
+#[derive(Debug, Clone)]
 pub struct SearchResult {
     pub app_id: String,
     pub app_ref: String,
@@ -234,6 +241,7 @@ fn checkout_remote_app(
         &runtime_dir,
         force_runtime,
     )?;
+    let _ = ensure_default_gl_extension(project_root, &remote.runtime_ref, &runtime_dir)?;
 
     Ok(InstalledApp {
         app_id: remote.app_id.clone(),
@@ -247,6 +255,54 @@ fn checkout_remote_app(
         runtime_dir,
         command: remote.command.clone(),
     })
+}
+
+pub fn ensure_default_gl_extension(
+    project_root: &Path,
+    runtime_ref: &str,
+    runtime_dir: &Path,
+) -> Result<Option<RuntimeGlExtension>> {
+    let metadata_path = runtime_dir.join("metadata");
+    let metadata = fs::read_to_string(&metadata_path)
+        .with_context(|| format!("read runtime metadata {}", metadata_path.display()))?;
+    let section = "Extension org.freedesktop.Platform.GL";
+    if !metadata_has_section(&metadata, section) {
+        return Ok(None);
+    }
+
+    let parts = split_runtime_ref(runtime_ref)?;
+    let extension_branch = metadata_value(&metadata, section, "versions")
+        .and_then(|versions| first_extension_version(&versions))
+        .unwrap_or_else(|| parts.branch.clone());
+    let directory = metadata_value(&metadata, section, "directory")
+        .unwrap_or_else(|| "lib/x86_64-linux-gnu/GL".to_string());
+    let runtime_mount_relative = PathBuf::from(directory).join("default");
+    let runtime_mountpoint = runtime_dir.join("files").join(&runtime_mount_relative);
+    fs::create_dir_all(&runtime_mountpoint).with_context(|| {
+        format!(
+            "create GL extension mountpoint {}",
+            runtime_mountpoint.display()
+        )
+    })?;
+
+    let ref_name = format!(
+        "runtime/org.freedesktop.Platform.GL.default/{}/{}",
+        parts.arch, extension_branch
+    );
+    let checkout_dir = project_root
+        .join("runtime")
+        .join("extensions")
+        .join(format!(
+            "org.freedesktop.Platform.GL.default-{}",
+            safe_dir_fragment(&extension_branch)
+        ));
+    checkout_if_missing(&ref_name, &checkout_dir, false)?;
+
+    Ok(Some(RuntimeGlExtension {
+        ref_name,
+        checkout_dir,
+        runtime_mount_relative,
+    }))
 }
 
 pub fn resolve_app(
@@ -520,12 +576,58 @@ pub fn metadata_value(metadata: &str, section: &str, key: &str) -> Option<String
     None
 }
 
+pub fn metadata_has_section(metadata: &str, section: &str) -> bool {
+    metadata.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with('[') && line.ends_with(']') && &line[1..line.len() - 1] == section
+    })
+}
+
 pub fn runtime_checkout_dir(runtime_ref: &str) -> String {
     let mut parts = runtime_ref.split('/');
     let name = parts.next().unwrap_or(runtime_ref);
     let _arch = parts.next();
     let branch = parts.next().unwrap_or("stable");
     format!("{name}-{}", branch.replace('/', "_"))
+}
+
+struct RuntimeRefParts {
+    _name: String,
+    arch: String,
+    branch: String,
+}
+
+fn split_runtime_ref(runtime_ref: &str) -> Result<RuntimeRefParts> {
+    let mut parts = runtime_ref.splitn(3, '/');
+    let name = parts.next().context("missing runtime name")?;
+    let arch = parts.next().context("missing runtime arch")?;
+    let branch = parts.next().context("missing runtime branch")?;
+    Ok(RuntimeRefParts {
+        _name: name.to_string(),
+        arch: arch.to_string(),
+        branch: branch.to_string(),
+    })
+}
+
+fn first_extension_version(versions: &str) -> Option<String> {
+    versions
+        .split(';')
+        .map(str::trim)
+        .find(|version| !version.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn safe_dir_fragment(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn validate_checkout_dir(kind: &str, dir: &Path) -> Result<()> {
