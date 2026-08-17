@@ -1,4 +1,5 @@
 mod desktop;
+mod filesystem;
 mod linuxulator;
 mod runtime;
 mod sandbox;

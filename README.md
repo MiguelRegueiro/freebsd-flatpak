@@ -63,6 +63,18 @@ starts the Linux app. Linux ELF entries use:
 Script/shebang entries are executed directly inside the chroot so their Linux
 runtime interpreter handles them.
 
+The V1 host filesystem profile exposes only selected user directories through
+per-run nullfs mounts:
+
+- `~/Downloads` -> `/home/<user>/Downloads` read-write
+- `~/Documents` -> `/home/<user>/Documents` read-write
+- `~/Pictures` -> `/home/<user>/Pictures` read-only
+
+The launcher does not mount the whole home directory. File and `file://` URI
+arguments under those granted directories are translated to the sandbox-visible
+path before the Linux app starts. The sandbox also writes
+`/var/config/user-dirs.dirs` so GTK file UI has sensible user directory paths.
+
 Validated GUI payloads:
 
 - `org.gnome.Calculator`
@@ -121,7 +133,13 @@ export XDG_DATA_DIRS=/home/regueiro/freebsd-flatpak-poc/exports/share:${XDG_DATA
 - The environment is a small GTK-oriented V1 profile, including
   `GDK_BACKEND=wayland`, `GTK_USE_PORTAL=0`, and `GSK_RENDERER=cairo`.
 - `/tmp` is exposed to preserve the current host session D-Bus socket path.
+- Host filesystem grants are currently a fixed V1 profile:
+  `Downloads`/`Documents` read-write and `Pictures` read-only.
+- File arguments outside that grant profile are left unchanged with a warning;
+  they are not made visible by mounting broader host paths.
 - `/run/host/font-dirs.xml`, AT-SPI, portals, audio, GPU-heavy apps, and
   richer Flatpak permissions are not handled yet.
-- Signal cleanup handles SIGINT, SIGTERM, and SIGHUP. Startup recovery handles
-  stale run records/mounts left by SIGKILL or crashes when possible.
+- Signal cleanup handles SIGINT and SIGTERM by forwarding them to the app and
+  unmounting afterward. SIGHUP is caught but not forwarded so desktop launcher
+  parent exits do not kill GUI apps. Startup recovery handles stale run
+  records/mounts left by SIGKILL or crashes when possible.

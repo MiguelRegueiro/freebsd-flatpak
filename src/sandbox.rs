@@ -1,4 +1,5 @@
 use crate::desktop::DesktopSession;
+use crate::filesystem::HostFilesystem;
 use crate::linuxulator;
 use crate::runtime::FlatpakApp;
 use crate::state;
@@ -84,6 +85,8 @@ impl ChrootNullfsBackend {
     fn prepare(&self, app: &FlatpakApp, desktop: &DesktopSession) -> Result<ChrootInstance> {
         let uid = numeric_id("id", "-u")?;
         let gid = numeric_id("id", "-g")?;
+        let user = host_user(uid);
+        let host_filesystem = HostFilesystem::default_for_user(&user)?;
         let root = self
             .project_root
             .join("runtime")
@@ -91,16 +94,25 @@ impl ChrootNullfsBackend {
             .join(sandbox_name(&app.app_id));
 
         prepare_root(&root, uid)?;
+        host_filesystem.write_xdg_user_dirs_config(&root)?;
         let mut instance = ChrootInstance::new(
             self.project_root.clone(),
             app.app_id.clone(),
             root,
             uid,
             gid,
+            host_filesystem,
         );
 
         instance.mount_nullfs(&app.runtime_dir.join("files"), "usr", true)?;
         instance.mount_nullfs(&app.app_dir.join("files"), "app", true)?;
+        for grant in instance.host_filesystem.grants().to_vec() {
+            instance.mount_nullfs(
+                grant.host_path(),
+                grant.sandbox_target_relative()?,
+                grant.access().is_read_only(),
+            )?;
+        }
         instance.mount_nullfs(&desktop.xdg_runtime_dir, &format!("run/user/{uid}"), false)?;
         instance.mount_nullfs(Path::new("/tmp"), "tmp", false)?;
         instance.mount_special("dev", "devfs", "devfs")?;
@@ -113,6 +125,7 @@ impl ChrootNullfsBackend {
 
 impl SandboxBackend for ChrootNullfsBackend {
     fn run(&self, app: &FlatpakApp, desktop: &DesktopSession) -> Result<ExitStatus> {
+        install_signal_handlers();
         if !desktop.wayland_socket().exists() {
             bail!(
                 "Wayland socket does not exist: {}",
@@ -135,19 +148,34 @@ struct ChrootInstance {
     root: PathBuf,
     uid: u32,
     gid: u32,
-    owned_mounts: Vec<PathBuf>,
+    host_filesystem: HostFilesystem,
+    owned_mounts: Vec<OwnedMount>,
     run_record: Option<PathBuf>,
     cleaned: bool,
 }
 
+#[derive(Debug)]
+struct OwnedMount {
+    path: PathBuf,
+    read_only: bool,
+}
+
 impl ChrootInstance {
-    fn new(project_root: PathBuf, app_id: String, root: PathBuf, uid: u32, gid: u32) -> Self {
+    fn new(
+        project_root: PathBuf,
+        app_id: String,
+        root: PathBuf,
+        uid: u32,
+        gid: u32,
+        host_filesystem: HostFilesystem,
+    ) -> Self {
         Self {
             project_root,
             app_id,
             root,
             uid,
             gid,
+            host_filesystem,
             owned_mounts: Vec::new(),
             run_record: None,
             cleaned: false,
@@ -163,6 +191,8 @@ impl ChrootInstance {
         let source = fs::canonicalize(source)
             .with_context(|| format!("resolve nullfs source {}", source.display()))?;
         let target = self.root.join(target_relative);
+        fs::create_dir_all(&target)
+            .with_context(|| format!("create mount target {}", target.display()))?;
         ensure_mountpoint_free(&target)?;
 
         let mut command = Command::new("doas");
@@ -172,7 +202,10 @@ impl ChrootInstance {
         }
         command.arg(&source).arg(&target);
         run_command(command, &format!("mount nullfs {}", target.display()))?;
-        self.owned_mounts.push(target);
+        self.owned_mounts.push(OwnedMount {
+            path: target,
+            read_only,
+        });
         Ok(())
     }
 
@@ -193,7 +226,10 @@ impl ChrootInstance {
             .arg(source)
             .arg(&target);
         run_command(command, &format!("mount {fs_type} {}", target.display()))?;
-        self.owned_mounts.push(target);
+        self.owned_mounts.push(OwnedMount {
+            path: target,
+            read_only: false,
+        });
         Ok(())
     }
 
@@ -204,8 +240,10 @@ impl ChrootInstance {
         entry: &EntryLaunch,
     ) -> Result<ExitStatus> {
         install_signal_handlers();
-        let user = std::env::var("USER").unwrap_or_else(|_| self.uid.to_string());
-        let env = launch_env(app, desktop, self.uid, &user);
+        let user = host_user(self.uid);
+        let mut env = launch_env(app, desktop, self.uid, &user);
+        env.extend(self.host_filesystem.user_dir_env());
+        let app_args = self.host_filesystem.translate_args(&app.args)?;
 
         eprintln!("launching {} from {}", app.app_id, self.root.display());
         eprintln!(
@@ -214,7 +252,15 @@ impl ChrootInstance {
             app.runtime_dir.display()
         );
         eprintln!("  app: {}", app.app_dir.display());
-        eprintln!("  entry: {}", entry.display(&app.args));
+        for grant in self.host_filesystem.grants() {
+            eprintln!(
+                "  host fs: {} -> {} ({})",
+                grant.host_path().display(),
+                grant.sandbox_path().display(),
+                grant.access().label()
+            );
+        }
+        eprintln!("  entry: {}", entry.display(&app_args));
 
         let mut command = Command::new("doas");
         command
@@ -229,7 +275,7 @@ impl ChrootInstance {
         for (key, value) in env {
             command.arg(format!("{key}={value}"));
         }
-        entry.append_command_args(&mut command, &app.args);
+        entry.append_command_args(&mut command, &app_args);
         command
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
@@ -258,10 +304,10 @@ impl ChrootInstance {
 
     fn cleanup(&mut self) -> Result<()> {
         let mut errors = Vec::new();
-        for mountpoint in self.owned_mounts.iter().rev() {
-            let mut command = Command::new("doas");
-            command.arg("umount").arg(mountpoint);
-            if let Err(error) = run_command(command, &format!("umount {}", mountpoint.display())) {
+        for mount in self.owned_mounts.iter().rev() {
+            if let Err(error) =
+                unmount_mountpoint(&mount.path, mount.read_only, "umount owned mount")
+            {
                 errors.push(format!("{error:#}"));
             }
         }
@@ -501,6 +547,10 @@ fn numeric_id(program: &str, arg: &str) -> Result<u32> {
         .with_context(|| format!("parse numeric id from {text:?}"))
 }
 
+fn host_user(uid: u32) -> String {
+    std::env::var("USER").unwrap_or_else(|_| uid.to_string())
+}
+
 fn ensure_mountpoint_free(target: &Path) -> Result<()> {
     if is_mounted(target)? {
         bail!(
@@ -533,6 +583,19 @@ fn mount_points_under(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn mount_points() -> Result<Vec<PathBuf>> {
+    Ok(mount_infos()?
+        .into_iter()
+        .map(|mount| mount.mountpoint)
+        .collect())
+}
+
+#[derive(Debug)]
+struct MountInfo {
+    mountpoint: PathBuf,
+    options: String,
+}
+
+fn mount_infos() -> Result<Vec<MountInfo>> {
     let output = Command::new("mount").output().context("read mount table")?;
     if !output.status.success() {
         bail!("mount command failed with status {}", output.status);
@@ -543,7 +606,10 @@ fn mount_points() -> Result<Vec<PathBuf>> {
         .filter_map(|line| {
             line.split_once(" on ")
                 .and_then(|(_, rest)| rest.split_once(" ("))
-                .map(|(mountpoint, _)| PathBuf::from(mountpoint))
+                .map(|(mountpoint, options)| MountInfo {
+                    mountpoint: PathBuf::from(mountpoint),
+                    options: options.trim_end_matches(')').to_string(),
+                })
         })
         .collect())
 }
@@ -555,11 +621,8 @@ fn unmount_under(root: &Path) -> Result<()> {
 fn unmount_mountpoints(mountpoints: Vec<PathBuf>) -> Result<()> {
     let mut errors = Vec::new();
     for mountpoint in mountpoints {
-        let mut command = Command::new("doas");
-        command.arg("umount").arg(&mountpoint);
-        if let Err(error) =
-            run_command(command, &format!("recover umount {}", mountpoint.display()))
-        {
+        let read_only = mountpoint_is_read_only(&mountpoint).unwrap_or(false);
+        if let Err(error) = unmount_mountpoint(&mountpoint, read_only, "recover umount") {
             errors.push(format!("{error:#}"));
         }
     }
@@ -569,6 +632,51 @@ fn unmount_mountpoints(mountpoints: Vec<PathBuf>) -> Result<()> {
     } else {
         bail!("stale mount recovery failed:\n{}", errors.join("\n"));
     }
+}
+
+fn mountpoint_is_read_only(mountpoint: &Path) -> Result<bool> {
+    Ok(mount_infos()?
+        .into_iter()
+        .find(|mount| mount.mountpoint == mountpoint)
+        .map(|mount| {
+            mount
+                .options
+                .split(',')
+                .map(str::trim)
+                .any(|option| option == "read-only")
+        })
+        .unwrap_or(false))
+}
+
+fn unmount_mountpoint(mountpoint: &Path, allow_force: bool, action: &str) -> Result<()> {
+    let mut last_error = None;
+    for _ in 0..8 {
+        let mut command = Command::new("doas");
+        command.arg("umount").arg(mountpoint);
+        match run_command(command, &format!("{action} {}", mountpoint.display())) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                thread::sleep(Duration::from_millis(250));
+            }
+        }
+    }
+
+    if allow_force {
+        eprintln!(
+            "warning: normal unmount stayed busy for read-only mount {}; trying umount -f",
+            mountpoint.display()
+        );
+        let mut command = Command::new("doas");
+        command.arg("umount").arg("-f").arg(mountpoint);
+        run_command(command, &format!("{action} -f {}", mountpoint.display()))?;
+        return Ok(());
+    }
+
+    let Some(error) = last_error else {
+        bail!("{action} {} was not attempted", mountpoint.display());
+    };
+    Err(error)
 }
 
 fn run_command(mut command: Command, action: &str) -> Result<()> {
@@ -610,6 +718,10 @@ fn install_signal_handlers() {
 
 extern "C" fn handle_signal(signal: libc::c_int) {
     LAST_SIGNAL.store(signal, Ordering::SeqCst);
+    if signal == libc::SIGHUP {
+        return;
+    }
+
     let pid = ACTIVE_CHILD_PID.load(Ordering::SeqCst);
     if pid > 0 {
         unsafe {

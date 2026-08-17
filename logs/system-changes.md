@@ -120,3 +120,26 @@ hyprctl keyword env XDG_DATA_DIRS,/home/regueiro/freebsd-flatpak-poc/exports/sha
 
 This changes only the current Hyprland session environment. It is reversible by
 setting `XDG_DATA_DIRS` back to the desired value or by restarting the session.
+
+## 2026-08-17 Host Filesystem Follow-up
+
+No persistent system configuration changes were made.
+
+The new V1 host filesystem layer uses per-run nullfs mounts under each app's
+project-local chroot only. The default grant profile is:
+
+- `/home/regueiro/Downloads` read-write
+- `/home/regueiro/Documents` read-write
+- `/home/regueiro/Pictures` read-only
+
+These mounts are created only while an app is running and are removed by the
+existing sandbox cleanup path.
+
+Validation created two host files under `/home/regueiro/Documents`:
+
+- `/home/regueiro/Documents/freebsd-flatpak-poc-open-edit.txt`
+- `/home/regueiro/Documents/freebsd-flatpak-poc-new-save.txt`
+
+Both were edited/saved by Linux Flatpak Text Editor through the per-run
+read-write `Documents` nullfs mount. Post-run checks found no remaining project
+chroot mounts and no run records.
