@@ -2,12 +2,14 @@ mod audio;
 mod cursor;
 mod desktop;
 mod filesystem;
+mod fonts;
 mod graphics;
 mod linuxulator;
 mod portal;
 mod runtime;
 mod sandbox;
 mod state;
+mod video;
 
 use anyhow::{bail, Context, Result};
 use sandbox::SandboxBackend;

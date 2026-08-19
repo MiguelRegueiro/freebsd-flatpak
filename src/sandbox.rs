@@ -2,11 +2,13 @@ use crate::audio::HostAudio;
 use crate::cursor::HostCursorTheme;
 use crate::desktop::DesktopSession;
 use crate::filesystem::HostFilesystem;
+use crate::fonts::HostFonts;
 use crate::graphics::HostGraphics;
 use crate::linuxulator;
 use crate::portal::HostPortal;
 use crate::runtime::{self, FlatpakApp};
 use crate::state;
+use crate::video::HostVideo;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
 use std::fs;
@@ -105,6 +107,7 @@ impl ChrootNullfsBackend {
     fn prepare(&self, app: &FlatpakApp, desktop: &DesktopSession) -> Result<ChrootInstance> {
         let uid = numeric_id("id", "-u")?;
         let gid = numeric_id("id", "-g")?;
+        let supplementary_gids = numeric_ids("id", "-G")?;
         let user = host_user(uid);
         let root = self
             .project_root
@@ -122,9 +125,12 @@ impl ChrootNullfsBackend {
         let host_audio =
             HostAudio::from_metadata_file(&metadata_path, &desktop.xdg_runtime_dir, uid)?;
         let host_cursor = HostCursorTheme::from_host();
+        let host_fonts = HostFonts::from_host();
         let host_portal =
             HostPortal::prepare(&self.project_root, &app.app_id, desktop, uid, &root)?;
         let host_graphics = HostGraphics::prepare(&self.project_root, app)?;
+        let host_video = HostVideo::prepare(&self.project_root, app)?;
+        let app_extensions = runtime::ensure_app_codec_extensions(&self.project_root, app)?;
 
         prepare_root(
             &root,
@@ -135,22 +141,37 @@ impl ChrootNullfsBackend {
         write_flatpak_info(&root, app)?;
         host_filesystem.write_xdg_user_dirs_config(&root)?;
         host_audio.prepare(&root)?;
+        host_fonts.prepare(&root)?;
         let mut instance = ChrootInstance::new(
             self.project_root.clone(),
             app.app_id.clone(),
             root,
             uid,
             gid,
+            supplementary_gids,
             host_filesystem,
             host_audio,
             host_cursor,
+            host_fonts,
             host_portal,
             host_graphics,
+            host_video,
+            app_extensions,
         );
 
         instance.mount_nullfs(&app.runtime_dir.join("files"), "usr", true)?;
         instance.mount_nullfs(&app.app_dir.join("files"), "app", true)?;
+        for extension in instance.app_extensions.clone() {
+            instance.mount_nullfs(
+                &extension.checkout_dir.join("files"),
+                PathBuf::from("app").join(&extension.app_mount_relative),
+                true,
+            )?;
+        }
         for mount in instance.host_graphics.runtime_mounts() {
+            instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
+        }
+        for mount in instance.host_video.runtime_mounts() {
             instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
         }
         for grant in instance.host_filesystem.grants().to_vec() {
@@ -163,12 +184,16 @@ impl ChrootNullfsBackend {
         for mount in instance.host_cursor.mounts().to_vec() {
             instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
         }
+        for mount in instance.host_fonts.mounts().to_vec() {
+            instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
+        }
         instance.mount_nullfs(&desktop.xdg_runtime_dir, &format!("run/user/{uid}"), false)?;
         if let Some(doc_dir) = instance.host_portal.doc_dir().map(Path::to_path_buf) {
             instance.mount_nullfs(&doc_dir, &format!("run/user/{uid}/doc"), true)?;
         }
         instance.mount_nullfs(Path::new("/tmp"), "tmp", false)?;
         instance.mount_special("dev", "devfs", "devfs")?;
+        instance.mount_special("dev/fd", "fdescfs", "fdescfs")?;
         instance.mount_tmpfs("dev/shm", "mode=1777")?;
         instance.mount_special("proc", "linprocfs", "linprocfs")?;
         instance.mount_special("sys", "linsysfs", "linsysfs")?;
@@ -205,11 +230,15 @@ struct ChrootInstance {
     root: PathBuf,
     uid: u32,
     gid: u32,
+    supplementary_gids: Vec<u32>,
     host_filesystem: HostFilesystem,
     host_audio: HostAudio,
     host_cursor: HostCursorTheme,
+    host_fonts: HostFonts,
     host_portal: HostPortal,
     host_graphics: HostGraphics,
+    host_video: HostVideo,
+    app_extensions: Vec<runtime::AppExtension>,
     owned_mounts: Vec<OwnedMount>,
     run_record: Option<PathBuf>,
     cleaned: bool,
@@ -228,11 +257,15 @@ impl ChrootInstance {
         root: PathBuf,
         uid: u32,
         gid: u32,
+        supplementary_gids: Vec<u32>,
         host_filesystem: HostFilesystem,
         host_audio: HostAudio,
         host_cursor: HostCursorTheme,
+        host_fonts: HostFonts,
         host_portal: HostPortal,
         host_graphics: HostGraphics,
+        host_video: HostVideo,
+        app_extensions: Vec<runtime::AppExtension>,
     ) -> Self {
         Self {
             project_root,
@@ -240,11 +273,15 @@ impl ChrootInstance {
             root,
             uid,
             gid,
+            supplementary_gids,
             host_filesystem,
             host_audio,
             host_cursor,
+            host_fonts,
             host_portal,
             host_graphics,
+            host_video,
+            app_extensions,
             owned_mounts: Vec::new(),
             run_record: None,
             cleaned: false,
@@ -348,7 +385,21 @@ impl ChrootInstance {
         env.extend(self.host_audio.env());
         env.extend(self.host_cursor.env());
         env.extend(self.host_portal.env());
+        let metadata_env = app_metadata_env(app, &env)?;
+        merge_env(&mut env, metadata_env);
         merge_env(&mut env, self.host_graphics.env());
+        prepend_env_paths(
+            &mut env,
+            "LD_LIBRARY_PATH",
+            self.host_video.ld_library_paths(),
+        );
+        prepend_env_paths(
+            &mut env,
+            "LD_LIBRARY_PATH",
+            app_extension_ld_paths(&self.app_extensions),
+        );
+        merge_env(&mut env, self.host_video.env());
+        ensure_metadata_runtime_dirs(&env, &desktop.xdg_runtime_dir, self.uid, &app.app_id)?;
         let translated_args = self.host_filesystem.translate_args(&app.args)?;
         let app_args = launch_args(app, translated_args)?;
 
@@ -383,6 +434,12 @@ impl ChrootInstance {
         for warning in self.host_cursor.warnings() {
             eprintln!("  cursor warning: {warning}");
         }
+        for line in self.host_fonts.describe() {
+            eprintln!("  fonts: {line}");
+        }
+        for warning in self.host_fonts.warnings() {
+            eprintln!("  fonts warning: {warning}");
+        }
         for line in self.host_portal.describe() {
             eprintln!("  portal: {line}");
         }
@@ -395,6 +452,20 @@ impl ChrootInstance {
         for warning in self.host_graphics.warnings() {
             eprintln!("  graphics warning: {warning}");
         }
+        for line in self.host_video.describe() {
+            eprintln!("  video: {line}");
+        }
+        for warning in self.host_video.warnings() {
+            eprintln!("  video warning: {warning}");
+        }
+        for extension in &self.app_extensions {
+            eprintln!(
+                "  app extension: {} ({}) -> /app/{}",
+                extension.name,
+                extension.ref_name,
+                extension.app_mount_relative.display()
+            );
+        }
         eprintln!("  entry: {}", entry.display(&app_args));
 
         let mut command = Command::new("doas");
@@ -403,10 +474,13 @@ impl ChrootInstance {
             .arg("-u")
             .arg(self.uid.to_string())
             .arg("-g")
-            .arg(self.gid.to_string())
-            .arg(&self.root)
-            .arg("/usr/bin/env")
-            .arg("-i");
+            .arg(self.gid.to_string());
+        if !self.supplementary_gids.is_empty() {
+            command
+                .arg("-G")
+                .arg(join_numeric_ids(&self.supplementary_gids));
+        }
+        command.arg(&self.root).arg("/usr/bin/env").arg("-i");
         for (key, value) in env {
             command.arg(format!("{key}={value}"));
         }
@@ -673,6 +747,7 @@ fn launch_env(
     }
     push_host_env(&mut env, "XDG_CURRENT_DESKTOP");
     push_host_env(&mut env, "XDG_SESSION_DESKTOP");
+    push_host_env(&mut env, "MOZ_ENABLE_WAYLAND");
     if let Some(address) = desktop.chroot_dbus_address(uid) {
         env.push(("DBUS_SESSION_BUS_ADDRESS".to_string(), address));
     }
@@ -688,6 +763,102 @@ fn push_host_env(env: &mut Vec<(String, String)>, key: &str) {
     }
 }
 
+fn app_metadata_env(
+    app: &FlatpakApp,
+    base_env: &[(String, String)],
+) -> Result<Vec<(String, String)>> {
+    let metadata_path = app.app_dir.join("metadata");
+    let metadata = fs::read_to_string(&metadata_path)
+        .with_context(|| format!("read Flatpak metadata {}", metadata_path.display()))?;
+    let mut env = base_env.to_vec();
+    let mut updates = Vec::new();
+    for (key, raw_value) in runtime::metadata_section_entries(&metadata, "Environment") {
+        let value = expand_env_value(&raw_value, &env);
+        if let Some((_, existing)) = env
+            .iter_mut()
+            .find(|(existing_key, _)| existing_key == &key)
+        {
+            *existing = value.clone();
+        } else {
+            env.push((key.clone(), value.clone()));
+        }
+        updates.push((key, value));
+    }
+    Ok(updates)
+}
+
+fn expand_env_value(value: &str, env: &[(String, String)]) -> String {
+    let mut expanded = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '$' {
+            expanded.push(ch);
+            continue;
+        }
+
+        if chars.peek() == Some(&'{') {
+            chars.next();
+            let mut name = String::new();
+            while let Some(next) = chars.next() {
+                if next == '}' {
+                    break;
+                }
+                name.push(next);
+            }
+            expanded.push_str(env_value(env, &name).unwrap_or_default());
+            continue;
+        }
+
+        let mut name = String::new();
+        while let Some(next) = chars.peek().copied() {
+            if next == '_' || next.is_ascii_alphanumeric() {
+                name.push(next);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        if name.is_empty() {
+            expanded.push('$');
+        } else {
+            expanded.push_str(env_value(env, &name).unwrap_or_default());
+        }
+    }
+    expanded
+}
+
+fn env_value<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    env.iter()
+        .rev()
+        .find(|(existing_key, _)| existing_key == key)
+        .map(|(_, value)| value.as_str())
+}
+
+fn ensure_metadata_runtime_dirs(
+    env: &[(String, String)],
+    host_runtime_dir: &Path,
+    uid: u32,
+    app_id: &str,
+) -> Result<()> {
+    let sandbox_runtime_prefix = PathBuf::from(format!("/run/user/{uid}/app/{app_id}"));
+    for (key, value) in env {
+        if !key.ends_with("_DIR") {
+            continue;
+        }
+        let path = Path::new(value);
+        if !path.is_absolute() || !path.starts_with(&sandbox_runtime_prefix) {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(format!("/run/user/{uid}"))
+            .with_context(|| format!("map sandbox runtime directory {value}"))?;
+        let host_path = host_runtime_dir.join(relative);
+        fs::create_dir_all(&host_path)
+            .with_context(|| format!("create runtime directory {}", host_path.display()))?;
+    }
+    Ok(())
+}
+
 fn merge_env(env: &mut Vec<(String, String)>, updates: Vec<(String, String)>) {
     for (key, value) in updates {
         if let Some((_, existing)) = env
@@ -699,6 +870,38 @@ fn merge_env(env: &mut Vec<(String, String)>, updates: Vec<(String, String)>) {
             env.push((key, value));
         }
     }
+}
+
+fn prepend_env_paths(env: &mut Vec<(String, String)>, key: &str, paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+
+    let prefix = paths.join(":");
+    if let Some((_, existing)) = env.iter_mut().find(|(existing_key, _)| existing_key == key) {
+        if existing.is_empty() {
+            *existing = prefix;
+        } else {
+            *existing = format!("{prefix}:{existing}");
+        }
+    } else {
+        env.push((key.to_string(), prefix));
+    }
+}
+
+fn app_extension_ld_paths(extensions: &[runtime::AppExtension]) -> Vec<String> {
+    extensions
+        .iter()
+        .filter_map(|extension| {
+            extension.ld_library_relative.as_ref().map(|relative| {
+                PathBuf::from("/app")
+                    .join(&extension.app_mount_relative)
+                    .join(relative)
+                    .display()
+                    .to_string()
+            })
+        })
+        .collect()
 }
 
 fn launch_args(app: &FlatpakApp, translated_args: Vec<String>) -> Result<Vec<String>> {
@@ -867,6 +1070,28 @@ fn numeric_id(program: &str, arg: &str) -> Result<u32> {
     let text = String::from_utf8(output.stdout)?.trim().to_string();
     text.parse::<u32>()
         .with_context(|| format!("parse numeric id from {text:?}"))
+}
+
+fn numeric_ids(program: &str, arg: &str) -> Result<Vec<u32>> {
+    let output = Command::new(program)
+        .arg(arg)
+        .output()
+        .with_context(|| format!("run {program} {arg}"))?;
+    if !output.status.success() {
+        bail!("{program} {arg} failed with status {}", output.status);
+    }
+    let text = String::from_utf8(output.stdout)?;
+    text.split_whitespace()
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .with_context(|| format!("parse numeric id from {value:?}"))
+        })
+        .collect()
+}
+
+fn join_numeric_ids(ids: &[u32]) -> String {
+    ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
 }
 
 fn host_user(uid: u32) -> String {
@@ -1245,6 +1470,70 @@ mod tests {
         );
 
         assert!(compatibility_args(&app, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn app_metadata_environment_expands_existing_sandbox_values() {
+        let app = app_with_metadata(
+            "[Environment]\nMESA_SHADER_CACHE_DIR=$XDG_RUNTIME_DIR/app/$FLATPAK_ID/cache/mesa_shader_cache_db\nGTK_PATH=/app/lib/gtkmodules\n",
+        );
+        let base_env = vec![
+            ("XDG_RUNTIME_DIR".to_string(), "/run/user/1001".to_string()),
+            ("FLATPAK_ID".to_string(), "org.example.App".to_string()),
+        ];
+
+        assert_eq!(
+            app_metadata_env(&app, &base_env).unwrap(),
+            vec![
+                (
+                    "MESA_SHADER_CACHE_DIR".to_string(),
+                    "/run/user/1001/app/org.example.App/cache/mesa_shader_cache_db".to_string()
+                ),
+                ("GTK_PATH".to_string(), "/app/lib/gtkmodules".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn app_metadata_environment_supports_braced_variables() {
+        let app =
+            app_with_metadata("[Environment]\nEXAMPLE=${XDG_RUNTIME_DIR}/app/${FLATPAK_ID}\n");
+        let base_env = vec![
+            ("XDG_RUNTIME_DIR".to_string(), "/run/user/1001".to_string()),
+            ("FLATPAK_ID".to_string(), "org.example.App".to_string()),
+        ];
+
+        assert_eq!(
+            app_metadata_env(&app, &base_env).unwrap(),
+            vec![(
+                "EXAMPLE".to_string(),
+                "/run/user/1001/app/org.example.App".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn metadata_runtime_dirs_are_created_inside_app_runtime_scope() {
+        let dir = test_dir("metadata-runtime-dirs");
+        let host_runtime = dir.join("xdg-runtime");
+        fs::create_dir_all(&host_runtime).unwrap();
+        let env = vec![
+            (
+                "MESA_SHADER_CACHE_DIR".to_string(),
+                "/run/user/1001/app/org.example.App/cache/mesa_shader_cache_db".to_string(),
+            ),
+            (
+                "OTHER_DIR".to_string(),
+                "/run/user/1001/other/cache".to_string(),
+            ),
+        ];
+
+        ensure_metadata_runtime_dirs(&env, &host_runtime, 1001, "org.example.App").unwrap();
+
+        assert!(host_runtime
+            .join("app/org.example.App/cache/mesa_shader_cache_db")
+            .is_dir());
+        assert!(!host_runtime.join("other/cache").exists());
     }
 
     #[test]

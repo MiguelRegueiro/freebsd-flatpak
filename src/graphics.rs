@@ -96,7 +96,7 @@ impl HostGraphics {
         }
 
         let gl_root = "/usr/lib/x86_64-linux-gnu/GL/default";
-        vec![
+        let mut env = vec![
             (
                 "LD_LIBRARY_PATH".to_string(),
                 format!(
@@ -121,7 +121,15 @@ impl HostGraphics {
                     "/etc/egl/egl_external_platform.d:{gl_root}/egl/egl_external_platform.d:/usr/share/egl/egl_external_platform.d"
                 ),
             ),
-        ]
+        ];
+
+        if let Some(icd) = self.drm.as_ref().and_then(|drm| drm.device.vulkan_icd()) {
+            let icd_path = format!("{gl_root}/lib/vulkan/icd.d/{icd}");
+            env.push(("VK_DRIVER_FILES".to_string(), icd_path.clone()));
+            env.push(("VK_ICD_FILENAMES".to_string(), icd_path));
+        }
+
+        env
     }
 
     pub fn describe(&self) -> Vec<String> {
@@ -143,6 +151,9 @@ impl HostGraphics {
                 "DRM PCI: {} vendor={} device={} driver={}",
                 drm.device.pci_slot, drm.device.vendor, drm.device.device, drm.device.driver
             ));
+            if let Some(icd) = drm.device.vulkan_icd() {
+                lines.push(format!("Vulkan ICD: {icd}"));
+            }
             for mount in &drm.mounts {
                 lines.push(format!(
                     "sysfs: {} -> {}",
@@ -268,6 +279,15 @@ impl DrmDevice {
             subsystem_device: pci.subsystem_device,
             driver,
         })
+    }
+
+    fn vulkan_icd(&self) -> Option<&'static str> {
+        match trim_hex(&self.vendor) {
+            "8086" => Some("intel_icd.x86_64.json"),
+            "1002" | "1022" => Some("radeon_icd.x86_64.json"),
+            "1af4" => Some("virtio_icd.x86_64.json"),
+            _ => None,
+        }
     }
 }
 
@@ -564,7 +584,7 @@ fn process_alive(pid: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{hex_prefixed, parse_hex_or_decimal, pciconf_locator};
+    use super::{hex_prefixed, parse_hex_or_decimal, pciconf_locator, DrmDevice};
 
     #[test]
     fn converts_linux_pci_slot_to_freebsd_locator() {
@@ -581,5 +601,25 @@ mod tests {
     fn parses_pci_numbers_as_hex() {
         assert_eq!(parse_hex_or_decimal("1c").unwrap(), 28);
         assert_eq!(parse_hex_or_decimal("02").unwrap(), 2);
+    }
+
+    #[test]
+    fn chooses_intel_vulkan_icd_from_pci_vendor() {
+        let device = DrmDevice {
+            card_name: "card0".to_string(),
+            card_minor: 0,
+            render_name: "renderD128".to_string(),
+            render_minor: 128,
+            pci_slot: "0000:00:02.0".to_string(),
+            vendor: "0x8086".to_string(),
+            device: "0x9b41".to_string(),
+            class: "0x030000".to_string(),
+            revision: "0x00".to_string(),
+            subsystem_vendor: "0x0000".to_string(),
+            subsystem_device: "0x0000".to_string(),
+            driver: "i915".to_string(),
+        };
+
+        assert_eq!(device.vulkan_icd(), Some("intel_icd.x86_64.json"));
     }
 }

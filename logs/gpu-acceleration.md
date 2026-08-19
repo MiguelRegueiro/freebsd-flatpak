@@ -109,3 +109,69 @@ EGL
 ```
 
 GUI/browser smoothness and `about:support` graphics status are pending user confirmation.
+
+## Correctness and performance follow-up
+
+Follow-up testing compared Zen with native FreeBSD Firefox:
+
+- Native Firefox `glxtest` reports `DRI_DRIVER=iris`, Intel UHD Graphics, EGL, and
+  `/dev/dri/renderD128`.
+- Zen Flatpak `glxtest` reports the same Intel `iris` renderer through Linuxulator after the GL
+  extension and sysfs bridge are present.
+- Native Firefox carries `MOZ_ENABLE_WAYLAND=1`; both native Firefox and Zen run against the host
+  Hyprland Wayland socket.
+- The remaining `libEGL`/Zink warnings occur during Mesa probing. They do not by themselves prove a
+  software-rendering fallback, because the explicit Firefox glxtest path now succeeds with Intel
+  iris.
+- Zen still emitted `RenderCompositorSWGL failed mapping default framebuffer` during a browser run,
+  so WebRender/compositor status must be checked in `about:support` rather than inferred from
+  glxtest alone.
+
+Two additional generic sandbox omissions were found:
+
+1. The Freedesktop runtime's fontconfig includes `/run/host/font-dirs.xml`; the sandbox did not
+   provide that file, causing repeated fontconfig errors. The launcher now creates a sandbox-local
+   `/run/host/font-dirs.xml`, exposes host font directories read-only when present, and keeps
+   fontconfig caches sandbox-local.
+2. Firefox's Linux memfd read-only duplication path opens `/proc/self/fd/N`. In the sandbox,
+   `linprocfs` pointed `/proc/self/fd` at `/dev/fd`, but plain `devfs` exposed only `0`, `1`, and
+   `2`. Mounting `fdescfs` at `/dev/fd` made `/proc/self/fd/N` usable and removed the
+   `read-only dup failed ... not using memfd` warning.
+
+Hardware video decoding is separate from GPU rendering. Native Firefox loaded
+`/usr/local/lib/dri/iHD_drv_video.so` in its RDD process during video playback. Zen loaded `libva`
+but no Intel VAAPI driver before the fix, because `org.freedesktop.Platform.VAAPI.Intel` was not
+mounted. The launcher now resolves and mounts that runtime extension for Intel DRM hosts and adds
+its library/driver paths to the sandbox environment.
+
+Additional follow-up:
+
+- The `org.freedesktop.Platform.ffmpeg-full` app extension was present in Zen metadata but not
+  mounted under `/app/lib/ffmpeg`. The launcher now resolves app-declared
+  `org.freedesktop.Platform.ffmpeg-full` extensions, mounts them read-only at the app-declared
+  directory, and prepends their `add-ld-path` to `LD_LIBRARY_PATH`. Zen media decoder processes now
+  load `libavcodec`, `libavutil`, `libx264`, and `libx265` from the real Flatpak extension.
+- The remaining Zink startup failure was caused by Vulkan ICD discovery. The GL extension contained
+  the Intel ICD, but the sandbox did not point Vulkan at it. The graphics bridge now selects a
+  vendor-appropriate ICD from the detected DRM PCI vendor and sets `VK_DRIVER_FILES` and
+  `VK_ICD_FILENAMES`. After this, the `ZINK: vkCreateInstance failed
+  (VK_ERROR_INCOMPATIBLE_DRIVER)` and `egl: failed to create dri2 screen` warnings disappeared.
+- Zen metadata declares `MESA_SHADER_CACHE_DIR=$XDG_RUNTIME_DIR/app/$FLATPAK_ID/cache/mesa_shader_cache_db`.
+  The launcher previously ignored `[Environment]`, so that cache path was absent. The sandbox now
+  applies Flatpak metadata environment entries with `$VAR`/`${VAR}` expansion and creates declared
+  app-scoped runtime directories. The fresh Zen run has `MESA_SHADER_CACHE_DIR` expanded and Mesa is
+  writing cache files under the host runtime directory.
+- The only startup Mesa warnings left in the latest run are:
+  - `libEGL warning: failed to get driver name for fd -1`
+  - `libEGL warning: MESA-LOADER: failed to retrieve device information`
+  These occur during probing. They are not currently correlated with a software renderer fallback,
+  because the browser process has the Flatpak Mesa GL extension, `libEGL_mesa`, `libgbm`,
+  `libdrm_intel`, and `libgallium` mapped.
+- VAAPI is available inside the same mounted Zen sandbox: `/app/zen/vaapitest -d
+  /dev/dri/renderD128` reports `VAAPI_SUPPORTED TRUE`. During YouTube playback, Zen still has not
+  mapped `iHD_drv_video.so` in its media decoder process. That points to Firefox/Zen's media decode
+  selection or sandboxing, not to a missing FreeBSD DRM device or missing Flatpak VAAPI extension.
+- Native Firefox is much newer than this Zen Flatpak: native Firefox is `154.0` build
+  `20260813082423`, while Zen is Gecko `134.0` build `20250110005355`. Any final performance
+  comparison has to account for browser-version differences as well as the Linuxulator/sandbox
+  bridge.

@@ -54,6 +54,23 @@ pub struct RuntimeGlExtension {
 }
 
 #[derive(Debug, Clone)]
+pub struct RuntimeVaapiExtension {
+    pub ref_name: String,
+    pub checkout_dir: PathBuf,
+    pub runtime_mount_relative: PathBuf,
+    pub ld_library_relative: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppExtension {
+    pub name: String,
+    pub ref_name: String,
+    pub checkout_dir: PathBuf,
+    pub app_mount_relative: PathBuf,
+    pub ld_library_relative: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
 pub struct SearchResult {
     pub app_id: String,
     pub app_ref: String,
@@ -303,6 +320,125 @@ pub fn ensure_default_gl_extension(
         checkout_dir,
         runtime_mount_relative,
     }))
+}
+
+pub fn ensure_intel_vaapi_extension(
+    project_root: &Path,
+    runtime_ref: &str,
+    runtime_dir: &Path,
+) -> Result<Option<RuntimeVaapiExtension>> {
+    let metadata_path = runtime_dir.join("metadata");
+    let metadata = fs::read_to_string(&metadata_path)
+        .with_context(|| format!("read runtime metadata {}", metadata_path.display()))?;
+    let section = "Extension org.freedesktop.Platform.VAAPI.Intel";
+    if !metadata_has_section(&metadata, section) {
+        return Ok(None);
+    }
+
+    let parts = split_runtime_ref(runtime_ref)?;
+    let extension_branch = metadata_value(&metadata, section, "version")
+        .or_else(|| {
+            metadata_value(&metadata, section, "versions")
+                .and_then(|versions| first_extension_version(&versions))
+        })
+        .unwrap_or_else(|| parts.branch.clone());
+    let directory = metadata_value(&metadata, section, "directory")
+        .unwrap_or_else(|| "lib/x86_64-linux-gnu/dri/intel-vaapi-driver".to_string());
+    let runtime_mount_relative = PathBuf::from(directory);
+    let runtime_mountpoint = runtime_dir.join("files").join(&runtime_mount_relative);
+    fs::create_dir_all(&runtime_mountpoint).with_context(|| {
+        format!(
+            "create VAAPI extension mountpoint {}",
+            runtime_mountpoint.display()
+        )
+    })?;
+
+    let ref_name = format!(
+        "runtime/org.freedesktop.Platform.VAAPI.Intel/{}/{}",
+        parts.arch, extension_branch
+    );
+    let checkout_dir = project_root
+        .join("runtime")
+        .join("extensions")
+        .join(format!(
+            "org.freedesktop.Platform.VAAPI.Intel-{}",
+            safe_dir_fragment(&extension_branch)
+        ));
+    checkout_if_missing(&ref_name, &checkout_dir, false)?;
+
+    let ld_library_relative = metadata_value(&metadata, section, "add-ld-path")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+
+    Ok(Some(RuntimeVaapiExtension {
+        ref_name,
+        checkout_dir,
+        runtime_mount_relative,
+        ld_library_relative,
+    }))
+}
+
+pub fn ensure_app_codec_extensions(
+    project_root: &Path,
+    app: &FlatpakApp,
+) -> Result<Vec<AppExtension>> {
+    let metadata_path = app.app_dir.join("metadata");
+    let metadata = fs::read_to_string(&metadata_path)
+        .with_context(|| format!("read app metadata {}", metadata_path.display()))?;
+    let runtime_parts = split_runtime_ref(&app.runtime_ref)?;
+    let mut extensions = Vec::new();
+
+    for section in metadata_sections_with_prefix(&metadata, "Extension ") {
+        let name = section.trim_start_matches("Extension ");
+        if name != "org.freedesktop.Platform.ffmpeg-full" {
+            continue;
+        }
+
+        let Some(directory) = metadata_value(&metadata, &section, "directory") else {
+            continue;
+        };
+        let extension_branch = metadata_value(&metadata, &section, "version")
+            .or_else(|| {
+                metadata_value(&metadata, &section, "versions")
+                    .and_then(|versions| first_extension_version(&versions))
+            })
+            .unwrap_or_else(|| runtime_parts.branch.clone());
+        let app_mount_relative = PathBuf::from(directory);
+        let app_mountpoint = app.app_dir.join("files").join(&app_mount_relative);
+        fs::create_dir_all(&app_mountpoint).with_context(|| {
+            format!(
+                "create app extension mountpoint {}",
+                app_mountpoint.display()
+            )
+        })?;
+
+        let ref_name = format!(
+            "runtime/{}/{}/{}",
+            name, runtime_parts.arch, extension_branch
+        );
+        let checkout_dir = project_root
+            .join("runtime")
+            .join("extensions")
+            .join(format!(
+                "{}-{}",
+                safe_dir_fragment(name),
+                safe_dir_fragment(&extension_branch)
+            ));
+        checkout_if_missing(&ref_name, &checkout_dir, false)?;
+        let ld_library_relative = metadata_value(&metadata, &section, "add-ld-path")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from);
+
+        extensions.push(AppExtension {
+            name: name.to_string(),
+            ref_name,
+            checkout_dir,
+            app_mount_relative,
+            ld_library_relative,
+        });
+    }
+
+    Ok(extensions)
 }
 
 pub fn resolve_app(
@@ -576,11 +712,54 @@ pub fn metadata_value(metadata: &str, section: &str, key: &str) -> Option<String
     None
 }
 
+pub fn metadata_section_entries(metadata: &str, section: &str) -> Vec<(String, String)> {
+    let mut current = "";
+    let mut entries = Vec::new();
+    for line in metadata.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            current = &line[1..line.len() - 1];
+            continue;
+        }
+        if current != section {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        entries.push((key.to_string(), value.trim().to_string()));
+    }
+    entries
+}
+
 pub fn metadata_has_section(metadata: &str, section: &str) -> bool {
     metadata.lines().any(|line| {
         let line = line.trim();
         line.starts_with('[') && line.ends_with(']') && &line[1..line.len() - 1] == section
     })
+}
+
+fn metadata_sections_with_prefix(metadata: &str, prefix: &str) -> Vec<String> {
+    metadata
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.starts_with('[') && line.ends_with(']') {
+                let section = &line[1..line.len() - 1];
+                if section.starts_with(prefix) {
+                    return Some(section.to_string());
+                }
+            }
+            None
+        })
+        .collect()
 }
 
 pub fn runtime_checkout_dir(runtime_ref: &str) -> String {
