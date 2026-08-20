@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use glib::{Bytes, Variant, VariantTy};
 use miniz_oxide::inflate::decompress_to_vec;
 use miniz_oxide::inflate::decompress_to_vec_zlib;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs as unix_fs;
@@ -166,7 +166,8 @@ pub fn resolve_remote_app(app_id: &str) -> Result<RemoteApp> {
     let arch = host_flatpak_arch()?;
     let summary_path = fetch_summary()?;
     let refs = parse_summary_refs(&summary_path)?;
-    let app_remote_ref = choose_app_ref(&refs, app_id, &arch)?;
+    let app_id = resolve_current_app_id(&refs, app_id, &arch)?;
+    let app_remote_ref = choose_app_ref(&refs, &app_id, &arch)?;
     let app_commit = fetch_commit(&app_remote_ref.checksum)?;
     let metadata_app_id = metadata_value(&app_commit.metadata, "Application", "name")
         .context("remote app metadata has no Application/name")?;
@@ -194,7 +195,7 @@ pub fn resolve_remote_app(app_id: &str) -> Result<RemoteApp> {
 
     let app_ref_parts = split_flatpak_ref(&app_remote_ref.name)?;
     Ok(RemoteApp {
-        app_id: app_id.to_string(),
+        app_id,
         app_ref: app_remote_ref.name,
         app_commit: app_remote_ref.checksum,
         arch,
@@ -542,15 +543,7 @@ fn fetch_summary() -> Result<PathBuf> {
     }
 
     let _ = fs::remove_file(&tmp);
-    if path.exists() {
-        eprintln!(
-            "warning: could not refresh Flathub summary, using cached {}",
-            path.display()
-        );
-        return Ok(path);
-    }
-
-    bail!("fetch Flathub summary failed with status {status}");
+    bail!("refresh Flathub summary failed with status {status}");
 }
 
 fn parse_summary_refs(path: &Path) -> Result<Vec<RemoteRef>> {
@@ -570,6 +563,217 @@ fn parse_summary_refs(path: &Path) -> Result<Vec<RemoteRef>> {
     }
 
     Ok(refs)
+}
+
+fn resolve_current_app_id(refs: &[RemoteRef], requested: &str, arch: &str) -> Result<String> {
+    let replacements = fetch_appstream_replacements(arch)?;
+    resolve_current_app_id_from_replacements(refs, &replacements, requested, arch)
+}
+
+fn resolve_current_app_id_from_replacements(
+    refs: &[RemoteRef],
+    replacements: &BTreeMap<String, Vec<String>>,
+    requested: &str,
+    arch: &str,
+) -> Result<String> {
+    let mut current = requested.to_string();
+    let mut seen = BTreeSet::new();
+
+    while seen.insert(current.clone()) {
+        let Some(candidates) = replacements.get(&current) else {
+            return Ok(current);
+        };
+        let mut available = candidates
+            .iter()
+            .filter(|candidate| app_ref_exists(refs, candidate, arch))
+            .cloned()
+            .collect::<Vec<_>>();
+        available.sort();
+        available.dedup();
+
+        match available.len() {
+            0 => return Ok(current),
+            1 => {
+                let replacement = available.remove(0);
+                eprintln!("info: Flathub app id {current} is replaced by {replacement}");
+                current = replacement;
+            }
+            _ => bail!(
+                "multiple Flathub replacements found for {current} on {arch}: {}",
+                available.join(", ")
+            ),
+        }
+    }
+
+    bail!("cycle in Flathub replacement metadata for app id {requested}");
+}
+
+fn app_ref_exists(refs: &[RemoteRef], app_id: &str, arch: &str) -> bool {
+    refs.iter().any(|remote_ref| {
+        let Ok(parts) = split_flatpak_ref(&remote_ref.name) else {
+            return false;
+        };
+        parts.kind == "app" && parts.name == app_id && parts.arch == arch
+    })
+}
+
+fn fetch_appstream_replacements(arch: &str) -> Result<BTreeMap<String, Vec<String>>> {
+    let path = fetch_appstream(arch)?;
+    let compressed = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let xml = decompress_appstream_xml(&compressed)
+        .with_context(|| format!("decompress {}", path.display()))?;
+    Ok(parse_appstream_replacements(&xml))
+}
+
+fn fetch_appstream(arch: &str) -> Result<PathBuf> {
+    let path =
+        PathBuf::from("downloads").join(format!("appstream-{}.xml.gz", safe_dir_fragment(arch)));
+    fs::create_dir_all("downloads").context("create downloads directory")?;
+    let tmp = path.with_file_name(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("appstream.xml.gz"),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    ));
+
+    let status = Command::new("fetch")
+        .arg("-qo")
+        .arg(&tmp)
+        .arg(format!("{REMOTE}/appstream/{arch}/appstream.xml.gz"))
+        .status()
+        .with_context(|| format!("fetch Flathub AppStream metadata for {arch}"))?;
+    if status.success() {
+        fs::rename(&tmp, &path)
+            .with_context(|| format!("move {} to {}", tmp.display(), path.display()))?;
+        return Ok(path);
+    }
+
+    let _ = fs::remove_file(&tmp);
+    bail!("refresh Flathub AppStream metadata for {arch} failed with status {status}");
+}
+
+fn decompress_appstream_xml(data: &[u8]) -> Result<String> {
+    let payload = gzip_deflate_payload(data)?;
+    let xml = decompress_to_vec(payload)
+        .map_err(|error| anyhow::anyhow!("inflate AppStream gzip payload: {error:?}"))?;
+    String::from_utf8(xml).context("AppStream XML is not UTF-8")
+}
+
+fn gzip_deflate_payload(data: &[u8]) -> Result<&[u8]> {
+    if data.len() < 18 || data[0] != 0x1f || data[1] != 0x8b {
+        bail!("not a gzip stream");
+    }
+    if data[2] != 8 {
+        bail!("unsupported gzip compression method {}", data[2]);
+    }
+
+    let flags = data[3];
+    let mut offset = 10usize;
+    if flags & 0x04 != 0 {
+        if data.len() < offset + 2 {
+            bail!("truncated gzip extra header");
+        }
+        let extra_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
+        offset += 2 + extra_len;
+    }
+    if flags & 0x08 != 0 {
+        offset = skip_gzip_c_string(data, offset).context("truncated gzip file name")?;
+    }
+    if flags & 0x10 != 0 {
+        offset = skip_gzip_c_string(data, offset).context("truncated gzip comment")?;
+    }
+    if flags & 0x02 != 0 {
+        offset += 2;
+    }
+    if data.len() < offset + 8 {
+        bail!("truncated gzip payload");
+    }
+
+    Ok(&data[offset..data.len() - 8])
+}
+
+fn skip_gzip_c_string(data: &[u8], offset: usize) -> Option<usize> {
+    data.get(offset..)?
+        .iter()
+        .position(|byte| *byte == 0)
+        .map(|position| offset + position + 1)
+}
+
+fn parse_appstream_replacements(xml: &str) -> BTreeMap<String, Vec<String>> {
+    let mut replacements: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut rest = xml;
+
+    while let Some(start) = rest.find("<component") {
+        rest = &rest[start..];
+        let Some(tag_end) = rest.find('>') else {
+            break;
+        };
+        let component_body = &rest[tag_end + 1..];
+        let Some(end) = component_body.find("</component>") else {
+            break;
+        };
+        let component = &component_body[..end];
+        rest = &component_body[end + "</component>".len()..];
+
+        let Some(new_id) = first_xml_text(component, "id") else {
+            continue;
+        };
+        let mut component_rest = component;
+        while let Some(replaces_start) = component_rest.find("<replaces>") {
+            component_rest = &component_rest[replaces_start + "<replaces>".len()..];
+            let Some(replaces_end) = component_rest.find("</replaces>") else {
+                break;
+            };
+            let replaces = &component_rest[..replaces_end];
+            component_rest = &component_rest[replaces_end + "</replaces>".len()..];
+
+            for old_id in xml_texts(replaces, "id") {
+                replacements.entry(old_id).or_default().push(new_id.clone());
+            }
+        }
+    }
+
+    replacements
+}
+
+fn first_xml_text(xml: &str, tag: &str) -> Option<String> {
+    xml_texts(xml, tag).into_iter().next()
+}
+
+fn xml_texts(xml: &str, tag: &str) -> Vec<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut values = Vec::new();
+    let mut rest = xml;
+
+    while let Some(start) = rest.find(&open) {
+        let value_start = start + open.len();
+        let after_open = &rest[value_start..];
+        let Some(end) = after_open.find(&close) else {
+            break;
+        };
+        let value = after_open[..end].trim();
+        if !value.is_empty() {
+            values.push(xml_unescape_text(value));
+        }
+        rest = &after_open[end + close.len()..];
+    }
+
+    values
+}
+
+fn xml_unescape_text(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }
 
 fn choose_app_ref(refs: &[RemoteRef], app_id: &str, arch: &str) -> Result<RemoteRef> {
@@ -1186,4 +1390,151 @@ fn decode_file_object(data: &[u8]) -> Result<(u32, Vec<u8>)> {
     }
 
     bail!("unable to inflate file object")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        parse_appstream_replacements, resolve_current_app_id_from_replacements, RemoteRef,
+    };
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn appstream_replacements_map_old_ids_to_current_component() {
+        let xml = r#"
+<components>
+  <component type="desktop-application">
+    <id>app.example.Current</id>
+    <name>Example</name>
+    <replaces>
+      <id>org.example.Old</id>
+      <id>org.example.Older</id>
+    </replaces>
+  </component>
+</components>
+"#;
+
+        let replacements = parse_appstream_replacements(xml);
+
+        assert_eq!(
+            replacements.get("org.example.Old").unwrap(),
+            &vec!["app.example.Current".to_string()]
+        );
+        assert_eq!(
+            replacements.get("org.example.Older").unwrap(),
+            &vec!["app.example.Current".to_string()]
+        );
+    }
+
+    #[test]
+    fn current_app_id_follows_available_replacement() {
+        let refs = vec![RemoteRef {
+            name: "app/app.example.Current/x86_64/stable".to_string(),
+            checksum: "app-2".to_string(),
+        }];
+        let replacements = BTreeMap::from([(
+            "org.example.Old".to_string(),
+            vec!["app.example.Current".to_string()],
+        )]);
+
+        assert_eq!(
+            resolve_current_app_id_from_replacements(
+                &refs,
+                &replacements,
+                "org.example.Old",
+                "x86_64"
+            )
+            .unwrap(),
+            "app.example.Current"
+        );
+    }
+
+    #[test]
+    fn current_app_id_ignores_unavailable_replacement() {
+        let refs = vec![RemoteRef {
+            name: "app/app.example.Current/aarch64/stable".to_string(),
+            checksum: "app-2".to_string(),
+        }];
+        let replacements = BTreeMap::from([(
+            "org.example.Old".to_string(),
+            vec!["app.example.Current".to_string()],
+        )]);
+
+        assert_eq!(
+            resolve_current_app_id_from_replacements(
+                &refs,
+                &replacements,
+                "org.example.Old",
+                "x86_64"
+            )
+            .unwrap(),
+            "org.example.Old"
+        );
+    }
+
+    #[test]
+    fn current_app_id_rejects_ambiguous_replacements() {
+        let refs = vec![
+            RemoteRef {
+                name: "app/app.example.One/x86_64/stable".to_string(),
+                checksum: "app-1".to_string(),
+            },
+            RemoteRef {
+                name: "app/app.example.Two/x86_64/stable".to_string(),
+                checksum: "app-2".to_string(),
+            },
+        ];
+        let replacements = BTreeMap::from([(
+            "org.example.Old".to_string(),
+            vec!["app.example.One".to_string(), "app.example.Two".to_string()],
+        )]);
+
+        let error = resolve_current_app_id_from_replacements(
+            &refs,
+            &replacements,
+            "org.example.Old",
+            "x86_64",
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("multiple Flathub replacements found"));
+    }
+
+    #[test]
+    fn current_app_id_rejects_replacement_cycles() {
+        let refs = vec![
+            RemoteRef {
+                name: "app/org.example.A/x86_64/stable".to_string(),
+                checksum: "app-a".to_string(),
+            },
+            RemoteRef {
+                name: "app/org.example.B/x86_64/stable".to_string(),
+                checksum: "app-b".to_string(),
+            },
+        ];
+        let replacements = BTreeMap::from([
+            (
+                "org.example.A".to_string(),
+                vec!["org.example.B".to_string()],
+            ),
+            (
+                "org.example.B".to_string(),
+                vec!["org.example.A".to_string()],
+            ),
+        ]);
+
+        let error = resolve_current_app_id_from_replacements(
+            &refs,
+            &replacements,
+            "org.example.A",
+            "x86_64",
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("cycle in Flathub replacement metadata"));
+    }
 }

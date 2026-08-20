@@ -260,15 +260,7 @@ fn cmd_uninstall(project_root: &Path, args: Vec<String>) -> Result<()> {
 }
 
 fn cmd_update(project_root: &Path, args: Vec<String>) -> Result<()> {
-    let targets = if args.is_empty() {
-        state::list_apps(project_root)?
-    } else {
-        let mut apps = Vec::new();
-        for app_id in args {
-            apps.push(state::get_app(project_root, &app_id)?);
-        }
-        apps
-    };
+    let targets = update_targets(project_root, args)?;
 
     if targets.is_empty() {
         println!("No installed apps");
@@ -276,7 +268,8 @@ fn cmd_update(project_root: &Path, args: Vec<String>) -> Result<()> {
     }
 
     let mut touched_runtimes = BTreeSet::new();
-    for record in targets {
+    for target in targets {
+        let record = target.record;
         if sandbox::app_has_mounts(project_root, &record.app_id)? {
             bail!(
                 "{} still has active sandbox mounts; stop it before updating",
@@ -284,40 +277,49 @@ fn cmd_update(project_root: &Path, args: Vec<String>) -> Result<()> {
             );
         }
 
-        let remote = runtime::resolve_remote_app(&record.app_id)?;
-        let app_dir = state::absolute(project_root, &record.app_dir);
-        let runtime_dir = project_root
-            .join("runtime")
-            .join(runtime::runtime_checkout_dir(&remote.runtime_ref));
-        let app_changed =
-            remote.app_commit != record.app_commit || !app_dir.join("metadata").exists();
-        let current_runtime_commit = state::runtime_commit(project_root, &remote.runtime_ref)?
-            .unwrap_or_else(|| record.runtime_commit.clone());
-        let runtime_changed = current_runtime_commit != remote.runtime_commit
-            || !runtime_dir.join("metadata").exists();
+        let remote = match target.remote {
+            Some(remote) => remote,
+            None => runtime::resolve_remote_app(&record.app_id)?,
+        };
+        let status = update_status(project_root, &record, &remote)?;
 
-        if !app_changed && !runtime_changed {
+        if !status.app_changed && !status.runtime_changed {
             println!("{} is up to date", record.app_id);
             let export = desktop::export_app(project_root, &record)?;
             print_export_report(project_root, &export);
             continue;
         }
 
-        let force_runtime = runtime_changed && touched_runtimes.insert(remote.runtime_ref.clone());
-        let installed = runtime::update_app(project_root, &remote, app_changed, force_runtime)?;
+        let force_runtime =
+            status.runtime_checkout_stale && touched_runtimes.insert(remote.runtime_ref.clone());
+        let installed = runtime::update_app(
+            project_root,
+            &remote,
+            status.app_checkout_stale,
+            force_runtime,
+        )?;
         let installed_record = state::record_install(project_root, &installed)?;
+        if record.app_id != installed.app_id {
+            desktop::remove_export(project_root, &record.app_id)?;
+            state::remove_app_record(project_root, &record.app_id)?;
+            state::safe_remove_dir(project_root, &record.app_dir)?;
+        }
         let export = desktop::export_app(project_root, &installed_record)?;
         println!("Updated {}", installed.app_id);
-        if app_changed {
+        if record.app_id != installed.app_id {
+            println!("  app id: {} -> {}", record.app_id, installed.app_id);
+        }
+        if status.app_changed {
             println!(
                 "  app commit: {} -> {}",
                 record.app_commit, installed.app_commit
             );
         }
-        if runtime_changed {
+        if status.runtime_changed {
             println!(
                 "  runtime commit: {} -> {}",
-                current_runtime_commit, installed.runtime_commit
+                status.current_runtime_commit.as_deref().unwrap_or("<none>"),
+                installed.runtime_commit
             );
         }
         print_export_report(project_root, &export);
@@ -331,6 +333,115 @@ fn cmd_update(project_root: &Path, args: Vec<String>) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct UpdateTarget {
+    record: state::AppRecord,
+    remote: Option<runtime::RemoteApp>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct UpdateStatus {
+    app_changed: bool,
+    app_checkout_stale: bool,
+    runtime_changed: bool,
+    runtime_checkout_stale: bool,
+    current_runtime_commit: Option<String>,
+}
+
+fn update_targets(project_root: &Path, args: Vec<String>) -> Result<Vec<UpdateTarget>> {
+    let installed = state::list_apps(project_root)?;
+    if args.is_empty() {
+        return Ok(installed
+            .into_iter()
+            .map(|record| UpdateTarget {
+                record,
+                remote: None,
+            })
+            .collect());
+    }
+
+    let mut targets = Vec::new();
+    let mut seen = BTreeSet::new();
+    for requested in args {
+        let (record, remote) = if let Some(record) =
+            installed.iter().find(|record| record.app_id == requested)
+        {
+            (record.clone(), None)
+        } else {
+            let remote = runtime::resolve_remote_app(&requested)
+                .with_context(|| format!("resolve {requested} in Flathub"))?;
+            let record = installed
+                    .iter()
+                    .find(|record| record.app_id == remote.app_id)
+                    .cloned()
+                    .with_context(|| {
+                        if remote.app_id == requested {
+                            format!("{requested} is not installed")
+                        } else {
+                            format!(
+                                "{requested} is not installed; current Flathub app id is {}, which is also not installed",
+                                remote.app_id
+                            )
+                        }
+                    })?;
+            (record, Some(remote))
+        };
+
+        if seen.insert(record.app_id.clone()) {
+            targets.push(UpdateTarget { record, remote });
+        }
+    }
+
+    Ok(targets)
+}
+
+fn update_status(
+    project_root: &Path,
+    record: &state::AppRecord,
+    remote: &runtime::RemoteApp,
+) -> Result<UpdateStatus> {
+    let app_dir = state::absolute(project_root, &record.app_dir);
+    let app_checkout_present = checkout_present(&app_dir);
+    let app_state_changed = record.app_id != remote.app_id
+        || record.app_ref != remote.app_ref
+        || record.app_commit != remote.app_commit
+        || record.arch != remote.arch
+        || record.branch != remote.branch
+        || record.command != remote.command;
+    let app_checkout_stale = !app_checkout_present
+        || record.app_id != remote.app_id
+        || record.app_ref != remote.app_ref
+        || record.app_commit != remote.app_commit;
+
+    let runtime_dir = project_root
+        .join("runtime")
+        .join(runtime::runtime_checkout_dir(&remote.runtime_ref));
+    let current_runtime_commit =
+        state::runtime_commit(project_root, &remote.runtime_ref)?.or_else(|| {
+            if record.runtime_ref == remote.runtime_ref {
+                Some(record.runtime_commit.clone())
+            } else {
+                None
+            }
+        });
+    let runtime_checkout_stale = !checkout_present(&runtime_dir)
+        || current_runtime_commit.as_deref() != Some(remote.runtime_commit.as_str());
+    let runtime_state_changed =
+        record.runtime_ref != remote.runtime_ref || record.runtime_commit != remote.runtime_commit;
+
+    Ok(UpdateStatus {
+        app_changed: app_state_changed || app_checkout_stale,
+        app_checkout_stale,
+        runtime_changed: runtime_state_changed || runtime_checkout_stale,
+        runtime_checkout_stale,
+        current_runtime_commit,
+    })
+}
+
+fn checkout_present(dir: &Path) -> bool {
+    dir.join("metadata").is_file() && dir.join("files").is_dir()
 }
 
 fn print_export_report(project_root: &Path, export: &desktop::ExportReport) {
@@ -461,4 +572,176 @@ fn print_usage() {
     eprintln!("  flatpak run <app-id> [-- app-args...]");
     eprintln!("  flatpak uninstall <app-id>");
     eprintln!("  flatpak update [app-id...]");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TEST_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_dir(name: &str) -> PathBuf {
+        let id = TEST_ID.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "freebsd-flatpak-poc-main-{name}-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn create_checkout(root: &Path, rel: &Path) {
+        let dir = root.join(rel);
+        fs::create_dir_all(dir.join("files")).unwrap();
+        fs::write(
+            dir.join("metadata"),
+            "[Application]\nname=org.example.App\n",
+        )
+        .unwrap();
+    }
+
+    fn app_record(app_id: &str, app_ref: &str, app_commit: &str) -> state::AppRecord {
+        state::AppRecord {
+            app_id: app_id.to_string(),
+            app_ref: app_ref.to_string(),
+            app_commit: app_commit.to_string(),
+            app_dir: PathBuf::from("runtime").join("app").join(app_id),
+            arch: "x86_64".to_string(),
+            branch: "stable".to_string(),
+            runtime_ref: "org.example.Platform/x86_64/stable".to_string(),
+            runtime_commit: "runtime-1".to_string(),
+            runtime_dir: PathBuf::from("runtime").join("org.example.Platform-stable"),
+            command: "old-command".to_string(),
+        }
+    }
+
+    fn remote_app(app_id: &str, app_ref: &str, app_commit: &str) -> runtime::RemoteApp {
+        runtime::RemoteApp {
+            app_id: app_id.to_string(),
+            app_ref: app_ref.to_string(),
+            app_commit: app_commit.to_string(),
+            arch: "x86_64".to_string(),
+            branch: "stable".to_string(),
+            runtime_ref: "org.example.Platform/x86_64/stable".to_string(),
+            runtime_commit: "runtime-1".to_string(),
+            command: "new-command".to_string(),
+        }
+    }
+
+    fn create_runtime_checkout(root: &Path) {
+        create_checkout(
+            root,
+            &PathBuf::from("runtime").join("org.example.Platform-stable"),
+        );
+    }
+
+    #[test]
+    fn newer_remote_app_commit_requires_app_checkout() {
+        let root = test_dir("newer-app-commit");
+        create_checkout(
+            &root,
+            &PathBuf::from("runtime").join("app").join("org.example.App"),
+        );
+        create_runtime_checkout(&root);
+        let mut record = app_record(
+            "org.example.App",
+            "app/org.example.App/x86_64/stable",
+            "app-1",
+        );
+        record.command = "new-command".to_string();
+        let remote = remote_app(
+            "org.example.App",
+            "app/org.example.App/x86_64/stable",
+            "app-2",
+        );
+
+        let status = update_status(&root, &record, &remote).unwrap();
+
+        assert!(status.app_changed);
+        assert!(status.app_checkout_stale);
+        assert!(!status.runtime_changed);
+        assert!(!status.runtime_checkout_stale);
+    }
+
+    #[test]
+    fn app_id_replacement_requires_app_checkout_even_with_same_commit() {
+        let root = test_dir("replacement");
+        create_checkout(
+            &root,
+            &PathBuf::from("runtime")
+                .join("app")
+                .join("org.example.OldApp"),
+        );
+        create_runtime_checkout(&root);
+        let mut record = app_record(
+            "org.example.OldApp",
+            "app/org.example.OldApp/x86_64/stable",
+            "app-1",
+        );
+        record.command = "new-command".to_string();
+        let remote = remote_app(
+            "org.example.NewApp",
+            "app/org.example.NewApp/x86_64/stable",
+            "app-1",
+        );
+
+        let status = update_status(&root, &record, &remote).unwrap();
+
+        assert!(status.app_changed);
+        assert!(status.app_checkout_stale);
+    }
+
+    #[test]
+    fn missing_runtime_checkout_requires_runtime_checkout() {
+        let root = test_dir("missing-runtime");
+        create_checkout(
+            &root,
+            &PathBuf::from("runtime").join("app").join("org.example.App"),
+        );
+        let mut record = app_record(
+            "org.example.App",
+            "app/org.example.App/x86_64/stable",
+            "app-1",
+        );
+        record.command = "new-command".to_string();
+        let remote = remote_app(
+            "org.example.App",
+            "app/org.example.App/x86_64/stable",
+            "app-1",
+        );
+
+        let status = update_status(&root, &record, &remote).unwrap();
+
+        assert!(status.runtime_changed);
+        assert!(status.runtime_checkout_stale);
+        assert_eq!(status.current_runtime_commit.as_deref(), Some("runtime-1"));
+    }
+
+    #[test]
+    fn stale_record_command_updates_state_without_app_checkout() {
+        let root = test_dir("state-only-command");
+        create_checkout(
+            &root,
+            &PathBuf::from("runtime").join("app").join("org.example.App"),
+        );
+        create_runtime_checkout(&root);
+        let record = app_record(
+            "org.example.App",
+            "app/org.example.App/x86_64/stable",
+            "app-1",
+        );
+        let remote = remote_app(
+            "org.example.App",
+            "app/org.example.App/x86_64/stable",
+            "app-1",
+        );
+
+        let status = update_status(&root, &record, &remote).unwrap();
+
+        assert!(status.app_changed);
+        assert!(!status.app_checkout_stale);
+    }
 }
