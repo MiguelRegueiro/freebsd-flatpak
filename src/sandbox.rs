@@ -390,6 +390,11 @@ impl ChrootInstance {
         merge_env(&mut env, self.host_graphics.env());
         prepend_env_paths(
             &mut env,
+            "LD_PRELOAD",
+            self.host_graphics.ld_preload_paths(),
+        );
+        prepend_env_paths(
+            &mut env,
             "LD_LIBRARY_PATH",
             self.host_video.ld_library_paths(),
         );

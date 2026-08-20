@@ -2,15 +2,22 @@ use crate::runtime::{self, FlatpakApp, RuntimeGlExtension};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::os::unix::fs as unix_fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 const DRM_MAJOR: u32 = 226;
+const WAYLAND_DRM_DEVT_SHIM_SOURCE: &str = "scripts/wayland-drm-devt-shim.c";
+const WAYLAND_DRM_DEVT_SHIM_BIN: &str = "target/graphics/libwayland-drm-devt-shim.so";
+const WAYLAND_DRM_DEVT_SHIM_SANDBOX_DIR: &str = "/run/host/freebsd-flatpak-poc";
+const WAYLAND_DRM_DEVT_SHIM_LIB: &str = "libwayland-drm-devt-shim.so";
 
 #[derive(Debug, Clone)]
 pub struct HostGraphics {
     gl: Option<RuntimeGlExtension>,
     drm: Option<DrmSysfsBridge>,
+    wayland_drm_devt_shim: Option<WaylandDrmDevtShim>,
     warnings: Vec<String>,
 }
 
@@ -28,11 +35,19 @@ struct DrmSysfsBridge {
 }
 
 #[derive(Debug, Clone)]
+struct WaylandDrmDevtShim {
+    host_dir: PathBuf,
+    dev_t_map: String,
+}
+
+#[derive(Debug, Clone)]
 struct DrmDevice {
     card_name: String,
     card_minor: u32,
+    card_host_dev_t: u64,
     render_name: String,
     render_minor: u32,
+    render_host_dev_t: u64,
     pci_slot: String,
     vendor: String,
     device: String,
@@ -70,17 +85,42 @@ impl HostGraphics {
             None
         };
 
-        Ok(Self { gl, drm, warnings })
+        let wayland_drm_devt_shim = if let Some(drm) = &drm {
+            match WaylandDrmDevtShim::prepare(project_root, &drm.device) {
+                Ok(shim) => Some(shim),
+                Err(error) => {
+                    warnings.push(format!("Wayland DRM dev_t shim disabled: {error:#}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        Ok(Self {
+            gl,
+            drm,
+            wayland_drm_devt_shim,
+            warnings,
+        })
     }
 
     pub fn runtime_mounts(&self) -> Vec<GraphicsMount> {
-        self.gl
+        let mut mounts: Vec<GraphicsMount> = self
+            .gl
             .iter()
             .map(|gl| GraphicsMount {
                 host_path: gl.checkout_dir.join("files"),
                 sandbox_path: PathBuf::from("/usr").join(&gl.runtime_mount_relative),
             })
-            .collect()
+            .collect();
+        if let Some(shim) = &self.wayland_drm_devt_shim {
+            mounts.push(GraphicsMount {
+                host_path: shim.host_dir.clone(),
+                sandbox_path: PathBuf::from(WAYLAND_DRM_DEVT_SHIM_SANDBOX_DIR),
+            });
+        }
+        mounts
     }
 
     pub fn sysfs_mounts(&self) -> Vec<GraphicsMount> {
@@ -128,8 +168,21 @@ impl HostGraphics {
             env.push(("VK_DRIVER_FILES".to_string(), icd_path.clone()));
             env.push(("VK_ICD_FILENAMES".to_string(), icd_path));
         }
+        if let Some(shim) = &self.wayland_drm_devt_shim {
+            env.push((
+                "FREEBSD_FLATPAK_DRM_DEV_T_MAP".to_string(),
+                shim.dev_t_map.clone(),
+            ));
+        }
 
         env
+    }
+
+    pub fn ld_preload_paths(&self) -> Vec<String> {
+        self.wayland_drm_devt_shim
+            .iter()
+            .map(|_| format!("{WAYLAND_DRM_DEVT_SHIM_SANDBOX_DIR}/{WAYLAND_DRM_DEVT_SHIM_LIB}"))
+            .collect()
     }
 
     pub fn describe(&self) -> Vec<String> {
@@ -148,6 +201,11 @@ impl HostGraphics {
                 drm.device.render_name, DRM_MAJOR, drm.device.render_minor
             ));
             lines.push(format!(
+                "DRM render dev_t: host 0x{:x} -> linux 0x{:x}",
+                drm.device.render_host_dev_t,
+                linux_drm_dev_t(drm.device.render_minor)
+            ));
+            lines.push(format!(
                 "DRM PCI: {} vendor={} device={} driver={}",
                 drm.device.pci_slot, drm.device.vendor, drm.device.device, drm.device.driver
             ));
@@ -161,6 +219,14 @@ impl HostGraphics {
                     mount.sandbox_path.display()
                 ));
             }
+        }
+        if let Some(shim) = &self.wayland_drm_devt_shim {
+            lines.push(format!(
+                "Wayland DRM dev_t shim: {} -> {}",
+                shim.host_dir.display(),
+                WAYLAND_DRM_DEVT_SHIM_SANDBOX_DIR
+            ));
+            lines.push(format!("Wayland DRM dev_t map: {}", shim.dev_t_map));
         }
         lines
     }
@@ -236,10 +302,26 @@ impl DrmSysfsBridge {
     }
 }
 
+impl WaylandDrmDevtShim {
+    fn prepare(project_root: &Path, device: &DrmDevice) -> Result<Self> {
+        let helper = ensure_wayland_drm_devt_shim(project_root)?;
+        let host_dir = helper
+            .parent()
+            .context("Wayland DRM dev_t shim output path has no parent")?
+            .to_path_buf();
+        Ok(Self {
+            host_dir,
+            dev_t_map: device.dev_t_map(),
+        })
+    }
+}
+
 impl DrmDevice {
     fn detect() -> Result<Self> {
         let render = first_dri_node("renderD").context("no /dev/dri/renderD* node found")?;
         let card = matching_card_node(&render).context("no matching /dev/dri/card* node found")?;
+        let card_host_dev_t = dri_node_dev_t(&card)?;
+        let render_host_dev_t = dri_node_dev_t(&render)?;
         let pci_slot = sysctl_value(&format!("hw.dri.{}.busid", card.index))
             .ok()
             .and_then(|value| value.strip_prefix("pci:").map(ToOwned::to_owned))
@@ -268,8 +350,10 @@ impl DrmDevice {
         Ok(Self {
             card_name: card.name,
             card_minor: card.minor,
+            card_host_dev_t,
             render_name: render.name,
             render_minor: render.minor,
+            render_host_dev_t,
             pci_slot,
             vendor: pci.vendor,
             device: pci.device,
@@ -288,6 +372,17 @@ impl DrmDevice {
             "1af4" => Some("virtio_icd.x86_64.json"),
             _ => None,
         }
+    }
+
+    fn dev_t_map(&self) -> String {
+        [
+            (self.card_host_dev_t, linux_drm_dev_t(self.card_minor)),
+            (self.render_host_dev_t, linux_drm_dev_t(self.render_minor)),
+        ]
+        .into_iter()
+        .map(|(host, linux)| format!("0x{host:x}=0x{linux:x}"))
+        .collect::<Vec<_>>()
+        .join(",")
     }
 }
 
@@ -354,6 +449,13 @@ fn matching_card_node(render: &DriNode) -> Result<DriNode> {
     fallback.context("no card node")
 }
 
+fn dri_node_dev_t(node: &DriNode) -> Result<u64> {
+    let path = Path::new("/dev/dri").join(&node.name);
+    Ok(fs::metadata(&path)
+        .with_context(|| format!("stat {}", path.display()))?
+        .rdev())
+}
+
 fn write_linux_drm_sysfs(
     bus: &Path,
     dev_char: &Path,
@@ -361,8 +463,10 @@ fn write_linux_drm_sysfs(
     device: &DrmDevice,
 ) -> Result<()> {
     let pci_device = bus.join("pci").join("devices").join(&device.pci_slot);
+    let pci_driver = bus.join("pci").join("drivers").join(&device.driver);
     fs::create_dir_all(pci_device.join("drm").join(&device.card_name))?;
     fs::create_dir_all(pci_device.join("drm").join(&device.render_name))?;
+    fs::create_dir_all(&pci_driver)?;
     write_file(pci_device.join("vendor"), &format!("{}\n", device.vendor))?;
     write_file(pci_device.join("device"), &format!("{}\n", device.device))?;
     write_file(
@@ -379,6 +483,14 @@ fn write_linux_drm_sysfs(
     )?;
     write_file(pci_device.join("class"), &format!("{}\n", device.class))?;
     symlink_replace("/sys/bus/pci", &pci_device.join("subsystem"))?;
+    symlink_replace(
+        format!("/sys/bus/pci/drivers/{}", device.driver),
+        &pci_device.join("driver"),
+    )?;
+    symlink_replace(
+        format!("/sys/bus/pci/devices/{}", device.pci_slot),
+        &pci_driver.join(&device.pci_slot),
+    )?;
     write_file(
         pci_device.join("uevent"),
         &format!(
@@ -436,6 +548,67 @@ fn write_dev_char_node(dev_char: &Path, name: &str, minor: u32, pci_slot: &str) 
         dir.join("uevent"),
         &format!("MAJOR={DRM_MAJOR}\nMINOR={minor}\nDEVNAME=dri/{name}\n"),
     )
+}
+
+fn ensure_wayland_drm_devt_shim(project_root: &Path) -> Result<PathBuf> {
+    let source = project_root.join(WAYLAND_DRM_DEVT_SHIM_SOURCE);
+    let output = project_root.join(WAYLAND_DRM_DEVT_SHIM_BIN);
+    let output_dir = output
+        .parent()
+        .context("Wayland DRM dev_t shim output path has no parent")?;
+    fs::create_dir_all(output_dir).with_context(|| format!("create {}", output_dir.display()))?;
+
+    if !needs_rebuild(&source, &output)? {
+        return Ok(output);
+    }
+
+    let compiler = Path::new("/compat/linux/usr/bin/gcc");
+    if !compiler.exists() {
+        bail!("Linux gcc not found at {}", compiler.display());
+    }
+
+    let status = Command::new(compiler)
+        .args(["-shared", "-fPIC", "-O2", "-Wall", "-Wextra"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&output)
+        .arg("-ldl")
+        .env(
+            "PATH",
+            "/compat/linux/usr/bin:/compat/linux/bin:/usr/bin:/bin",
+        )
+        .status()
+        .with_context(|| format!("compile {}", output.display()))?;
+    if !status.success() {
+        bail!("compile {} failed with status {}", output.display(), status);
+    }
+    Ok(output)
+}
+
+fn needs_rebuild(source: &Path, output: &Path) -> Result<bool> {
+    let Ok(output_meta) = fs::metadata(output) else {
+        return Ok(true);
+    };
+    let source_time = modified(source)?;
+    let output_time = output_meta
+        .modified()
+        .with_context(|| format!("read mtime {}", output.display()))?;
+    Ok(source_time > output_time)
+}
+
+fn modified(path: &Path) -> Result<SystemTime> {
+    fs::metadata(path)
+        .with_context(|| format!("stat {}", path.display()))?
+        .modified()
+        .with_context(|| format!("read mtime {}", path.display()))
+}
+
+fn linux_drm_dev_t(minor: u32) -> u64 {
+    linux_makedev(DRM_MAJOR as u64, minor as u64)
+}
+
+fn linux_makedev(major: u64, minor: u64) -> u64 {
+    ((major & 0xfff) << 8) | (minor & 0xff) | ((minor & !0xff) << 12)
 }
 
 fn write_class_drm_node(class_drm: &Path, name: &str, minor: u32, pci_slot: &str) -> Result<()> {
@@ -584,7 +757,12 @@ fn process_alive(pid: i32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{hex_prefixed, parse_hex_or_decimal, pciconf_locator, DrmDevice};
+    use super::{
+        hex_prefixed, linux_drm_dev_t, parse_hex_or_decimal, pciconf_locator,
+        write_linux_drm_sysfs, DrmDevice,
+    };
+    use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn converts_linux_pci_slot_to_freebsd_locator() {
@@ -608,8 +786,10 @@ mod tests {
         let device = DrmDevice {
             card_name: "card0".to_string(),
             card_minor: 0,
+            card_host_dev_t: 0x61,
             render_name: "renderD128".to_string(),
             render_minor: 128,
+            render_host_dev_t: 0x100,
             pci_slot: "0000:00:02.0".to_string(),
             vendor: "0x8086".to_string(),
             device: "0x9b41".to_string(),
@@ -621,5 +801,78 @@ mod tests {
         };
 
         assert_eq!(device.vulkan_icd(), Some("intel_icd.x86_64.json"));
+    }
+
+    #[test]
+    fn encodes_linux_drm_dev_t_values() {
+        assert_eq!(linux_drm_dev_t(0), 0xe200);
+        assert_eq!(linux_drm_dev_t(128), 0xe280);
+    }
+
+    #[test]
+    fn maps_host_drm_dev_t_values_to_linux_drm_dev_t_values() {
+        let device = DrmDevice {
+            card_name: "card0".to_string(),
+            card_minor: 0,
+            card_host_dev_t: 0x61,
+            render_name: "renderD128".to_string(),
+            render_minor: 128,
+            render_host_dev_t: 0x100,
+            pci_slot: "0000:00:02.0".to_string(),
+            vendor: "0x8086".to_string(),
+            device: "0x9b41".to_string(),
+            class: "0x030000".to_string(),
+            revision: "0x00".to_string(),
+            subsystem_vendor: "0x0000".to_string(),
+            subsystem_device: "0x0000".to_string(),
+            driver: "i915".to_string(),
+        };
+
+        assert_eq!(device.dev_t_map(), "0x61=0xe200,0x100=0xe280");
+    }
+
+    #[test]
+    fn writes_pci_driver_links_for_drm_sysfs() {
+        let root = std::env::temp_dir().join(format!(
+            "freebsd-flatpak-poc-graphics-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let bus = root.join("sys-bus");
+        let dev_char = root.join("sys-dev-char");
+        let class_drm = root.join("sys-class-drm");
+        let device = DrmDevice {
+            card_name: "card0".to_string(),
+            card_minor: 0,
+            card_host_dev_t: 0x61,
+            render_name: "renderD128".to_string(),
+            render_minor: 128,
+            render_host_dev_t: 0x100,
+            pci_slot: "0000:00:02.0".to_string(),
+            vendor: "0x8086".to_string(),
+            device: "0x9b41".to_string(),
+            class: "0x030000".to_string(),
+            revision: "0x02".to_string(),
+            subsystem_vendor: "0x1028".to_string(),
+            subsystem_device: "0x096e".to_string(),
+            driver: "i915".to_string(),
+        };
+
+        write_linux_drm_sysfs(&bus, &dev_char, &class_drm, &device).unwrap();
+
+        let pci_device = bus.join("pci/devices/0000:00:02.0");
+        assert_eq!(
+            fs::read_link(pci_device.join("driver")).unwrap(),
+            PathBuf::from("/sys/bus/pci/drivers/i915")
+        );
+        assert_eq!(
+            fs::read_link(bus.join("pci/drivers/i915/0000:00:02.0")).unwrap(),
+            PathBuf::from("/sys/bus/pci/devices/0000:00:02.0")
+        );
+        assert!(fs::read_to_string(pci_device.join("uevent"))
+            .unwrap()
+            .contains("DRIVER=i915"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
