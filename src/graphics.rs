@@ -8,15 +8,23 @@ use std::process::Command;
 use std::time::SystemTime;
 
 const DRM_MAJOR: u32 = 226;
+const DRM_SYNCOBJ_ERRNO_SHIM_SOURCE: &str = "scripts/drm-syncobj-errno-shim.c";
+const DRM_SYNCOBJ_ERRNO_SHIM_BIN: &str = "target/graphics/libdrm-syncobj-errno-shim.so";
+const DRM_SYNCOBJ_ERRNO_SHIM_LIB: &str = "libdrm-syncobj-errno-shim.so";
+const CHROMIUM_ZYGOTE_DRM_PRELOAD_SOURCE: &str = "scripts/chromium-zygote-drm-preload.c";
+const CHROMIUM_ZYGOTE_DRM_PRELOAD_BIN: &str = "target/graphics/libchromium-zygote-drm-preload.so";
+const CHROMIUM_ZYGOTE_DRM_PRELOAD_LIB: &str = "libchromium-zygote-drm-preload.so";
 const WAYLAND_DRM_DEVT_SHIM_SOURCE: &str = "scripts/wayland-drm-devt-shim.c";
 const WAYLAND_DRM_DEVT_SHIM_BIN: &str = "target/graphics/libwayland-drm-devt-shim.so";
-const WAYLAND_DRM_DEVT_SHIM_SANDBOX_DIR: &str = "/run/host/freebsd-flatpak-poc";
+const GRAPHICS_SHIM_SANDBOX_DIR: &str = "/run/host/freebsd-flatpak-poc";
 const WAYLAND_DRM_DEVT_SHIM_LIB: &str = "libwayland-drm-devt-shim.so";
 
 #[derive(Debug, Clone)]
 pub struct HostGraphics {
     gl: Option<RuntimeGlExtension>,
     drm: Option<DrmSysfsBridge>,
+    drm_syncobj_errno_shim: Option<DrmSyncobjErrnoShim>,
+    chromium_zygote_drm_preload: Option<ChromiumZygoteDrmPreload>,
     wayland_drm_devt_shim: Option<WaylandDrmDevtShim>,
     warnings: Vec<String>,
 }
@@ -38,6 +46,16 @@ struct DrmSysfsBridge {
 struct WaylandDrmDevtShim {
     host_dir: PathBuf,
     dev_t_map: String,
+}
+
+#[derive(Debug, Clone)]
+struct DrmSyncobjErrnoShim {
+    host_dir: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct ChromiumZygoteDrmPreload {
+    host_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -97,9 +115,35 @@ impl HostGraphics {
             None
         };
 
+        let drm_syncobj_errno_shim = if drm.is_some() {
+            match DrmSyncobjErrnoShim::prepare(project_root) {
+                Ok(shim) => Some(shim),
+                Err(error) => {
+                    warnings.push(format!("DRM syncobj errno shim disabled: {error:#}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let chromium_zygote_drm_preload = if drm_syncobj_errno_shim.is_some() {
+            match ChromiumZygoteDrmPreload::prepare(project_root) {
+                Ok(shim) => Some(shim),
+                Err(error) => {
+                    warnings.push(format!("Chromium zygote DRM preload disabled: {error:#}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             gl,
             drm,
+            drm_syncobj_errno_shim,
+            chromium_zygote_drm_preload,
             wayland_drm_devt_shim,
             warnings,
         })
@@ -114,10 +158,19 @@ impl HostGraphics {
                 sandbox_path: PathBuf::from("/usr").join(&gl.runtime_mount_relative),
             })
             .collect();
-        if let Some(shim) = &self.wayland_drm_devt_shim {
+        let shim_dir = self
+            .drm_syncobj_errno_shim
+            .as_ref()
+            .map(|shim| &shim.host_dir)
+            .or_else(|| {
+                self.wayland_drm_devt_shim
+                    .as_ref()
+                    .map(|shim| &shim.host_dir)
+            });
+        if let Some(host_dir) = shim_dir {
             mounts.push(GraphicsMount {
-                host_path: shim.host_dir.clone(),
-                sandbox_path: PathBuf::from(WAYLAND_DRM_DEVT_SHIM_SANDBOX_DIR),
+                host_path: host_dir.clone(),
+                sandbox_path: PathBuf::from(GRAPHICS_SHIM_SANDBOX_DIR),
             });
         }
         mounts
@@ -179,10 +232,38 @@ impl HostGraphics {
     }
 
     pub fn ld_preload_paths(&self) -> Vec<String> {
-        self.wayland_drm_devt_shim
-            .iter()
-            .map(|_| format!("{WAYLAND_DRM_DEVT_SHIM_SANDBOX_DIR}/{WAYLAND_DRM_DEVT_SHIM_LIB}"))
-            .collect()
+        let mut paths = Vec::new();
+        if self.drm_syncobj_errno_shim.is_some() {
+            paths.push(format!(
+                "{GRAPHICS_SHIM_SANDBOX_DIR}/{DRM_SYNCOBJ_ERRNO_SHIM_LIB}"
+            ));
+        }
+        if self.wayland_drm_devt_shim.is_some() {
+            paths.push(format!(
+                "{GRAPHICS_SHIM_SANDBOX_DIR}/{WAYLAND_DRM_DEVT_SHIM_LIB}"
+            ));
+        }
+        paths
+    }
+
+    pub fn zypak_ld_preload_paths(&self) -> Vec<String> {
+        let mut paths = Vec::new();
+        if self.wayland_drm_devt_shim.is_some() {
+            paths.push(format!(
+                "{GRAPHICS_SHIM_SANDBOX_DIR}/{WAYLAND_DRM_DEVT_SHIM_LIB}"
+            ));
+        }
+        if self.drm_syncobj_errno_shim.is_some() {
+            paths.push(format!(
+                "{GRAPHICS_SHIM_SANDBOX_DIR}/{DRM_SYNCOBJ_ERRNO_SHIM_LIB}"
+            ));
+        }
+        if self.chromium_zygote_drm_preload.is_some() {
+            paths.push(format!(
+                "{GRAPHICS_SHIM_SANDBOX_DIR}/{CHROMIUM_ZYGOTE_DRM_PRELOAD_LIB}"
+            ));
+        }
+        paths
     }
 
     pub fn describe(&self) -> Vec<String> {
@@ -224,9 +305,25 @@ impl HostGraphics {
             lines.push(format!(
                 "Wayland DRM dev_t shim: {} -> {}",
                 shim.host_dir.display(),
-                WAYLAND_DRM_DEVT_SHIM_SANDBOX_DIR
+                GRAPHICS_SHIM_SANDBOX_DIR
             ));
             lines.push(format!("Wayland DRM dev_t map: {}", shim.dev_t_map));
+        }
+        if let Some(shim) = &self.drm_syncobj_errno_shim {
+            lines.push(format!(
+                "DRM syncobj errno shim: {} -> {}/{}",
+                shim.host_dir.display(),
+                GRAPHICS_SHIM_SANDBOX_DIR,
+                DRM_SYNCOBJ_ERRNO_SHIM_LIB
+            ));
+        }
+        if let Some(shim) = &self.chromium_zygote_drm_preload {
+            lines.push(format!(
+                "Chromium zygote DRM preload: {} -> {}/{}",
+                shim.host_dir.display(),
+                GRAPHICS_SHIM_SANDBOX_DIR,
+                CHROMIUM_ZYGOTE_DRM_PRELOAD_LIB
+            ));
         }
         lines
     }
@@ -313,6 +410,28 @@ impl WaylandDrmDevtShim {
             host_dir,
             dev_t_map: device.dev_t_map(),
         })
+    }
+}
+
+impl DrmSyncobjErrnoShim {
+    fn prepare(project_root: &Path) -> Result<Self> {
+        let helper = ensure_drm_syncobj_errno_shim(project_root)?;
+        let host_dir = helper
+            .parent()
+            .context("DRM syncobj errno shim output path has no parent")?
+            .to_path_buf();
+        Ok(Self { host_dir })
+    }
+}
+
+impl ChromiumZygoteDrmPreload {
+    fn prepare(project_root: &Path) -> Result<Self> {
+        let helper = ensure_chromium_zygote_drm_preload(project_root)?;
+        let host_dir = helper
+            .parent()
+            .context("Chromium zygote DRM preload output path has no parent")?
+            .to_path_buf();
+        Ok(Self { host_dir })
     }
 }
 
@@ -551,11 +670,43 @@ fn write_dev_char_node(dev_char: &Path, name: &str, minor: u32, pci_slot: &str) 
 }
 
 fn ensure_wayland_drm_devt_shim(project_root: &Path) -> Result<PathBuf> {
-    let source = project_root.join(WAYLAND_DRM_DEVT_SHIM_SOURCE);
-    let output = project_root.join(WAYLAND_DRM_DEVT_SHIM_BIN);
+    ensure_linux_shared_library(
+        project_root,
+        WAYLAND_DRM_DEVT_SHIM_SOURCE,
+        WAYLAND_DRM_DEVT_SHIM_BIN,
+        &["-ldl"],
+    )
+}
+
+fn ensure_drm_syncobj_errno_shim(project_root: &Path) -> Result<PathBuf> {
+    ensure_linux_shared_library(
+        project_root,
+        DRM_SYNCOBJ_ERRNO_SHIM_SOURCE,
+        DRM_SYNCOBJ_ERRNO_SHIM_BIN,
+        &["-ldl", "-pthread"],
+    )
+}
+
+fn ensure_chromium_zygote_drm_preload(project_root: &Path) -> Result<PathBuf> {
+    ensure_linux_shared_library(
+        project_root,
+        CHROMIUM_ZYGOTE_DRM_PRELOAD_SOURCE,
+        CHROMIUM_ZYGOTE_DRM_PRELOAD_BIN,
+        &["-ldl", "-pthread"],
+    )
+}
+
+fn ensure_linux_shared_library(
+    project_root: &Path,
+    source_relative: &str,
+    output_relative: &str,
+    link_args: &[&str],
+) -> Result<PathBuf> {
+    let source = project_root.join(source_relative);
+    let output = project_root.join(output_relative);
     let output_dir = output
         .parent()
-        .context("Wayland DRM dev_t shim output path has no parent")?;
+        .context("graphics shim output path has no parent")?;
     fs::create_dir_all(output_dir).with_context(|| format!("create {}", output_dir.display()))?;
 
     if !needs_rebuild(&source, &output)? {
@@ -567,16 +718,18 @@ fn ensure_wayland_drm_devt_shim(project_root: &Path) -> Result<PathBuf> {
         bail!("Linux gcc not found at {}", compiler.display());
     }
 
-    let status = Command::new(compiler)
+    let mut command = Command::new(compiler);
+    command
         .args(["-shared", "-fPIC", "-O2", "-Wall", "-Wextra"])
         .arg(&source)
         .arg("-o")
         .arg(&output)
-        .arg("-ldl")
+        .args(link_args)
         .env(
             "PATH",
             "/compat/linux/usr/bin:/compat/linux/bin:/usr/bin:/bin",
-        )
+        );
+    let status = command
         .status()
         .with_context(|| format!("compile {}", output.display()))?;
     if !status.success() {
@@ -759,10 +912,11 @@ fn process_alive(pid: i32) -> bool {
 mod tests {
     use super::{
         hex_prefixed, linux_drm_dev_t, parse_hex_or_decimal, pciconf_locator,
-        write_linux_drm_sysfs, DrmDevice,
+        write_linux_drm_sysfs, DrmDevice, DrmSyncobjErrnoShim, HostGraphics, WaylandDrmDevtShim,
     };
     use std::fs;
     use std::path::PathBuf;
+    use std::process::Command;
 
     #[test]
     fn converts_linux_pci_slot_to_freebsd_locator() {
@@ -832,6 +986,46 @@ mod tests {
     }
 
     #[test]
+    fn keeps_drm_and_wayland_preloads_separate_on_one_mount() {
+        let host_dir = PathBuf::from("/tmp/freebsd-flatpak-poc-graphics-shims");
+        let graphics = HostGraphics {
+            gl: None,
+            drm: None,
+            drm_syncobj_errno_shim: Some(DrmSyncobjErrnoShim {
+                host_dir: host_dir.clone(),
+            }),
+            chromium_zygote_drm_preload: None,
+            wayland_drm_devt_shim: Some(WaylandDrmDevtShim {
+                host_dir: host_dir.clone(),
+                dev_t_map: "0x61=0xe200".to_string(),
+            }),
+            warnings: Vec::new(),
+        };
+
+        assert_eq!(
+            graphics.ld_preload_paths(),
+            vec![
+                "/run/host/freebsd-flatpak-poc/libdrm-syncobj-errno-shim.so",
+                "/run/host/freebsd-flatpak-poc/libwayland-drm-devt-shim.so",
+            ]
+        );
+        assert_eq!(
+            graphics.zypak_ld_preload_paths(),
+            vec![
+                "/run/host/freebsd-flatpak-poc/libwayland-drm-devt-shim.so",
+                "/run/host/freebsd-flatpak-poc/libdrm-syncobj-errno-shim.so",
+            ]
+        );
+        let mounts = graphics.runtime_mounts();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].host_path(), host_dir);
+        assert_eq!(
+            mounts[0].sandbox_target_relative().unwrap(),
+            PathBuf::from("run/host/freebsd-flatpak-poc")
+        );
+    }
+
+    #[test]
     fn writes_pci_driver_links_for_drm_sysfs() {
         let root = std::env::temp_dir().join(format!(
             "freebsd-flatpak-poc-graphics-test-{}",
@@ -874,5 +1068,59 @@ mod tests {
             .contains("DRIVER=i915"));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn drm_syncobj_errno_shim_has_narrow_ioctl_behavior() {
+        let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let output_dir = project_root.join("target/graphics-tests");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("drm-syncobj-errno-shim-test");
+        let compile = Command::new("/compat/linux/usr/bin/gcc")
+            .args(["-O2", "-Wall", "-Wextra", "-Werror"])
+            .arg("-DDRM_SYNCOBJ_ERRNO_SHIM_TEST")
+            .arg(project_root.join("scripts/drm-syncobj-errno-shim.c"))
+            .arg(project_root.join("tests/drm-syncobj-errno-shim-test.c"))
+            .arg("-o")
+            .arg(&output)
+            .env(
+                "PATH",
+                "/compat/linux/usr/bin:/compat/linux/bin:/usr/bin:/bin",
+            )
+            .status()
+            .expect("compile DRM syncobj errno shim test");
+        assert!(compile.success());
+
+        let run = Command::new(&output)
+            .status()
+            .expect("run DRM syncobj errno shim test");
+        assert!(run.success());
+    }
+
+    #[test]
+    fn chromium_zygote_preload_matches_only_zygote_exec() {
+        let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let output_dir = project_root.join("target/graphics-tests");
+        fs::create_dir_all(&output_dir).unwrap();
+        let output = output_dir.join("chromium-zygote-drm-preload-test");
+        let compile = Command::new("/compat/linux/usr/bin/gcc")
+            .args(["-O2", "-Wall", "-Wextra", "-Werror"])
+            .arg("-DCHROMIUM_ZYGOTE_DRM_PRELOAD_TEST")
+            .arg(project_root.join("scripts/chromium-zygote-drm-preload.c"))
+            .arg(project_root.join("tests/chromium-zygote-drm-preload-test.c"))
+            .arg("-o")
+            .arg(&output)
+            .env(
+                "PATH",
+                "/compat/linux/usr/bin:/compat/linux/bin:/usr/bin:/bin",
+            )
+            .status()
+            .expect("compile Chromium zygote preload test");
+        assert!(compile.success());
+
+        let run = Command::new(&output)
+            .status()
+            .expect("run Zypak child spawn preload test");
+        assert!(run.success());
     }
 }

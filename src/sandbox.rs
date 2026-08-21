@@ -388,10 +388,10 @@ impl ChrootInstance {
         let metadata_env = app_metadata_env(app, &env)?;
         merge_env(&mut env, metadata_env);
         merge_env(&mut env, self.host_graphics.env());
-        prepend_env_paths(
+        apply_graphics_preloads(
             &mut env,
-            "LD_PRELOAD",
             self.host_graphics.ld_preload_paths(),
+            self.host_graphics.zypak_ld_preload_paths(),
         );
         prepend_env_paths(
             &mut env,
@@ -892,6 +892,15 @@ fn prepend_env_paths(env: &mut Vec<(String, String)>, key: &str, paths: Vec<Stri
     } else {
         env.push((key.to_string(), prefix));
     }
+}
+
+fn apply_graphics_preloads(
+    env: &mut Vec<(String, String)>,
+    ld_preload_paths: Vec<String>,
+    zypak_ld_preload_paths: Vec<String>,
+) {
+    prepend_env_paths(env, "LD_PRELOAD", ld_preload_paths);
+    prepend_env_paths(env, "ZYPAK_LD_PRELOAD", zypak_ld_preload_paths);
 }
 
 fn app_extension_ld_paths(extensions: &[runtime::AppExtension]) -> Vec<String> {
@@ -1514,6 +1523,90 @@ mod tests {
                 "EXAMPLE".to_string(),
                 "/run/user/1001/app/org.example.App".to_string()
             )]
+        );
+    }
+
+    #[test]
+    fn ordinary_apps_keep_graphics_shims_in_ld_preload() {
+        let mut env = Vec::new();
+
+        apply_graphics_preloads(
+            &mut env,
+            vec!["/shim/drm.so".to_string(), "/shim/wayland.so".to_string()],
+            vec!["/shim/wayland.so".to_string(), "/shim/drm.so".to_string()],
+        );
+
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "LD_PRELOAD")
+                .map(|(_, value)| value.as_str()),
+            Some("/shim/drm.so:/shim/wayland.so")
+        );
+    }
+
+    #[test]
+    fn zypak_gets_both_graphics_shims() {
+        let mut env = Vec::new();
+
+        apply_graphics_preloads(
+            &mut env,
+            vec!["/shim/drm.so".to_string(), "/shim/wayland.so".to_string()],
+            vec!["/shim/wayland.so".to_string(), "/shim/drm.so".to_string()],
+        );
+
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "ZYPAK_LD_PRELOAD")
+                .map(|(_, value)| value.as_str()),
+            Some("/shim/wayland.so:/shim/drm.so")
+        );
+    }
+
+    #[test]
+    fn zypak_graphics_preloads_preserve_existing_value() {
+        let mut env = vec![(
+            "ZYPAK_LD_PRELOAD".to_string(),
+            "/app/existing.so".to_string(),
+        )];
+
+        apply_graphics_preloads(
+            &mut env,
+            Vec::new(),
+            vec!["/shim/wayland.so".to_string(), "/shim/drm.so".to_string()],
+        );
+
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "ZYPAK_LD_PRELOAD")
+                .map(|(_, value)| value.as_str()),
+            Some("/shim/wayland.so:/shim/drm.so:/app/existing.so")
+        );
+    }
+
+    #[test]
+    fn normal_and_zypak_preload_values_remain_independent() {
+        let mut env = vec![
+            ("LD_PRELOAD".to_string(), "/app/normal.so".to_string()),
+            ("ZYPAK_LD_PRELOAD".to_string(), "/app/zypak.so".to_string()),
+        ];
+
+        apply_graphics_preloads(
+            &mut env,
+            vec!["/shim/drm.so".to_string()],
+            vec!["/shim/wayland.so".to_string()],
+        );
+
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "LD_PRELOAD")
+                .map(|(_, value)| value.as_str()),
+            Some("/shim/drm.so:/app/normal.so")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "ZYPAK_LD_PRELOAD")
+                .map(|(_, value)| value.as_str()),
+            Some("/shim/wayland.so:/app/zypak.so")
         );
     }
 
