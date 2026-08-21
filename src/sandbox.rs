@@ -5,6 +5,7 @@ use crate::filesystem::HostFilesystem;
 use crate::fonts::HostFonts;
 use crate::graphics::HostGraphics;
 use crate::linuxulator;
+use crate::paths::Installation;
 use crate::portal::HostPortal;
 use crate::runtime::{self, FlatpakApp};
 use crate::state;
@@ -29,11 +30,11 @@ pub trait SandboxBackend {
     fn run(&self, app: &FlatpakApp, desktop: &DesktopSession) -> Result<ExitStatus>;
 }
 
-pub fn recover_stale_mounts(project_root: &Path) -> Result<()> {
-    state::ensure_layout(project_root)?;
+pub fn recover_stale_mounts(paths: &Installation) -> Result<()> {
+    state::ensure_layout(paths)?;
     let mut active_roots = Vec::new();
 
-    for record in state::read_run_records(project_root)? {
+    for record in state::read_run_records(paths)? {
         let Some(record_path) = record.get("_path").map(PathBuf::from) else {
             continue;
         };
@@ -45,9 +46,7 @@ pub fn recover_stale_mounts(project_root: &Path) -> Result<()> {
             .get("child_pid")
             .and_then(|value| value.parse::<i32>().ok())
             .unwrap_or(0);
-        let root = record
-            .get("root")
-            .map(|path| state::absolute(project_root, Path::new(path)));
+        let root = record.get("root").map(PathBuf::from);
 
         if launcher_pid > 0 && process_alive(launcher_pid) {
             if let Some(root) = root {
@@ -67,7 +66,7 @@ pub fn recover_stale_mounts(project_root: &Path) -> Result<()> {
         state::remove_run_record(&record_path)?;
     }
 
-    let chroot_root = project_root.join("runtime").join("chroots");
+    let chroot_root = paths.chroots();
     let mut stale_mounts = mount_points_under(&chroot_root)?;
     stale_mounts.retain(|mountpoint| !active_roots.iter().any(|root| mountpoint.starts_with(root)));
     let mut stale_roots = BTreeSet::new();
@@ -86,22 +85,19 @@ pub fn recover_stale_mounts(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn app_has_mounts(project_root: &Path, app_id: &str) -> Result<bool> {
-    let root = project_root
-        .join("runtime")
-        .join("chroots")
-        .join(sandbox_name(app_id));
+pub fn app_has_mounts(paths: &Installation, app_id: &str) -> Result<bool> {
+    let root = paths.chroots().join(sandbox_name(app_id));
     Ok(!mount_points_under(&root)?.is_empty())
 }
 
 #[derive(Debug, Clone)]
 pub struct ChrootNullfsBackend {
-    project_root: PathBuf,
+    paths: Installation,
 }
 
 impl ChrootNullfsBackend {
-    pub fn new(project_root: PathBuf) -> Self {
-        Self { project_root }
+    pub fn new(paths: Installation) -> Self {
+        Self { paths }
     }
 
     fn prepare(&self, app: &FlatpakApp, desktop: &DesktopSession) -> Result<ChrootInstance> {
@@ -109,28 +105,23 @@ impl ChrootNullfsBackend {
         let gid = numeric_id("id", "-g")?;
         let supplementary_gids = numeric_ids("id", "-G")?;
         let user = host_user(uid);
-        let root = self
-            .project_root
-            .join("runtime")
-            .join("chroots")
-            .join(sandbox_name(&app.app_id));
+        let root = self.paths.chroots().join(sandbox_name(&app.app_id));
         let metadata_path = app.app_dir.join("metadata");
         let network_enabled = app_allows_network(&metadata_path)?;
         let host_filesystem = HostFilesystem::from_metadata_file_for_user(
             &metadata_path,
             &user,
-            &self.project_root,
+            self.paths.data_root(),
             &root,
         )?;
         let host_audio =
             HostAudio::from_metadata_file(&metadata_path, &desktop.xdg_runtime_dir, uid)?;
         let host_cursor = HostCursorTheme::from_host();
         let host_fonts = HostFonts::from_host();
-        let host_portal =
-            HostPortal::prepare(&self.project_root, &app.app_id, desktop, uid, &root)?;
-        let host_graphics = HostGraphics::prepare(&self.project_root, app)?;
-        let host_video = HostVideo::prepare(&self.project_root, app)?;
-        let app_extensions = runtime::ensure_app_codec_extensions(&self.project_root, app)?;
+        let host_portal = HostPortal::prepare(&self.paths, &app.app_id, desktop, uid, &root)?;
+        let host_graphics = HostGraphics::prepare(&self.paths, app)?;
+        let host_video = HostVideo::prepare(&self.paths, app)?;
+        let app_extensions = runtime::ensure_app_codec_extensions(&self.paths, app)?;
 
         prepare_root(
             &root,
@@ -143,7 +134,7 @@ impl ChrootNullfsBackend {
         host_audio.prepare(&root)?;
         host_fonts.prepare(&root)?;
         let mut instance = ChrootInstance::new(
-            self.project_root.clone(),
+            self.paths.clone(),
             app.app_id.clone(),
             root,
             uid,
@@ -161,6 +152,13 @@ impl ChrootNullfsBackend {
 
         instance.mount_nullfs(&app.runtime_dir.join("files"), "usr", true)?;
         instance.mount_nullfs(&app.app_dir.join("files"), "app", true)?;
+        let app_data = self.paths.app_data(&app.app_id)?;
+        for name in ["data", "config", "cache"] {
+            let source = app_data.join(name);
+            fs::create_dir_all(&source)
+                .with_context(|| format!("create persistent app directory {}", source.display()))?;
+            instance.mount_nullfs(&source, PathBuf::from("var").join(name), false)?;
+        }
         for extension in instance.app_extensions.clone() {
             instance.mount_nullfs(
                 &extension.checkout_dir.join("files"),
@@ -225,7 +223,7 @@ impl SandboxBackend for ChrootNullfsBackend {
 
 #[derive(Debug)]
 struct ChrootInstance {
-    project_root: PathBuf,
+    paths: Installation,
     app_id: String,
     root: PathBuf,
     uid: u32,
@@ -252,7 +250,7 @@ struct OwnedMount {
 
 impl ChrootInstance {
     fn new(
-        project_root: PathBuf,
+        paths: Installation,
         app_id: String,
         root: PathBuf,
         uid: u32,
@@ -268,7 +266,7 @@ impl ChrootInstance {
         app_extensions: Vec<runtime::AppExtension>,
     ) -> Self {
         Self {
-            project_root,
+            paths,
             app_id,
             root,
             uid,
@@ -499,7 +497,7 @@ impl ChrootInstance {
         let mut child = command.spawn().context("launch app through chroot")?;
         ACTIVE_CHILD_PID.store(child.id() as i32, Ordering::SeqCst);
         self.run_record = Some(state::write_run_record(
-            &self.project_root,
+            &self.paths,
             &self.app_id,
             &self.root,
             std::process::id(),

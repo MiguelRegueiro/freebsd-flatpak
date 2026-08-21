@@ -5,6 +5,7 @@ mod filesystem;
 mod fonts;
 mod graphics;
 mod linuxulator;
+mod paths;
 mod portal;
 mod runtime;
 mod sandbox;
@@ -12,36 +13,35 @@ mod state;
 mod video;
 
 use anyhow::{bail, Context, Result};
+use paths::Installation;
 use sandbox::SandboxBackend;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 fn main() -> Result<()> {
-    let project_root = find_project_root()?;
-    std::env::set_current_dir(&project_root)
-        .with_context(|| format!("enter project root {}", project_root.display()))?;
-    state::ensure_layout(&project_root)?;
-    sandbox::recover_stale_mounts(&project_root)?;
-    portal::recover_stale_portal_mounts(&project_root)?;
-    graphics::recover_stale_graphics_dirs(&project_root)?;
+    let paths = Installation::from_env()?;
+    state::ensure_layout(&paths)?;
+    sandbox::recover_stale_mounts(&paths)?;
+    portal::recover_stale_portal_mounts(&paths)?;
+    graphics::recover_stale_graphics_dirs(&paths)?;
 
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
-        Some("search") => cmd_search(args.collect()),
-        Some("install") => cmd_install(&project_root, args.collect()),
-        Some("list") => cmd_list(&project_root, args.collect()),
-        Some("permissions") => cmd_permissions(&project_root, args.collect()),
-        Some("run") => cmd_run(&project_root, args.collect()),
-        Some("uninstall") => cmd_uninstall(&project_root, args.collect()),
-        Some("update") => cmd_update(&project_root, args.collect()),
+        Some("search") => cmd_search(&paths, args.collect()),
+        Some("install") => cmd_install(&paths, args.collect()),
+        Some("list") => cmd_list(&paths, args.collect()),
+        Some("permissions") => cmd_permissions(&paths, args.collect()),
+        Some("run") => cmd_run(&paths, args.collect()),
+        Some("uninstall") => cmd_uninstall(&paths, args.collect()),
+        Some("update") => cmd_update(&paths, args.collect()),
         Some("checkout") => {
             let ref_name = args.next().context("missing ref")?;
             let dest = args.next().context("missing destination")?;
-            runtime::checkout_ref(&ref_name, PathBuf::from(dest))
+            runtime::checkout_ref(&paths, &ref_name, PathBuf::from(dest))
         }
         Some("inspect") => {
             let refs: Vec<String> = args.collect();
-            runtime::inspect_refs(&refs)
+            runtime::inspect_refs(&paths, &refs)
         }
         Some(cmd) => anyhow::bail!("unknown command: {cmd}"),
         None => {
@@ -51,11 +51,11 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_search(args: Vec<String>) -> Result<()> {
+fn cmd_search(paths: &Installation, args: Vec<String>) -> Result<()> {
     if args.len() != 1 {
         bail!("usage: flatpak search <query>");
     }
-    let results = runtime::search_apps(&args[0])?;
+    let results = runtime::search_apps(paths, &args[0])?;
     if results.is_empty() {
         println!("No matches");
         return Ok(());
@@ -73,28 +73,28 @@ fn cmd_search(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_install(project_root: &Path, args: Vec<String>) -> Result<()> {
+fn cmd_install(paths: &Installation, args: Vec<String>) -> Result<()> {
     if args.len() != 1 {
         bail!("usage: flatpak install <app-id>");
     }
-    let installed = runtime::install_app(project_root, &args[0])?;
-    let record = state::record_install(project_root, &installed)?;
-    let export = desktop::export_app(project_root, &record)?;
+    let installed = runtime::install_app(paths, &args[0])?;
+    let record = state::record_install(paths, &installed)?;
+    let export = desktop::export_app(paths, &record)?;
     println!("Installed {}", installed.app_id);
     println!("  app ref: {}", installed.app_ref);
     println!("  app commit: {}", installed.app_commit);
     println!("  runtime: {}", installed.runtime_ref);
     println!("  runtime commit: {}", installed.runtime_commit);
     println!("  command: {}", installed.command);
-    print_export_report(project_root, &export);
+    print_export_report(paths, &export);
     Ok(())
 }
 
-fn cmd_list(project_root: &Path, args: Vec<String>) -> Result<()> {
+fn cmd_list(paths: &Installation, args: Vec<String>) -> Result<()> {
     if !args.is_empty() {
         bail!("usage: flatpak list");
     }
-    let apps = state::list_apps(project_root)?;
+    let apps = state::list_apps(paths)?;
     if apps.is_empty() {
         println!("No installed apps");
         return Ok(());
@@ -112,25 +112,22 @@ fn cmd_list(project_root: &Path, args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_permissions(project_root: &Path, args: Vec<String>) -> Result<()> {
+fn cmd_permissions(paths: &Installation, args: Vec<String>) -> Result<()> {
     if args.len() != 1 {
         bail!("usage: flatpak permissions <app-id>");
     }
-    let record = state::get_app(project_root, &args[0])?;
+    let record = state::get_app(paths, &args[0])?;
     let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
-    let sandbox_root = project_root
-        .join("runtime")
-        .join("chroots")
-        .join(&record.app_id);
+    let sandbox_root = paths.chroots().join(&record.app_id);
     let uid = numeric_id("id", "-u")?;
     let xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(format!("/run/user/{uid}")));
-    let metadata_path = state::absolute(project_root, &record.app_dir).join("metadata");
+    let metadata_path = state::absolute(paths, &record.app_dir).join("metadata");
     let host_filesystem = filesystem::HostFilesystem::from_metadata_file_for_user(
         &metadata_path,
         &user,
-        project_root,
+        paths.data_root(),
         &sandbox_root,
     )?;
     let host_audio = audio::HostAudio::from_metadata_file(&metadata_path, &xdg_runtime_dir, uid)?;
@@ -201,19 +198,19 @@ fn cmd_permissions(project_root: &Path, args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_run(project_root: &Path, args: Vec<String>) -> Result<()> {
+fn cmd_run(paths: &Installation, args: Vec<String>) -> Result<()> {
     let (app_id, mut options) = parse_run_args(args)?;
     if options.app_dir.is_none() && options.runtime_dir.is_none() && options.entry.is_none() {
-        let record = state::get_app(project_root, &app_id)?;
-        options.app_dir = Some(state::absolute(project_root, &record.app_dir));
-        options.runtime_dir = Some(state::absolute(project_root, &record.runtime_dir));
+        let record = state::get_app(paths, &app_id)?;
+        options.app_dir = Some(state::absolute(paths, &record.app_dir));
+        options.runtime_dir = Some(state::absolute(paths, &record.runtime_dir));
         options.entry = Some(record.command);
     }
 
-    let app = runtime::resolve_app(project_root, &app_id, options)?;
+    let app = runtime::resolve_app(paths, &app_id, options)?;
     let desktop = desktop::DesktopSession::from_env()
         .context("XDG_RUNTIME_DIR and WAYLAND_DISPLAY must be set")?;
-    let backend = sandbox::ChrootNullfsBackend::new(project_root.to_path_buf());
+    let backend = sandbox::ChrootNullfsBackend::new(paths.clone());
     let status = backend.run(&app, &desktop)?;
     if !status.success() {
         anyhow::bail!("{} exited with status {}", app.app_id, status);
@@ -221,56 +218,56 @@ fn cmd_run(project_root: &Path, args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_uninstall(project_root: &Path, args: Vec<String>) -> Result<()> {
+fn cmd_uninstall(paths: &Installation, args: Vec<String>) -> Result<()> {
     if args.len() != 1 {
         bail!("usage: flatpak uninstall <app-id>");
     }
     let app_id = &args[0];
-    if sandbox::app_has_mounts(project_root, app_id)? {
+    if sandbox::app_has_mounts(paths, app_id)? {
         bail!("{app_id} still has active sandbox mounts; stop it before uninstalling");
     }
-    let record = match state::get_app(project_root, app_id) {
+    let record = match state::get_app(paths, app_id) {
         Ok(record) => record,
         Err(_) => {
-            desktop::remove_export(project_root, app_id)?;
+            desktop::remove_export(paths, app_id)?;
             println!("{app_id} is not installed");
             return Ok(());
         }
     };
-    desktop::remove_export(project_root, app_id)?;
-    if state::remove_app_record(project_root, app_id)?.is_none() {
+    desktop::remove_export(paths, app_id)?;
+    if state::remove_app_record(paths, app_id)?.is_none() {
         println!("{app_id} is not installed");
         return Ok(());
     }
 
-    state::safe_remove_dir(project_root, &record.app_dir)?;
-    let chroot_dir = project_root.join("runtime").join("chroots").join(app_id);
-    state::safe_remove_dir(project_root, &chroot_dir)?;
+    state::safe_remove_dir(paths, &record.app_dir)?;
+    state::safe_remove_dir(paths, &paths.chroots().join(app_id))?;
 
-    if state::runtime_is_required(project_root, &record.runtime_ref)? {
+    if state::runtime_is_required(paths, &record.runtime_ref)? {
         println!("Uninstalled {app_id}");
         println!("  kept shared runtime {}", record.runtime_ref);
     } else {
-        state::safe_remove_dir(project_root, &record.runtime_dir)?;
-        state::remove_runtime_record(project_root, &record.runtime_ref)?;
+        state::safe_remove_dir(paths, &record.runtime_dir)?;
+        state::remove_runtime_record(paths, &record.runtime_ref)?;
         println!("Uninstalled {app_id}");
         println!("  removed unused runtime {}", record.runtime_ref);
     }
     Ok(())
 }
 
-fn cmd_update(project_root: &Path, args: Vec<String>) -> Result<()> {
-    let targets = update_targets(project_root, args)?;
-
-    if targets.is_empty() {
+fn cmd_update(paths: &Installation, args: Vec<String>) -> Result<()> {
+    let installed = state::list_apps(paths)?;
+    if installed.is_empty() {
         println!("No installed apps");
         return Ok(());
     }
+    let metadata = runtime::load_remote_metadata(paths)?;
+    let targets = update_targets(installed, args, &metadata)?;
 
     let mut touched_runtimes = BTreeSet::new();
     for target in targets {
         let record = target.record;
-        if sandbox::app_has_mounts(project_root, &record.app_id)? {
+        if sandbox::app_has_mounts(paths, &record.app_id)? {
             bail!(
                 "{} still has active sandbox mounts; stop it before updating",
                 record.app_id
@@ -279,32 +276,28 @@ fn cmd_update(project_root: &Path, args: Vec<String>) -> Result<()> {
 
         let remote = match target.remote {
             Some(remote) => remote,
-            None => runtime::resolve_remote_app(&record.app_id)?,
+            None => metadata
+                .resolve_exact_ref(&record.app_ref)
+                .or_else(|_| metadata.resolve_app(&record.app_id, true))?,
         };
-        let status = update_status(project_root, &record, &remote)?;
+        let status = update_status(paths, &record, &remote)?;
 
         if !status.app_changed && !status.runtime_changed {
             println!("{} is up to date", record.app_id);
-            let export = desktop::export_app(project_root, &record)?;
-            print_export_report(project_root, &export);
             continue;
         }
 
         let force_runtime =
             status.runtime_checkout_stale && touched_runtimes.insert(remote.runtime_ref.clone());
-        let installed = runtime::update_app(
-            project_root,
-            &remote,
-            status.app_checkout_stale,
-            force_runtime,
-        )?;
-        let installed_record = state::record_install(project_root, &installed)?;
+        let installed =
+            runtime::update_app(paths, &remote, status.app_checkout_stale, force_runtime)?;
+        let installed_record = state::record_install(paths, &installed)?;
         if record.app_id != installed.app_id {
-            desktop::remove_export(project_root, &record.app_id)?;
-            state::remove_app_record(project_root, &record.app_id)?;
-            state::safe_remove_dir(project_root, &record.app_dir)?;
+            desktop::remove_export(paths, &record.app_id)?;
+            state::remove_app_record(paths, &record.app_id)?;
+            state::safe_remove_dir(paths, &record.app_dir)?;
         }
-        let export = desktop::export_app(project_root, &installed_record)?;
+        let export = desktop::export_app(paths, &installed_record)?;
         println!("Updated {}", installed.app_id);
         if record.app_id != installed.app_id {
             println!("  app id: {} -> {}", record.app_id, installed.app_id);
@@ -322,13 +315,13 @@ fn cmd_update(project_root: &Path, args: Vec<String>) -> Result<()> {
                 installed.runtime_commit
             );
         }
-        print_export_report(project_root, &export);
+        print_export_report(paths, &export);
 
         if record.runtime_ref != installed.runtime_ref
-            && !state::runtime_is_required(project_root, &record.runtime_ref)?
+            && !state::runtime_is_required(paths, &record.runtime_ref)?
         {
-            state::safe_remove_dir(project_root, &record.runtime_dir)?;
-            state::remove_runtime_record(project_root, &record.runtime_ref)?;
+            state::safe_remove_dir(paths, &record.runtime_dir)?;
+            state::remove_runtime_record(paths, &record.runtime_ref)?;
         }
     }
 
@@ -350,8 +343,11 @@ struct UpdateStatus {
     current_runtime_commit: Option<String>,
 }
 
-fn update_targets(project_root: &Path, args: Vec<String>) -> Result<Vec<UpdateTarget>> {
-    let installed = state::list_apps(project_root)?;
+fn update_targets(
+    installed: Vec<state::AppRecord>,
+    args: Vec<String>,
+    metadata: &runtime::RemoteMetadata,
+) -> Result<Vec<UpdateTarget>> {
     if args.is_empty() {
         return Ok(installed
             .into_iter()
@@ -370,7 +366,8 @@ fn update_targets(project_root: &Path, args: Vec<String>) -> Result<Vec<UpdateTa
         {
             (record.clone(), None)
         } else {
-            let remote = runtime::resolve_remote_app(&requested)
+            let remote = metadata
+                .resolve_app(&requested, true)
                 .with_context(|| format!("resolve {requested} in Flathub"))?;
             let record = installed
                     .iter()
@@ -398,11 +395,11 @@ fn update_targets(project_root: &Path, args: Vec<String>) -> Result<Vec<UpdateTa
 }
 
 fn update_status(
-    project_root: &Path,
+    paths: &Installation,
     record: &state::AppRecord,
     remote: &runtime::RemoteApp,
 ) -> Result<UpdateStatus> {
-    let app_dir = state::absolute(project_root, &record.app_dir);
+    let app_dir = state::absolute(paths, &record.app_dir);
     let app_checkout_present = checkout_present(&app_dir);
     let app_state_changed = record.app_id != remote.app_id
         || record.app_ref != remote.app_ref
@@ -415,17 +412,16 @@ fn update_status(
         || record.app_ref != remote.app_ref
         || record.app_commit != remote.app_commit;
 
-    let runtime_dir = project_root
-        .join("runtime")
+    let runtime_dir = paths
+        .runtimes()
         .join(runtime::runtime_checkout_dir(&remote.runtime_ref));
-    let current_runtime_commit =
-        state::runtime_commit(project_root, &remote.runtime_ref)?.or_else(|| {
-            if record.runtime_ref == remote.runtime_ref {
-                Some(record.runtime_commit.clone())
-            } else {
-                None
-            }
-        });
+    let current_runtime_commit = state::runtime_commit(paths, &remote.runtime_ref)?.or_else(|| {
+        if record.runtime_ref == remote.runtime_ref {
+            Some(record.runtime_commit.clone())
+        } else {
+            None
+        }
+    });
     let runtime_checkout_stale = !checkout_present(&runtime_dir)
         || current_runtime_commit.as_deref() != Some(remote.runtime_commit.as_str());
     let runtime_state_changed =
@@ -444,12 +440,12 @@ fn checkout_present(dir: &Path) -> bool {
     dir.join("metadata").is_file() && dir.join("files").is_dir()
 }
 
-fn print_export_report(project_root: &Path, export: &desktop::ExportReport) {
+fn print_export_report(paths: &Installation, export: &desktop::ExportReport) {
     println!("  exported files: {}", export.files);
     println!("  desktop entries: {}", export.desktop_entries);
     println!(
         "  export data dir: {}",
-        desktop::export_data_dir(project_root).display()
+        desktop::export_data_dir(paths).display()
     );
     if !export.skipped.is_empty() {
         let skipped = export
@@ -522,47 +518,6 @@ fn numeric_id(program: &str, arg: &str) -> Result<u32> {
         .with_context(|| format!("parse numeric id from {text:?}"))
 }
 
-fn find_project_root() -> Result<PathBuf> {
-    if let Ok(root) = std::env::var("FREEBSD_FLATPAK_POC_ROOT") {
-        return Ok(PathBuf::from(root));
-    }
-
-    let cwd = std::env::current_dir().context("determine current directory")?;
-    if looks_like_project_root(&cwd) {
-        return Ok(cwd);
-    }
-
-    let exe = std::env::current_exe().context("determine executable path")?;
-    if let Some(parent) = exe.parent() {
-        if parent.file_name().and_then(|name| name.to_str()) == Some("bin") {
-            if let Some(root) = parent.parent() {
-                if looks_like_project_root(root) {
-                    return Ok(root.to_path_buf());
-                }
-            }
-        }
-        if parent.file_name().and_then(|name| name.to_str()) == Some("debug") {
-            if let Some(target) = parent.parent() {
-                if target.file_name().and_then(|name| name.to_str()) == Some("target") {
-                    if let Some(root) = target.parent() {
-                        if looks_like_project_root(root) {
-                            return Ok(root.to_path_buf());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    bail!(
-        "could not find freebsd-flatpak-poc project root; run from the project or set FREEBSD_FLATPAK_POC_ROOT"
-    );
-}
-
-fn looks_like_project_root(path: &Path) -> bool {
-    path.join("Cargo.toml").is_file() && path.join("runtime").is_dir()
-}
-
 fn print_usage() {
     eprintln!("usage:");
     eprintln!("  flatpak search <query>");
@@ -608,12 +563,12 @@ mod tests {
             app_id: app_id.to_string(),
             app_ref: app_ref.to_string(),
             app_commit: app_commit.to_string(),
-            app_dir: PathBuf::from("runtime").join("app").join(app_id),
+            app_dir: PathBuf::from("apps").join(app_id),
             arch: "x86_64".to_string(),
             branch: "stable".to_string(),
             runtime_ref: "org.example.Platform/x86_64/stable".to_string(),
             runtime_commit: "runtime-1".to_string(),
-            runtime_dir: PathBuf::from("runtime").join("org.example.Platform-stable"),
+            runtime_dir: PathBuf::from("runtimes").join("org.example.Platform-stable"),
             command: "old-command".to_string(),
         }
     }
@@ -631,21 +586,22 @@ mod tests {
         }
     }
 
-    fn create_runtime_checkout(root: &Path) {
+    fn create_runtime_checkout(paths: &Installation) {
         create_checkout(
-            root,
-            &PathBuf::from("runtime").join("org.example.Platform-stable"),
+            paths.data_root(),
+            &PathBuf::from("runtimes").join("org.example.Platform-stable"),
         );
     }
 
     #[test]
     fn newer_remote_app_commit_requires_app_checkout() {
         let root = test_dir("newer-app-commit");
+        let paths = Installation::for_test(&root);
         create_checkout(
-            &root,
-            &PathBuf::from("runtime").join("app").join("org.example.App"),
+            paths.data_root(),
+            &PathBuf::from("apps").join("org.example.App"),
         );
-        create_runtime_checkout(&root);
+        create_runtime_checkout(&paths);
         let mut record = app_record(
             "org.example.App",
             "app/org.example.App/x86_64/stable",
@@ -658,7 +614,7 @@ mod tests {
             "app-2",
         );
 
-        let status = update_status(&root, &record, &remote).unwrap();
+        let status = update_status(&paths, &record, &remote).unwrap();
 
         assert!(status.app_changed);
         assert!(status.app_checkout_stale);
@@ -669,13 +625,12 @@ mod tests {
     #[test]
     fn app_id_replacement_requires_app_checkout_even_with_same_commit() {
         let root = test_dir("replacement");
+        let paths = Installation::for_test(&root);
         create_checkout(
-            &root,
-            &PathBuf::from("runtime")
-                .join("app")
-                .join("org.example.OldApp"),
+            paths.data_root(),
+            &PathBuf::from("apps").join("org.example.OldApp"),
         );
-        create_runtime_checkout(&root);
+        create_runtime_checkout(&paths);
         let mut record = app_record(
             "org.example.OldApp",
             "app/org.example.OldApp/x86_64/stable",
@@ -688,7 +643,7 @@ mod tests {
             "app-1",
         );
 
-        let status = update_status(&root, &record, &remote).unwrap();
+        let status = update_status(&paths, &record, &remote).unwrap();
 
         assert!(status.app_changed);
         assert!(status.app_checkout_stale);
@@ -697,9 +652,10 @@ mod tests {
     #[test]
     fn missing_runtime_checkout_requires_runtime_checkout() {
         let root = test_dir("missing-runtime");
+        let paths = Installation::for_test(&root);
         create_checkout(
-            &root,
-            &PathBuf::from("runtime").join("app").join("org.example.App"),
+            paths.data_root(),
+            &PathBuf::from("apps").join("org.example.App"),
         );
         let mut record = app_record(
             "org.example.App",
@@ -713,7 +669,7 @@ mod tests {
             "app-1",
         );
 
-        let status = update_status(&root, &record, &remote).unwrap();
+        let status = update_status(&paths, &record, &remote).unwrap();
 
         assert!(status.runtime_changed);
         assert!(status.runtime_checkout_stale);
@@ -723,11 +679,12 @@ mod tests {
     #[test]
     fn stale_record_command_updates_state_without_app_checkout() {
         let root = test_dir("state-only-command");
+        let paths = Installation::for_test(&root);
         create_checkout(
-            &root,
-            &PathBuf::from("runtime").join("app").join("org.example.App"),
+            paths.data_root(),
+            &PathBuf::from("apps").join("org.example.App"),
         );
-        create_runtime_checkout(&root);
+        create_runtime_checkout(&paths);
         let record = app_record(
             "org.example.App",
             "app/org.example.App/x86_64/stable",
@@ -739,7 +696,7 @@ mod tests {
             "app-1",
         );
 
-        let status = update_status(&root, &record, &remote).unwrap();
+        let status = update_status(&paths, &record, &remote).unwrap();
 
         assert!(status.app_changed);
         assert!(!status.app_checkout_stale);

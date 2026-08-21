@@ -1,3 +1,4 @@
+use crate::paths::Installation;
 use crate::runtime::InstalledApp;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
@@ -26,31 +27,31 @@ pub struct RuntimeRecord {
     pub runtime_dir: PathBuf,
 }
 
-pub fn ensure_layout(project_root: &Path) -> Result<()> {
-    fs::create_dir_all(apps_dir(project_root)).context("create app state directory")?;
-    fs::create_dir_all(runtimes_dir(project_root)).context("create runtime state directory")?;
-    fs::create_dir_all(runs_dir(project_root)).context("create run state directory")?;
-    fs::create_dir_all(exports_dir(project_root)).context("create export state directory")?;
+pub fn ensure_layout(paths: &Installation) -> Result<()> {
+    paths.ensure()?;
+    fs::create_dir_all(apps_dir(paths)).context("create app state directory")?;
+    fs::create_dir_all(runtimes_dir(paths)).context("create runtime state directory")?;
+    fs::create_dir_all(exports_dir(paths)).context("create export state directory")?;
     Ok(())
 }
 
-pub fn record_install(project_root: &Path, installed: &InstalledApp) -> Result<AppRecord> {
-    ensure_layout(project_root)?;
+pub fn record_install(paths: &Installation, installed: &InstalledApp) -> Result<AppRecord> {
+    ensure_layout(paths)?;
     let app = AppRecord {
         app_id: installed.app_id.clone(),
         app_ref: installed.app_ref.clone(),
         app_commit: installed.app_commit.clone(),
-        app_dir: relative_to(project_root, &installed.app_dir)?,
+        app_dir: paths.relative_data_path(&installed.app_dir)?,
         arch: installed.arch.clone(),
         branch: installed.branch.clone(),
         runtime_ref: installed.runtime_ref.clone(),
         runtime_commit: installed.runtime_commit.clone(),
-        runtime_dir: relative_to(project_root, &installed.runtime_dir)?,
+        runtime_dir: paths.relative_data_path(&installed.runtime_dir)?,
         command: installed.command.clone(),
     };
-    write_app(project_root, &app)?;
+    write_app(paths, &app)?;
     write_runtime(
-        project_root,
+        paths,
         &RuntimeRecord {
             runtime_ref: app.runtime_ref.clone(),
             runtime_commit: app.runtime_commit.clone(),
@@ -60,10 +61,10 @@ pub fn record_install(project_root: &Path, installed: &InstalledApp) -> Result<A
     Ok(app)
 }
 
-pub fn list_apps(project_root: &Path) -> Result<Vec<AppRecord>> {
-    ensure_layout(project_root)?;
+pub fn list_apps(paths: &Installation) -> Result<Vec<AppRecord>> {
+    ensure_layout(paths)?;
     let mut apps = Vec::new();
-    for entry in fs::read_dir(apps_dir(project_root)).context("read app state directory")? {
+    for entry in fs::read_dir(apps_dir(paths)).context("read app state directory")? {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
             continue;
@@ -74,13 +75,13 @@ pub fn list_apps(project_root: &Path) -> Result<Vec<AppRecord>> {
     Ok(apps)
 }
 
-pub fn get_app(project_root: &Path, app_id: &str) -> Result<AppRecord> {
-    let path = app_record_path(project_root, app_id)?;
+pub fn get_app(paths: &Installation, app_id: &str) -> Result<AppRecord> {
+    let path = app_record_path(paths, app_id)?;
     read_app_path(&path).with_context(|| format!("{app_id} is not installed"))
 }
 
-pub fn remove_app_record(project_root: &Path, app_id: &str) -> Result<Option<AppRecord>> {
-    let path = app_record_path(project_root, app_id)?;
+pub fn remove_app_record(paths: &Installation, app_id: &str) -> Result<Option<AppRecord>> {
+    let path = app_record_path(paths, app_id)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -89,17 +90,17 @@ pub fn remove_app_record(project_root: &Path, app_id: &str) -> Result<Option<App
     Ok(Some(record))
 }
 
-pub fn runtime_commit(project_root: &Path, runtime_ref: &str) -> Result<Option<String>> {
-    let path = runtime_record_path(project_root, runtime_ref);
+pub fn runtime_commit(paths: &Installation, runtime_ref: &str) -> Result<Option<String>> {
+    let path = runtime_record_path(paths, runtime_ref);
     if !path.exists() {
         return Ok(None);
     }
     Ok(Some(read_runtime_path(&path)?.runtime_commit))
 }
 
-pub fn write_runtime(project_root: &Path, runtime: &RuntimeRecord) -> Result<()> {
-    ensure_layout(project_root)?;
-    let path = runtime_record_path(project_root, &runtime.runtime_ref);
+pub fn write_runtime(paths: &Installation, runtime: &RuntimeRecord) -> Result<()> {
+    ensure_layout(paths)?;
+    let path = runtime_record_path(paths, &runtime.runtime_ref);
     let data = format!(
         "runtime_ref={}\nruntime_commit={}\nruntime_dir={}\n",
         runtime.runtime_ref,
@@ -109,22 +110,22 @@ pub fn write_runtime(project_root: &Path, runtime: &RuntimeRecord) -> Result<()>
     write_atomic(&path, data.as_bytes())
 }
 
-pub fn remove_runtime_record(project_root: &Path, runtime_ref: &str) -> Result<()> {
-    let path = runtime_record_path(project_root, runtime_ref);
+pub fn remove_runtime_record(paths: &Installation, runtime_ref: &str) -> Result<()> {
+    let path = runtime_record_path(paths, runtime_ref);
     if path.exists() {
         fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
     }
     Ok(())
 }
 
-pub fn runtime_is_required(project_root: &Path, runtime_ref: &str) -> Result<bool> {
-    for app in list_apps(project_root)? {
+pub fn runtime_is_required(paths: &Installation, runtime_ref: &str) -> Result<bool> {
+    for app in list_apps(paths)? {
         if app.runtime_ref == runtime_ref {
             return Ok(true);
         }
     }
 
-    let app_root = project_root.join("runtime").join("app");
+    let app_root = paths.apps();
     if !app_root.is_dir() {
         return Ok(false);
     }
@@ -148,20 +149,19 @@ pub fn runtime_is_required(project_root: &Path, runtime_ref: &str) -> Result<boo
     Ok(false)
 }
 
-pub fn run_record_path(project_root: &Path, app_id: &str) -> Result<PathBuf> {
-    Ok(runs_dir(project_root).join(format!("{}.ini", safe_name(app_id)?)))
+pub fn run_record_path(paths: &Installation, app_id: &str) -> Result<PathBuf> {
+    Ok(paths.runs().join(format!("{}.ini", safe_name(app_id)?)))
 }
 
 pub fn write_run_record(
-    project_root: &Path,
+    paths: &Installation,
     app_id: &str,
     root: &Path,
     launcher_pid: u32,
     child_pid: u32,
 ) -> Result<PathBuf> {
-    ensure_layout(project_root)?;
-    let path = run_record_path(project_root, app_id)?;
-    let root = relative_to(project_root, root)?;
+    ensure_layout(paths)?;
+    let path = run_record_path(paths, app_id)?;
     let data = format!(
         "app_id={app_id}\nroot={}\nlauncher_pid={launcher_pid}\nchild_pid={child_pid}\n",
         root.display()
@@ -177,10 +177,10 @@ pub fn remove_run_record(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn read_run_records(project_root: &Path) -> Result<Vec<BTreeMap<String, String>>> {
-    ensure_layout(project_root)?;
+pub fn read_run_records(paths: &Installation) -> Result<Vec<BTreeMap<String, String>>> {
+    ensure_layout(paths)?;
     let mut records = Vec::new();
-    for entry in fs::read_dir(runs_dir(project_root)).context("read run state directory")? {
+    for entry in fs::read_dir(paths.runs()).context("read run state directory")? {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
             continue;
@@ -192,13 +192,17 @@ pub fn read_run_records(project_root: &Path) -> Result<Vec<BTreeMap<String, Stri
     Ok(records)
 }
 
-pub fn export_record_path(project_root: &Path, app_id: &str) -> Result<PathBuf> {
-    Ok(exports_dir(project_root).join(format!("{}.list", safe_name(app_id)?)))
+pub fn export_record_path(paths: &Installation, app_id: &str) -> Result<PathBuf> {
+    Ok(exports_dir(paths).join(format!("{}.list", safe_name(app_id)?)))
 }
 
-pub fn write_export_record(project_root: &Path, app_id: &str, paths: &[PathBuf]) -> Result<()> {
-    ensure_layout(project_root)?;
-    let path = export_record_path(project_root, app_id)?;
+pub fn write_export_record(
+    installation: &Installation,
+    app_id: &str,
+    paths: &[PathBuf],
+) -> Result<()> {
+    ensure_layout(installation)?;
+    let path = export_record_path(installation, app_id)?;
     let mut data = String::new();
     for path in paths {
         data.push_str(&path.display().to_string());
@@ -207,8 +211,8 @@ pub fn write_export_record(project_root: &Path, app_id: &str, paths: &[PathBuf])
     write_atomic(&path, data.as_bytes())
 }
 
-pub fn read_export_record(project_root: &Path, app_id: &str) -> Result<Vec<PathBuf>> {
-    let path = export_record_path(project_root, app_id)?;
+pub fn read_export_record(paths: &Installation, app_id: &str) -> Result<Vec<PathBuf>> {
+    let path = export_record_path(paths, app_id)?;
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -221,34 +225,38 @@ pub fn read_export_record(project_root: &Path, app_id: &str) -> Result<Vec<PathB
         .collect())
 }
 
-pub fn remove_export_record(project_root: &Path, app_id: &str) -> Result<()> {
-    let path = export_record_path(project_root, app_id)?;
+pub fn remove_export_record(paths: &Installation, app_id: &str) -> Result<()> {
+    let path = export_record_path(paths, app_id)?;
     if path.exists() {
         fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
     }
     Ok(())
 }
 
-pub fn absolute(project_root: &Path, path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        project_root.join(path)
-    }
+pub fn absolute(paths: &Installation, path: &Path) -> PathBuf {
+    paths.absolute_data_path(path)
 }
 
-pub fn safe_remove_dir(project_root: &Path, path: &Path) -> Result<()> {
-    let path = absolute(project_root, path);
+pub fn safe_remove_dir(paths: &Installation, path: &Path) -> Result<()> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        paths.absolute_data_path(path)
+    };
     if !path.exists() {
         return Ok(());
     }
 
     let allowed = [
-        project_root.join("runtime").join("app"),
-        project_root.join("runtime").join("chroots"),
-        project_root.join("runtime"),
+        paths.apps(),
+        paths.runtimes(),
+        paths.chroots(),
+        paths.extensions(),
     ];
-    if !allowed.iter().any(|root| path.starts_with(root)) || path == project_root.join("runtime") {
+    if !allowed
+        .iter()
+        .any(|root| path.starts_with(root) && path != *root)
+    {
         bail!(
             "refusing to remove path outside managed runtime data: {}",
             path.display()
@@ -258,8 +266,8 @@ pub fn safe_remove_dir(project_root: &Path, path: &Path) -> Result<()> {
     fs::remove_dir_all(&path).with_context(|| format!("remove {}", path.display()))
 }
 
-fn write_app(project_root: &Path, app: &AppRecord) -> Result<()> {
-    let path = app_record_path(project_root, &app.app_id)?;
+fn write_app(paths: &Installation, app: &AppRecord) -> Result<()> {
+    let path = app_record_path(paths, &app.app_id)?;
     let data = format!(
         "app_id={}\napp_ref={}\napp_commit={}\napp_dir={}\narch={}\nbranch={}\nruntime_ref={}\nruntime_commit={}\nruntime_dir={}\ncommand={}\n",
         app.app_id,
@@ -341,46 +349,24 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     fs::rename(&tmp, path).with_context(|| format!("move {} to {}", tmp.display(), path.display()))
 }
 
-fn app_record_path(project_root: &Path, app_id: &str) -> Result<PathBuf> {
-    Ok(apps_dir(project_root).join(format!("{}.ini", safe_name(app_id)?)))
+fn app_record_path(paths: &Installation, app_id: &str) -> Result<PathBuf> {
+    Ok(apps_dir(paths).join(format!("{}.ini", safe_name(app_id)?)))
 }
 
-fn runtime_record_path(project_root: &Path, runtime_ref: &str) -> PathBuf {
-    runtimes_dir(project_root).join(format!("{}.ini", safe_name_lossy(runtime_ref)))
+fn runtime_record_path(paths: &Installation, runtime_ref: &str) -> PathBuf {
+    runtimes_dir(paths).join(format!("{}.ini", safe_name_lossy(runtime_ref)))
 }
 
-fn apps_dir(project_root: &Path) -> PathBuf {
-    project_root.join("state").join("apps")
+fn apps_dir(paths: &Installation) -> PathBuf {
+    paths.refs().join("apps")
 }
 
-fn runtimes_dir(project_root: &Path) -> PathBuf {
-    project_root.join("state").join("runtimes")
+fn runtimes_dir(paths: &Installation) -> PathBuf {
+    paths.refs().join("runtimes")
 }
 
-fn runs_dir(project_root: &Path) -> PathBuf {
-    project_root.join("state").join("runs")
-}
-
-fn exports_dir(project_root: &Path) -> PathBuf {
-    project_root.join("state").join("exports")
-}
-
-fn relative_to(project_root: &Path, path: &Path) -> Result<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        project_root.join(path)
-    };
-    Ok(absolute
-        .strip_prefix(project_root)
-        .with_context(|| {
-            format!(
-                "{} is outside {}",
-                absolute.display(),
-                project_root.display()
-            )
-        })?
-        .to_path_buf())
+fn exports_dir(paths: &Installation) -> PathBuf {
+    paths.refs().join("exports")
 }
 
 fn safe_name(value: &str) -> Result<String> {

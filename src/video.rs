@@ -1,3 +1,4 @@
+use crate::paths::Installation;
 use crate::runtime::{self, FlatpakApp, RuntimeVaapiExtension};
 use anyhow::{Context, Result};
 use std::fs;
@@ -17,10 +18,10 @@ pub struct VideoMount {
 }
 
 impl HostVideo {
-    pub fn prepare(project_root: &Path, app: &FlatpakApp) -> Result<Self> {
+    pub fn prepare(paths: &Installation, app: &FlatpakApp) -> Result<Self> {
         let mut warnings = Vec::new();
         let vaapi = if host_has_intel_drm_device() {
-            runtime::ensure_intel_vaapi_extension(project_root, &app.runtime_ref, &app.runtime_dir)?
+            runtime::ensure_intel_vaapi_extension(paths, &app.runtime_ref, &app.runtime_dir)?
         } else {
             warnings.push(
                 "Intel VAAPI extension disabled: no Intel DRM render node detected".to_string(),

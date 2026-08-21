@@ -1,14 +1,12 @@
 use crate::desktop::DesktopSession;
+use crate::paths::Installation;
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, SystemTime};
-
-const BRIDGE_SOURCE: &str = "scripts/portal-bridge.c";
-const BRIDGE_BIN: &str = "target/portal/portal-bridge";
+use std::time::Duration;
 
 #[derive(Debug)]
 pub struct HostPortal {
@@ -35,7 +33,7 @@ enum PortalMode {
 
 impl HostPortal {
     pub fn prepare(
-        project_root: &Path,
+        paths: &Installation,
         app_id: &str,
         desktop: &DesktopSession,
         uid: u32,
@@ -51,13 +49,9 @@ impl HostPortal {
             });
         };
 
-        let helper = ensure_bridge_helper(project_root)?;
+        let helper = ensure_bridge_helper(paths)?;
         let run_id = format!("{}-{}", sanitize_id(app_id), std::process::id());
-        let doc_dir = project_root
-            .join("runtime")
-            .join("portal")
-            .join("doc")
-            .join(&run_id);
+        let doc_dir = paths.portal().join("doc").join(&run_id);
         fs::create_dir_all(&doc_dir).with_context(|| format!("create {}", doc_dir.display()))?;
         let sandbox_doc_dir = sandbox_root
             .join("run")
@@ -65,10 +59,7 @@ impl HostPortal {
             .join(uid.to_string())
             .join("doc");
 
-        let bus_dir = desktop
-            .xdg_runtime_dir
-            .join("freebsd-flatpak-poc")
-            .join(&run_id);
+        let bus_dir = paths.portal().join("bus").join(&run_id);
         fs::create_dir_all(&bus_dir).with_context(|| format!("create {}", bus_dir.display()))?;
         let bus_socket = bus_dir.join("bus");
         if bus_socket.exists() {
@@ -186,9 +177,9 @@ impl HostPortal {
     }
 }
 
-pub fn recover_stale_portal_mounts(project_root: &Path) -> Result<()> {
-    let active_launcher_pids = active_launcher_pids(project_root)?;
-    let doc_root = project_root.join("runtime").join("portal").join("doc");
+pub fn recover_stale_portal_mounts(paths: &Installation) -> Result<()> {
+    let active_launcher_pids = active_launcher_pids(paths)?;
+    let doc_root = paths.portal().join("doc");
     unmount_under(&doc_root)?;
     if doc_root.is_dir() {
         for entry in fs::read_dir(&doc_root)
@@ -202,8 +193,8 @@ pub fn recover_stale_portal_mounts(project_root: &Path) -> Result<()> {
         }
     }
 
-    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
-        let bus_root = runtime_dir.join("freebsd-flatpak-poc");
+    {
+        let bus_root = paths.portal().join("bus");
         if bus_root.is_dir() {
             for entry in fs::read_dir(&bus_root)
                 .with_context(|| format!("read portal bus root {}", bus_root.display()))?
@@ -219,45 +210,10 @@ pub fn recover_stale_portal_mounts(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn ensure_bridge_helper(project_root: &Path) -> Result<PathBuf> {
-    let source = project_root.join(BRIDGE_SOURCE);
-    let output = project_root.join(BRIDGE_BIN);
-    let output_dir = output
-        .parent()
-        .context("document portal bridge output path has no parent")?;
-    fs::create_dir_all(output_dir).with_context(|| format!("create {}", output_dir.display()))?;
-
-    if !needs_rebuild(&source, &output)? {
-        return Ok(output);
-    }
-
-    let pkg_config = Command::new("pkg-config")
-        .args([
-            "--cflags",
-            "--libs",
-            "gio-2.0",
-            "gio-unix-2.0",
-            "glib-2.0",
-            "libpipewire-0.3",
-        ])
-        .output()
-        .context("run pkg-config for portal bridge")?;
-    if !pkg_config.status.success() {
-        bail!(
-            "pkg-config failed for portal bridge with status {}",
-            pkg_config.status
-        );
-    }
-    let flags = String::from_utf8(pkg_config.stdout).context("pkg-config output is not UTF-8")?;
-
-    let mut command = Command::new("cc");
-    command.arg(&source).arg("-o").arg(&output);
-    command.args(flags.split_whitespace());
-    let status = command
-        .status()
-        .with_context(|| format!("compile {}", output.display()))?;
-    if !status.success() {
-        bail!("compile {} failed with status {}", output.display(), status);
+fn ensure_bridge_helper(paths: &Installation) -> Result<PathBuf> {
+    let output = paths.libexec_root().join("portal-bridge");
+    if !output.is_file() {
+        bail!("installed portal helper is missing: {}", output.display());
     }
     Ok(output)
 }
@@ -350,24 +306,6 @@ fn sandbox_bus_address(xdg_runtime_dir: &Path, bus_socket: &Path, uid: u32) -> R
         )
     })?;
     Ok(format!("unix:path=/run/user/{uid}/{}", relative.display()))
-}
-
-fn needs_rebuild(source: &Path, output: &Path) -> Result<bool> {
-    let Ok(output_meta) = fs::metadata(output) else {
-        return Ok(true);
-    };
-    let source_time = modified(source)?;
-    let output_time = output_meta
-        .modified()
-        .with_context(|| format!("read mtime {}", output.display()))?;
-    Ok(source_time > output_time)
-}
-
-fn modified(path: &Path) -> Result<SystemTime> {
-    fs::metadata(path)
-        .with_context(|| format!("stat {}", path.display()))?
-        .modified()
-        .with_context(|| format!("read mtime {}", path.display()))
 }
 
 fn wait_for_portal_proxy(bus_address: &str, mountpoint: &str) -> Result<()> {
@@ -545,9 +483,9 @@ fn sanitize_id(id: &str) -> String {
         .collect()
 }
 
-fn active_launcher_pids(project_root: &Path) -> Result<Vec<i32>> {
+fn active_launcher_pids(paths: &Installation) -> Result<Vec<i32>> {
     let mut pids = Vec::new();
-    for record in crate::state::read_run_records(project_root)? {
+    for record in crate::state::read_run_records(paths)? {
         let pid = record
             .get("launcher_pid")
             .and_then(|value| value.parse::<i32>().ok())

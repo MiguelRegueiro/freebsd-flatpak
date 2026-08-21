@@ -1,3 +1,4 @@
+use crate::paths::Installation;
 use anyhow::{bail, Context, Result};
 use glib::{Bytes, Variant, VariantTy};
 use miniz_oxide::inflate::decompress_to_vec;
@@ -97,6 +98,39 @@ struct RemoteRef {
 }
 
 #[derive(Debug, Clone)]
+pub struct RemoteMetadata {
+    arch: String,
+    refs: Vec<RemoteRef>,
+    objects: PathBuf,
+    remote_dir: PathBuf,
+}
+
+impl RemoteMetadata {
+    pub fn resolve_exact_ref(&self, app_ref: &str) -> Result<RemoteApp> {
+        let remote_ref = self
+            .refs
+            .iter()
+            .find(|item| item.name == app_ref)
+            .cloned()
+            .with_context(|| format!("app ref is no longer present in Flathub: {app_ref}"))?;
+        remote_app_from_ref(&self.refs, remote_ref, &self.arch, &self.objects)
+    }
+
+    pub fn resolve_app(&self, app_id: &str, replacements: bool) -> Result<RemoteApp> {
+        if app_id.contains('/') {
+            bail!("app id must not contain '/': {app_id}");
+        }
+        let app_id = if replacements {
+            resolve_current_app_id(&self.refs, app_id, &self.arch, &self.remote_dir)?
+        } else {
+            app_id.to_string()
+        };
+        let app_ref = choose_app_ref(&self.refs, &app_id, &self.arch)?;
+        remote_app_from_ref(&self.refs, app_ref, &self.arch, &self.objects)
+    }
+}
+
+#[derive(Debug, Clone)]
 struct Commit {
     checksum: String,
     tree: String,
@@ -117,7 +151,7 @@ struct DirEntry {
     _dirmeta: String,
 }
 
-pub fn inspect_refs(refs: &[String]) -> Result<()> {
+pub fn inspect_refs(paths: &Installation, refs: &[String]) -> Result<()> {
     let refs: Vec<String> = if refs.is_empty() {
         vec![
             "app/org.gnome.Calculator/x86_64/stable".to_string(),
@@ -129,7 +163,7 @@ pub fn inspect_refs(refs: &[String]) -> Result<()> {
 
     for ref_name in refs {
         let checksum = fetch_ref(&ref_name)?;
-        let commit = fetch_commit(&checksum)?;
+        let commit = fetch_commit(&paths.objects(), &checksum)?;
         println!("{ref_name}");
         println!("  commit: {}", commit.checksum);
         println!("  tree: {}", commit.tree);
@@ -144,31 +178,45 @@ pub fn inspect_refs(refs: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub fn install_app(project_root: &Path, app_id: &str) -> Result<InstalledApp> {
-    let remote = resolve_remote_app(app_id)?;
-    checkout_remote_app(project_root, &remote, false, false)
+pub fn install_app(paths: &Installation, app_id: &str) -> Result<InstalledApp> {
+    let remote = resolve_remote_app(paths, app_id)?;
+    checkout_remote_app(paths, &remote, false, false)
 }
 
 pub fn update_app(
-    project_root: &Path,
+    paths: &Installation,
     remote: &RemoteApp,
     force_app: bool,
     force_runtime: bool,
 ) -> Result<InstalledApp> {
-    checkout_remote_app(project_root, remote, force_app, force_runtime)
+    checkout_remote_app(paths, remote, force_app, force_runtime)
 }
 
-pub fn resolve_remote_app(app_id: &str) -> Result<RemoteApp> {
-    if app_id.contains('/') {
-        bail!("app id must not contain '/': {app_id}");
-    }
+pub fn resolve_remote_app(paths: &Installation, app_id: &str) -> Result<RemoteApp> {
+    load_remote_metadata(paths)?.resolve_app(app_id, true)
+}
 
+pub fn load_remote_metadata(paths: &Installation) -> Result<RemoteMetadata> {
     let arch = host_flatpak_arch()?;
-    let summary_path = fetch_summary()?;
+    let summary_path = fetch_summary(paths)?;
     let refs = parse_summary_refs(&summary_path)?;
-    let app_id = resolve_current_app_id(&refs, app_id, &arch)?;
-    let app_remote_ref = choose_app_ref(&refs, &app_id, &arch)?;
-    let app_commit = fetch_commit(&app_remote_ref.checksum)?;
+    Ok(RemoteMetadata {
+        arch,
+        refs,
+        objects: paths.objects(),
+        remote_dir: paths.remote_metadata(),
+    })
+}
+
+fn remote_app_from_ref(
+    refs: &[RemoteRef],
+    app_remote_ref: RemoteRef,
+    arch: &str,
+    objects: &Path,
+) -> Result<RemoteApp> {
+    let app_ref_parts = split_flatpak_ref(&app_remote_ref.name)?;
+    let app_id = app_ref_parts.name;
+    let app_commit = fetch_commit(objects, &app_remote_ref.checksum)?;
     let metadata_app_id = metadata_value(&app_commit.metadata, "Application", "name")
         .context("remote app metadata has no Application/name")?;
     if metadata_app_id != app_id {
@@ -191,29 +239,25 @@ pub fn resolve_remote_app(app_id: &str) -> Result<RemoteApp> {
         .with_context(|| {
             format!("required runtime ref not found in Flathub summary: {runtime_full_ref}")
         })?;
-    let runtime_commit = fetch_commit(&runtime_remote_ref.checksum)?;
-
-    let app_ref_parts = split_flatpak_ref(&app_remote_ref.name)?;
     Ok(RemoteApp {
         app_id,
         app_ref: app_remote_ref.name,
         app_commit: app_remote_ref.checksum,
-        arch,
+        arch: arch.to_string(),
         branch: app_ref_parts.branch,
         runtime_ref,
-        runtime_commit: runtime_commit.checksum,
+        runtime_commit: runtime_remote_ref.checksum,
         command,
     })
 }
 
-pub fn search_apps(query: &str) -> Result<Vec<SearchResult>> {
+pub fn search_apps(paths: &Installation, query: &str) -> Result<Vec<SearchResult>> {
     let query = query.to_ascii_lowercase();
-    let arch = host_flatpak_arch()?;
-    let summary_path = fetch_summary()?;
-    let refs = parse_summary_refs(&summary_path)?;
+    let metadata = load_remote_metadata(paths)?;
+    let arch = metadata.arch;
     let mut results = Vec::new();
 
-    for remote_ref in refs {
+    for remote_ref in metadata.refs {
         let Ok(parts) = split_flatpak_ref(&remote_ref.name) else {
             continue;
         };
@@ -240,26 +284,24 @@ pub fn search_apps(query: &str) -> Result<Vec<SearchResult>> {
 }
 
 fn checkout_remote_app(
-    project_root: &Path,
+    paths: &Installation,
     remote: &RemoteApp,
     force_app: bool,
     force_runtime: bool,
 ) -> Result<InstalledApp> {
-    let app_dir = project_root
-        .join("runtime")
-        .join("app")
-        .join(&remote.app_id);
-    let runtime_dir = project_root
-        .join("runtime")
+    let app_dir = paths.app(&remote.app_id);
+    let runtime_dir = paths
+        .runtimes()
         .join(runtime_checkout_dir(&remote.runtime_ref));
 
-    checkout_if_missing(&remote.app_ref, &app_dir, force_app)?;
+    checkout_if_missing(paths, &remote.app_ref, &app_dir, force_app)?;
     checkout_if_missing(
+        paths,
         &format!("runtime/{}", remote.runtime_ref),
         &runtime_dir,
         force_runtime,
     )?;
-    let _ = ensure_default_gl_extension(project_root, &remote.runtime_ref, &runtime_dir)?;
+    let _ = ensure_default_gl_extension(paths, &remote.runtime_ref, &runtime_dir)?;
 
     Ok(InstalledApp {
         app_id: remote.app_id.clone(),
@@ -276,7 +318,7 @@ fn checkout_remote_app(
 }
 
 pub fn ensure_default_gl_extension(
-    project_root: &Path,
+    paths: &Installation,
     runtime_ref: &str,
     runtime_dir: &Path,
 ) -> Result<Option<RuntimeGlExtension>> {
@@ -307,14 +349,11 @@ pub fn ensure_default_gl_extension(
         "runtime/org.freedesktop.Platform.GL.default/{}/{}",
         parts.arch, extension_branch
     );
-    let checkout_dir = project_root
-        .join("runtime")
-        .join("extensions")
-        .join(format!(
-            "org.freedesktop.Platform.GL.default-{}",
-            safe_dir_fragment(&extension_branch)
-        ));
-    checkout_if_missing(&ref_name, &checkout_dir, false)?;
+    let checkout_dir = paths.extensions().join(format!(
+        "org.freedesktop.Platform.GL.default-{}",
+        safe_dir_fragment(&extension_branch)
+    ));
+    checkout_if_missing(paths, &ref_name, &checkout_dir, false)?;
 
     Ok(Some(RuntimeGlExtension {
         ref_name,
@@ -324,7 +363,7 @@ pub fn ensure_default_gl_extension(
 }
 
 pub fn ensure_intel_vaapi_extension(
-    project_root: &Path,
+    paths: &Installation,
     runtime_ref: &str,
     runtime_dir: &Path,
 ) -> Result<Option<RuntimeVaapiExtension>> {
@@ -358,14 +397,11 @@ pub fn ensure_intel_vaapi_extension(
         "runtime/org.freedesktop.Platform.VAAPI.Intel/{}/{}",
         parts.arch, extension_branch
     );
-    let checkout_dir = project_root
-        .join("runtime")
-        .join("extensions")
-        .join(format!(
-            "org.freedesktop.Platform.VAAPI.Intel-{}",
-            safe_dir_fragment(&extension_branch)
-        ));
-    checkout_if_missing(&ref_name, &checkout_dir, false)?;
+    let checkout_dir = paths.extensions().join(format!(
+        "org.freedesktop.Platform.VAAPI.Intel-{}",
+        safe_dir_fragment(&extension_branch)
+    ));
+    checkout_if_missing(paths, &ref_name, &checkout_dir, false)?;
 
     let ld_library_relative = metadata_value(&metadata, section, "add-ld-path")
         .filter(|path| !path.is_empty())
@@ -380,7 +416,7 @@ pub fn ensure_intel_vaapi_extension(
 }
 
 pub fn ensure_app_codec_extensions(
-    project_root: &Path,
+    paths: &Installation,
     app: &FlatpakApp,
 ) -> Result<Vec<AppExtension>> {
     let metadata_path = app.app_dir.join("metadata");
@@ -417,15 +453,12 @@ pub fn ensure_app_codec_extensions(
             "runtime/{}/{}/{}",
             name, runtime_parts.arch, extension_branch
         );
-        let checkout_dir = project_root
-            .join("runtime")
-            .join("extensions")
-            .join(format!(
-                "{}-{}",
-                safe_dir_fragment(name),
-                safe_dir_fragment(&extension_branch)
-            ));
-        checkout_if_missing(&ref_name, &checkout_dir, false)?;
+        let checkout_dir = paths.extensions().join(format!(
+            "{}-{}",
+            safe_dir_fragment(name),
+            safe_dir_fragment(&extension_branch)
+        ));
+        checkout_if_missing(paths, &ref_name, &checkout_dir, false)?;
         let ld_library_relative = metadata_value(&metadata, &section, "add-ld-path")
             .filter(|path| !path.is_empty())
             .map(PathBuf::from);
@@ -443,7 +476,7 @@ pub fn ensure_app_codec_extensions(
 }
 
 pub fn resolve_app(
-    project_root: &Path,
+    paths: &Installation,
     app_id: &str,
     options: ResolveAppOptions,
 ) -> Result<FlatpakApp> {
@@ -451,9 +484,7 @@ pub fn resolve_app(
         bail!("app id must not contain '/': {app_id}");
     }
 
-    let app_dir = options
-        .app_dir
-        .unwrap_or_else(|| project_root.join("runtime").join("app").join(app_id));
+    let app_dir = options.app_dir.unwrap_or_else(|| paths.app(app_id));
     let metadata_path = app_dir.join("metadata");
     let metadata = fs::read_to_string(&metadata_path)
         .with_context(|| format!("read Flatpak metadata {}", metadata_path.display()))?;
@@ -487,11 +518,9 @@ pub fn resolve_app(
         bail!("entry command must be a single executable for this POC: {command:?}");
     }
 
-    let runtime_dir = options.runtime_dir.unwrap_or_else(|| {
-        project_root
-            .join("runtime")
-            .join(runtime_checkout_dir(&runtime_ref))
-    });
+    let runtime_dir = options
+        .runtime_dir
+        .unwrap_or_else(|| paths.runtimes().join(runtime_checkout_dir(&runtime_ref)));
 
     validate_checkout_dir("app", &app_dir)?;
     validate_checkout_dir("runtime", &runtime_dir)?;
@@ -506,7 +535,12 @@ pub fn resolve_app(
     })
 }
 
-fn checkout_if_missing(ref_name: &str, dest: &Path, force: bool) -> Result<()> {
+fn checkout_if_missing(
+    paths: &Installation,
+    ref_name: &str,
+    dest: &Path,
+    force: bool,
+) -> Result<()> {
     if !force && dest.join("metadata").is_file() && dest.join("files").is_dir() {
         println!("reusing checkout for {ref_name}: {}", dest.display());
         return Ok(());
@@ -515,12 +549,21 @@ fn checkout_if_missing(ref_name: &str, dest: &Path, force: bool) -> Result<()> {
         fs::remove_dir_all(dest)
             .with_context(|| format!("remove old checkout {}", dest.display()))?;
     }
-    checkout_ref(ref_name, dest.to_path_buf())
+    checkout_ref(paths, ref_name, dest.to_path_buf())
 }
 
-fn fetch_summary() -> Result<PathBuf> {
-    let path = PathBuf::from("downloads").join("summary");
-    fs::create_dir_all("downloads").context("create downloads directory")?;
+fn fetch_summary(paths: &Installation) -> Result<PathBuf> {
+    let remote_dir = paths.remote_metadata();
+    let path = remote_dir.join("summary");
+    let checked = remote_dir.join("summary.checked");
+    fs::create_dir_all(&remote_dir).context("create remote metadata directory")?;
+    if metadata_is_fresh(&path, &checked)? {
+        return Ok(path);
+    }
+    let _lock = MetadataLock::acquire(&remote_dir.join("summary.lock"))?;
+    if metadata_is_fresh(&path, &checked)? {
+        return Ok(path);
+    }
     let tmp = path.with_file_name(format!(
         ".summary.{}.{}.tmp",
         std::process::id(),
@@ -539,11 +582,106 @@ fn fetch_summary() -> Result<PathBuf> {
     if status.success() {
         fs::rename(&tmp, &path)
             .with_context(|| format!("move {} to {}", tmp.display(), path.display()))?;
+        fs::write(&checked, format!("{}\n", unix_timestamp()))
+            .with_context(|| format!("write {}", checked.display()))?;
         return Ok(path);
     }
 
     let _ = fs::remove_file(&tmp);
+    if path.is_file() {
+        eprintln!("warning: refresh Flathub summary failed with {status}; using cached metadata");
+        return Ok(path);
+    }
     bail!("refresh Flathub summary failed with status {status}");
+}
+
+struct MetadataLock {
+    path: PathBuf,
+}
+
+impl MetadataLock {
+    fn acquire(path: &Path) -> Result<Self> {
+        let started = std::time::Instant::now();
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(mut file) => {
+                    writeln!(file, "{}", std::process::id())?;
+                    return Ok(Self {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if stale_metadata_lock(path) {
+                        let _ = fs::remove_file(path);
+                        continue;
+                    }
+                    if started.elapsed() > std::time::Duration::from_secs(300) {
+                        bail!(
+                            "timed out waiting for metadata refresh lock {}",
+                            path.display()
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("create {}", path.display()))
+                }
+            }
+        }
+    }
+}
+
+impl Drop for MetadataLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn stale_metadata_lock(path: &Path) -> bool {
+    let Ok(pid) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(pid) = pid.trim().parse::<i32>() else {
+        return false;
+    };
+    unsafe {
+        libc::kill(pid, 0) != 0
+            && std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
+    }
+}
+
+fn metadata_is_fresh(path: &Path, checked: &Path) -> Result<bool> {
+    if !path.is_file() || !checked.is_file() {
+        return Ok(false);
+    }
+    let ttl = std::env::var("FREEBSD_FLATPAK_METADATA_TTL")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .context("parse FREEBSD_FLATPAK_METADATA_TTL")
+        })
+        .transpose()?
+        .unwrap_or(300);
+    let Ok(timestamp) = fs::read_to_string(checked)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .ok_or(())
+    else {
+        return Ok(false);
+    };
+    Ok(unix_timestamp().saturating_sub(timestamp) < ttl)
+}
+
+fn unix_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn parse_summary_refs(path: &Path) -> Result<Vec<RemoteRef>> {
@@ -565,8 +703,13 @@ fn parse_summary_refs(path: &Path) -> Result<Vec<RemoteRef>> {
     Ok(refs)
 }
 
-fn resolve_current_app_id(refs: &[RemoteRef], requested: &str, arch: &str) -> Result<String> {
-    let replacements = fetch_appstream_replacements(arch)?;
+fn resolve_current_app_id(
+    refs: &[RemoteRef],
+    requested: &str,
+    arch: &str,
+    remote_dir: &Path,
+) -> Result<String> {
+    let replacements = fetch_appstream_replacements(remote_dir, arch)?;
     resolve_current_app_id_from_replacements(refs, &replacements, requested, arch)
 }
 
@@ -617,18 +760,20 @@ fn app_ref_exists(refs: &[RemoteRef], app_id: &str, arch: &str) -> bool {
     })
 }
 
-fn fetch_appstream_replacements(arch: &str) -> Result<BTreeMap<String, Vec<String>>> {
-    let path = fetch_appstream(arch)?;
+fn fetch_appstream_replacements(
+    remote_dir: &Path,
+    arch: &str,
+) -> Result<BTreeMap<String, Vec<String>>> {
+    let path = fetch_appstream(remote_dir, arch)?;
     let compressed = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     let xml = decompress_appstream_xml(&compressed)
         .with_context(|| format!("decompress {}", path.display()))?;
     Ok(parse_appstream_replacements(&xml))
 }
 
-fn fetch_appstream(arch: &str) -> Result<PathBuf> {
-    let path =
-        PathBuf::from("downloads").join(format!("appstream-{}.xml.gz", safe_dir_fragment(arch)));
-    fs::create_dir_all("downloads").context("create downloads directory")?;
+fn fetch_appstream(remote_dir: &Path, arch: &str) -> Result<PathBuf> {
+    let path = remote_dir.join(format!("appstream-{}.xml.gz", safe_dir_fragment(arch)));
+    fs::create_dir_all(remote_dir).context("create remote metadata directory")?;
     let tmp = path.with_file_name(format!(
         ".{}.{}.{}.tmp",
         path.file_name()
@@ -851,9 +996,10 @@ fn host_flatpak_arch() -> Result<String> {
     }
 }
 
-pub fn checkout_ref(ref_name: &str, dest: PathBuf) -> Result<()> {
+pub fn checkout_ref(paths: &Installation, ref_name: &str, dest: PathBuf) -> Result<()> {
     let checksum = fetch_ref(ref_name)?;
-    let commit = fetch_commit(&checksum)?;
+    let objects = paths.objects();
+    let commit = fetch_commit(&objects, &checksum)?;
     fs::create_dir_all(&dest).with_context(|| format!("create {}", dest.display()))?;
 
     let mut frontier = Vec::new();
@@ -864,7 +1010,7 @@ pub fn checkout_ref(ref_name: &str, dest: PathBuf) -> Result<()> {
 
     while !frontier.is_empty() {
         eprintln!("fetching {} dirtree object(s)...", frontier.len());
-        let batch = fetch_dirtree_batch(frontier)?;
+        let batch = fetch_dirtree_batch(&objects, frontier)?;
         frontier = Vec::new();
 
         for (rel, tree) in batch {
@@ -887,7 +1033,7 @@ pub fn checkout_ref(ref_name: &str, dest: PathBuf) -> Result<()> {
     let count_files: usize = file_groups.values().map(Vec::len).sum();
     let count_objects = file_groups.len();
     eprintln!("materializing {count_files} paths from {count_objects} unique file objects...");
-    materialize_groups(file_groups)?;
+    materialize_groups(&objects, file_groups)?;
 
     println!(
         "checked out {ref_name} to {} ({count_dirs} dirs, {count_files} files)",
@@ -1052,9 +1198,8 @@ fn fetch_ref(ref_name: &str) -> Result<String> {
     Ok(checksum)
 }
 
-fn object_path(checksum: &str, suffix: &str) -> PathBuf {
-    PathBuf::from("downloads")
-        .join("objects")
+fn object_path(objects: &Path, checksum: &str, suffix: &str) -> PathBuf {
+    objects
         .join(&checksum[0..2])
         .join(format!("{}.{}", &checksum[2..], suffix))
 }
@@ -1068,8 +1213,8 @@ fn object_url(checksum: &str, suffix: &str) -> String {
     )
 }
 
-fn ensure_object(checksum: &str, suffix: &str) -> Result<PathBuf> {
-    let path = object_path(checksum, suffix);
+fn ensure_object(objects: &Path, checksum: &str, suffix: &str) -> Result<PathBuf> {
+    let path = object_path(objects, checksum, suffix);
     if path.exists() {
         return Ok(path);
     }
@@ -1123,8 +1268,8 @@ fn variant_from_file(path: &Path, ty: &'static str) -> Result<Variant> {
     Ok(unsafe { Variant::from_bytes_with_type_trusted(&bytes, &ty) })
 }
 
-fn fetch_commit(checksum: &str) -> Result<Commit> {
-    let path = ensure_object(checksum, "commit")?;
+fn fetch_commit(objects: &Path, checksum: &str) -> Result<Commit> {
+    let path = ensure_object(objects, checksum, "commit")?;
     let variant = variant_from_file(&path, "(a{sv}aya(say)sstayay)")?;
 
     let metadata_map = variant.child_value(0);
@@ -1140,8 +1285,8 @@ fn fetch_commit(checksum: &str) -> Result<Commit> {
     })
 }
 
-fn fetch_dirtree(checksum: &str) -> Result<Dirtree> {
-    let path = ensure_object(checksum, "dirtree")?;
+fn fetch_dirtree(objects: &Path, checksum: &str) -> Result<Dirtree> {
+    let path = ensure_object(objects, checksum, "dirtree")?;
     let variant = variant_from_file(&path, "(a(say)a(sayay))")?;
     let files_v = variant.child_value(0);
     let dirs_v = variant.child_value(1);
@@ -1168,7 +1313,10 @@ fn fetch_dirtree(checksum: &str) -> Result<Dirtree> {
     Ok(Dirtree { files, dirs })
 }
 
-fn fetch_dirtree_batch(tasks: Vec<(PathBuf, String)>) -> Result<Vec<(PathBuf, Dirtree)>> {
+fn fetch_dirtree_batch(
+    objects: &Path,
+    tasks: Vec<(PathBuf, String)>,
+) -> Result<Vec<(PathBuf, Dirtree)>> {
     let total = tasks.len();
     let queue = Arc::new(Mutex::new(VecDeque::from_iter(tasks)));
     let done = Arc::new(AtomicUsize::new(0));
@@ -1178,6 +1326,7 @@ fn fetch_dirtree_batch(tasks: Vec<(PathBuf, String)>) -> Result<Vec<(PathBuf, Di
 
     std::thread::scope(|scope| {
         for _ in 0..workers {
+            let objects = objects.to_path_buf();
             let queue = Arc::clone(&queue);
             let done = Arc::clone(&done);
             let results = Arc::clone(&results);
@@ -1188,7 +1337,7 @@ fn fetch_dirtree_batch(tasks: Vec<(PathBuf, String)>) -> Result<Vec<(PathBuf, Di
                     break;
                 };
 
-                match fetch_dirtree(&checksum) {
+                match fetch_dirtree(&objects, &checksum) {
                     Ok(tree) => results.lock().unwrap().push((rel, tree)),
                     Err(error) => errors
                         .lock()
@@ -1254,7 +1403,7 @@ fn bytes_to_checksum(variant: &Variant) -> Result<String> {
     Ok(data.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-fn materialize_groups(file_groups: BTreeMap<String, Vec<PathBuf>>) -> Result<()> {
+fn materialize_groups(objects: &Path, file_groups: BTreeMap<String, Vec<PathBuf>>) -> Result<()> {
     let total = file_groups.len();
     let queue = Arc::new(Mutex::new(VecDeque::from_iter(file_groups)));
     let done = Arc::new(AtomicUsize::new(0));
@@ -1263,6 +1412,7 @@ fn materialize_groups(file_groups: BTreeMap<String, Vec<PathBuf>>) -> Result<()>
 
     std::thread::scope(|scope| {
         for _ in 0..workers {
+            let objects = objects.to_path_buf();
             let queue = Arc::clone(&queue);
             let done = Arc::clone(&done);
             let errors = Arc::clone(&errors);
@@ -1271,7 +1421,7 @@ fn materialize_groups(file_groups: BTreeMap<String, Vec<PathBuf>>) -> Result<()>
                 let Some((checksum, targets)) = task else {
                     break;
                 };
-                if let Err(error) = materialize_file_object(&checksum, &targets) {
+                if let Err(error) = materialize_file_object(&objects, &checksum, &targets) {
                     errors
                         .lock()
                         .unwrap()
@@ -1296,8 +1446,8 @@ fn materialize_groups(file_groups: BTreeMap<String, Vec<PathBuf>>) -> Result<()>
     Ok(())
 }
 
-fn materialize_file_object(checksum: &str, targets: &[PathBuf]) -> Result<()> {
-    let (mode, payload) = load_file_object(checksum)?;
+fn materialize_file_object(objects: &Path, checksum: &str, targets: &[PathBuf]) -> Result<()> {
+    let (mode, payload) = load_file_object(objects, checksum)?;
     for target in targets {
         write_file_payload(mode, &payload, target)
             .with_context(|| format!("checkout file {}", target.display()))?;
@@ -1305,10 +1455,10 @@ fn materialize_file_object(checksum: &str, targets: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn load_file_object(checksum: &str) -> Result<(u32, Vec<u8>)> {
+fn load_file_object(objects: &Path, checksum: &str) -> Result<(u32, Vec<u8>)> {
     let mut last_error = None;
     for attempt in 0..2 {
-        let path = ensure_object(checksum, "filez")?;
+        let path = ensure_object(objects, checksum, "filez")?;
         let data =
             fs::read(&path).with_context(|| format!("read file object {}", path.display()))?;
         match decode_file_object(&data) {

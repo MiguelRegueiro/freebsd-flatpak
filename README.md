@@ -24,27 +24,34 @@ FreeBSD Flatpak downloads applications and runtimes from Flathub, runs their unm
 ```sh
 git clone https://github.com/MiguelRegueiro/freebsd-flatpak.git
 cd freebsd-flatpak
-cargo build --release --bin flatpak
-install -m 755 target/release/flatpak bin/flatpak
+doas ./scripts/install.sh
 ```
 
-To make installed application launchers available to the desktop session:
+Use `sudo ./scripts/install.sh` instead if `sudo` is your preferred privilege
+elevation tool.
 
-```sh
-export XDG_DATA_DIRS="$PWD/exports/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
-```
+This installs the CLI at `/usr/local/bin/flatpak` and the native/Linux helper
+binaries under `/usr/local/libexec/freebsd-flatpak`. Application launchers,
+icons, and metadata are published into the normal per-user XDG data paths; no
+`XDG_DATA_DIRS` change is needed.
 
 ## Usage
 
 ```sh
-bin/flatpak search <query>
-bin/flatpak install <app-id>
-bin/flatpak list
-bin/flatpak permissions <app-id>
-bin/flatpak run <app-id> -- <app-arguments>
-bin/flatpak update [app-id...]
-bin/flatpak uninstall <app-id>
+flatpak search <query>
+flatpak install <app-id>
+flatpak list
+flatpak permissions <app-id>
+flatpak run <app-id> -- <app-arguments>
+flatpak update [app-id...]
+flatpak uninstall <app-id>
 ```
+
+User installations use `$XDG_DATA_HOME/freebsd-flatpak` for installed payloads
+and refs, `$XDG_CACHE_HOME/freebsd-flatpak` for downloads and remote metadata,
+`$XDG_RUNTIME_DIR/freebsd-flatpak` for transient run state, and
+`~/.var/app/<app-id>` for persistent application data. Standard XDG defaults
+are used when the data or cache variables are unset.
 
 ## Current limitations
 

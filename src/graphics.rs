@@ -1,3 +1,4 @@
+use crate::paths::Installation;
 use crate::runtime::{self, FlatpakApp, RuntimeGlExtension};
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -5,17 +6,10 @@ use std::os::unix::fs as unix_fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::SystemTime;
 
 const DRM_MAJOR: u32 = 226;
-const DRM_SYNCOBJ_ERRNO_SHIM_SOURCE: &str = "scripts/drm-syncobj-errno-shim.c";
-const DRM_SYNCOBJ_ERRNO_SHIM_BIN: &str = "target/graphics/libdrm-syncobj-errno-shim.so";
 const DRM_SYNCOBJ_ERRNO_SHIM_LIB: &str = "libdrm-syncobj-errno-shim.so";
-const CHROMIUM_ZYGOTE_DRM_PRELOAD_SOURCE: &str = "scripts/chromium-zygote-drm-preload.c";
-const CHROMIUM_ZYGOTE_DRM_PRELOAD_BIN: &str = "target/graphics/libchromium-zygote-drm-preload.so";
 const CHROMIUM_ZYGOTE_DRM_PRELOAD_LIB: &str = "libchromium-zygote-drm-preload.so";
-const WAYLAND_DRM_DEVT_SHIM_SOURCE: &str = "scripts/wayland-drm-devt-shim.c";
-const WAYLAND_DRM_DEVT_SHIM_BIN: &str = "target/graphics/libwayland-drm-devt-shim.so";
 const GRAPHICS_SHIM_SANDBOX_DIR: &str = "/run/host/freebsd-flatpak-poc";
 const WAYLAND_DRM_DEVT_SHIM_LIB: &str = "libwayland-drm-devt-shim.so";
 
@@ -87,13 +81,12 @@ struct PciInfo {
 }
 
 impl HostGraphics {
-    pub fn prepare(project_root: &Path, app: &FlatpakApp) -> Result<Self> {
+    pub fn prepare(paths: &Installation, app: &FlatpakApp) -> Result<Self> {
         let mut warnings = Vec::new();
-        let gl =
-            runtime::ensure_default_gl_extension(project_root, &app.runtime_ref, &app.runtime_dir)?;
+        let gl = runtime::ensure_default_gl_extension(paths, &app.runtime_ref, &app.runtime_dir)?;
         let drm = if gl.is_some() {
             match DrmDevice::detect() {
-                Ok(device) => Some(DrmSysfsBridge::prepare(project_root, &app.app_id, device)?),
+                Ok(device) => Some(DrmSysfsBridge::prepare(paths, &app.app_id, device)?),
                 Err(error) => {
                     warnings.push(format!("DRM sysfs bridge disabled: {error:#}"));
                     None
@@ -104,7 +97,7 @@ impl HostGraphics {
         };
 
         let wayland_drm_devt_shim = if let Some(drm) = &drm {
-            match WaylandDrmDevtShim::prepare(project_root, &drm.device) {
+            match WaylandDrmDevtShim::prepare(paths, &drm.device) {
                 Ok(shim) => Some(shim),
                 Err(error) => {
                     warnings.push(format!("Wayland DRM dev_t shim disabled: {error:#}"));
@@ -116,7 +109,7 @@ impl HostGraphics {
         };
 
         let drm_syncobj_errno_shim = if drm.is_some() {
-            match DrmSyncobjErrnoShim::prepare(project_root) {
+            match DrmSyncobjErrnoShim::prepare(paths) {
                 Ok(shim) => Some(shim),
                 Err(error) => {
                     warnings.push(format!("DRM syncobj errno shim disabled: {error:#}"));
@@ -128,7 +121,7 @@ impl HostGraphics {
         };
 
         let chromium_zygote_drm_preload = if drm_syncobj_errno_shim.is_some() {
-            match ChromiumZygoteDrmPreload::prepare(project_root) {
+            match ChromiumZygoteDrmPreload::prepare(paths) {
                 Ok(shim) => Some(shim),
                 Err(error) => {
                     warnings.push(format!("Chromium zygote DRM preload disabled: {error:#}"));
@@ -362,12 +355,10 @@ impl GraphicsMount {
 }
 
 impl DrmSysfsBridge {
-    fn prepare(project_root: &Path, app_id: &str, device: DrmDevice) -> Result<Self> {
-        let source_root = project_root.join("runtime").join("gpu").join(format!(
-            "{}-{}",
-            safe_name(app_id),
-            std::process::id()
-        ));
+    fn prepare(paths: &Installation, app_id: &str, device: DrmDevice) -> Result<Self> {
+        let source_root = paths
+            .gpu()
+            .join(format!("{}-{}", safe_name(app_id), std::process::id()));
         if source_root.exists() {
             fs::remove_dir_all(&source_root)
                 .with_context(|| format!("replace {}", source_root.display()))?;
@@ -400,8 +391,8 @@ impl DrmSysfsBridge {
 }
 
 impl WaylandDrmDevtShim {
-    fn prepare(project_root: &Path, device: &DrmDevice) -> Result<Self> {
-        let helper = ensure_wayland_drm_devt_shim(project_root)?;
+    fn prepare(paths: &Installation, device: &DrmDevice) -> Result<Self> {
+        let helper = ensure_wayland_drm_devt_shim(paths)?;
         let host_dir = helper
             .parent()
             .context("Wayland DRM dev_t shim output path has no parent")?
@@ -414,8 +405,8 @@ impl WaylandDrmDevtShim {
 }
 
 impl DrmSyncobjErrnoShim {
-    fn prepare(project_root: &Path) -> Result<Self> {
-        let helper = ensure_drm_syncobj_errno_shim(project_root)?;
+    fn prepare(paths: &Installation) -> Result<Self> {
+        let helper = ensure_drm_syncobj_errno_shim(paths)?;
         let host_dir = helper
             .parent()
             .context("DRM syncobj errno shim output path has no parent")?
@@ -425,8 +416,8 @@ impl DrmSyncobjErrnoShim {
 }
 
 impl ChromiumZygoteDrmPreload {
-    fn prepare(project_root: &Path) -> Result<Self> {
-        let helper = ensure_chromium_zygote_drm_preload(project_root)?;
+    fn prepare(paths: &Installation) -> Result<Self> {
+        let helper = ensure_chromium_zygote_drm_preload(paths)?;
         let host_dir = helper
             .parent()
             .context("Chromium zygote DRM preload output path has no parent")?
@@ -669,91 +660,24 @@ fn write_dev_char_node(dev_char: &Path, name: &str, minor: u32, pci_slot: &str) 
     )
 }
 
-fn ensure_wayland_drm_devt_shim(project_root: &Path) -> Result<PathBuf> {
-    ensure_linux_shared_library(
-        project_root,
-        WAYLAND_DRM_DEVT_SHIM_SOURCE,
-        WAYLAND_DRM_DEVT_SHIM_BIN,
-        &["-ldl"],
-    )
+fn ensure_wayland_drm_devt_shim(paths: &Installation) -> Result<PathBuf> {
+    installed_helper(paths, "libwayland-drm-devt-shim.so")
 }
 
-fn ensure_drm_syncobj_errno_shim(project_root: &Path) -> Result<PathBuf> {
-    ensure_linux_shared_library(
-        project_root,
-        DRM_SYNCOBJ_ERRNO_SHIM_SOURCE,
-        DRM_SYNCOBJ_ERRNO_SHIM_BIN,
-        &["-ldl", "-pthread"],
-    )
+fn ensure_drm_syncobj_errno_shim(paths: &Installation) -> Result<PathBuf> {
+    installed_helper(paths, "libdrm-syncobj-errno-shim.so")
 }
 
-fn ensure_chromium_zygote_drm_preload(project_root: &Path) -> Result<PathBuf> {
-    ensure_linux_shared_library(
-        project_root,
-        CHROMIUM_ZYGOTE_DRM_PRELOAD_SOURCE,
-        CHROMIUM_ZYGOTE_DRM_PRELOAD_BIN,
-        &["-ldl", "-pthread"],
-    )
+fn ensure_chromium_zygote_drm_preload(paths: &Installation) -> Result<PathBuf> {
+    installed_helper(paths, "libchromium-zygote-drm-preload.so")
 }
 
-fn ensure_linux_shared_library(
-    project_root: &Path,
-    source_relative: &str,
-    output_relative: &str,
-    link_args: &[&str],
-) -> Result<PathBuf> {
-    let source = project_root.join(source_relative);
-    let output = project_root.join(output_relative);
-    let output_dir = output
-        .parent()
-        .context("graphics shim output path has no parent")?;
-    fs::create_dir_all(output_dir).with_context(|| format!("create {}", output_dir.display()))?;
-
-    if !needs_rebuild(&source, &output)? {
-        return Ok(output);
-    }
-
-    let compiler = Path::new("/compat/linux/usr/bin/gcc");
-    if !compiler.exists() {
-        bail!("Linux gcc not found at {}", compiler.display());
-    }
-
-    let mut command = Command::new(compiler);
-    command
-        .args(["-shared", "-fPIC", "-O2", "-Wall", "-Wextra"])
-        .arg(&source)
-        .arg("-o")
-        .arg(&output)
-        .args(link_args)
-        .env(
-            "PATH",
-            "/compat/linux/usr/bin:/compat/linux/bin:/usr/bin:/bin",
-        );
-    let status = command
-        .status()
-        .with_context(|| format!("compile {}", output.display()))?;
-    if !status.success() {
-        bail!("compile {} failed with status {}", output.display(), status);
+fn installed_helper(paths: &Installation, name: &str) -> Result<PathBuf> {
+    let output = paths.libexec_root().join(name);
+    if !output.is_file() {
+        bail!("installed graphics helper is missing: {}", output.display());
     }
     Ok(output)
-}
-
-fn needs_rebuild(source: &Path, output: &Path) -> Result<bool> {
-    let Ok(output_meta) = fs::metadata(output) else {
-        return Ok(true);
-    };
-    let source_time = modified(source)?;
-    let output_time = output_meta
-        .modified()
-        .with_context(|| format!("read mtime {}", output.display()))?;
-    Ok(source_time > output_time)
-}
-
-fn modified(path: &Path) -> Result<SystemTime> {
-    fs::metadata(path)
-        .with_context(|| format!("stat {}", path.display()))?
-        .modified()
-        .with_context(|| format!("read mtime {}", path.display()))
 }
 
 fn linux_drm_dev_t(minor: u32) -> u64 {
@@ -881,8 +805,8 @@ fn safe_name(value: &str) -> String {
         .collect()
 }
 
-pub fn recover_stale_graphics_dirs(project_root: &Path) -> Result<()> {
-    let root = project_root.join("runtime").join("gpu");
+pub fn recover_stale_graphics_dirs(paths: &Installation) -> Result<()> {
+    let root = paths.gpu();
     if !root.is_dir() {
         return Ok(());
     }
