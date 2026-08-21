@@ -5,9 +5,12 @@
 #include <glib-unix.h>
 #include <glib/gstdio.h>
 #include <limits.h>
+#include <pipewire/pipewire.h>
+#include <spa/utils/result.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,6 +87,32 @@ static const char *DESKTOP_XML =
     "      <arg type='o' name='session_handle'/>"
     "      <arg type='a{sv}' name='state'/>"
     "    </signal>"
+    "  </interface>"
+    "  <interface name='org.freedesktop.portal.ScreenCast'>"
+    "    <property name='AvailableSourceTypes' type='u' access='read'/>"
+    "    <property name='AvailableCursorModes' type='u' access='read'/>"
+    "    <property name='version' type='u' access='read'/>"
+    "    <method name='CreateSession'>"
+    "      <arg type='a{sv}' name='options' direction='in'/>"
+    "      <arg type='o' name='handle' direction='out'/>"
+    "    </method>"
+    "    <method name='SelectSources'>"
+    "      <arg type='o' name='session_handle' direction='in'/>"
+    "      <arg type='a{sv}' name='options' direction='in'/>"
+    "      <arg type='o' name='handle' direction='out'/>"
+    "    </method>"
+    "    <method name='Start'>"
+    "      <arg type='o' name='session_handle' direction='in'/>"
+    "      <arg type='s' name='parent_window' direction='in'/>"
+    "      <arg type='a{sv}' name='options' direction='in'/>"
+    "      <arg type='o' name='handle' direction='out'/>"
+    "    </method>"
+    "    <method name='OpenPipeWireRemote'>"
+    "      <annotation name='org.gtk.GDBus.C.UnixFD' value='true'/>"
+    "      <arg type='o' name='session_handle' direction='in'/>"
+    "      <arg type='a{sv}' name='options' direction='in'/>"
+    "      <arg type='h' name='fd' direction='out'/>"
+    "    </method>"
     "  </interface>"
     "</node>";
 
@@ -184,6 +213,17 @@ static const char *REQUEST_XML =
     "    <signal name='Response'>"
     "      <arg type='u' name='response'/>"
     "      <arg type='a{sv}' name='results'/>"
+    "    </signal>"
+    "  </interface>"
+    "</node>";
+
+static const char *SESSION_XML =
+    "<node>"
+    "  <interface name='org.freedesktop.portal.Session'>"
+    "    <property name='version' type='u' access='read'/>"
+    "    <method name='Close'/>"
+    "    <signal name='Closed'>"
+    "      <arg type='a{sv}' name='details'/>"
     "    </signal>"
     "  </interface>"
     "</node>";
@@ -317,6 +357,20 @@ typedef struct {
 
 typedef struct _BridgeState BridgeState;
 typedef struct _StatusItem StatusItem;
+typedef struct _SessionRecord SessionRecord;
+typedef struct _PipeWireCompat PipeWireCompat;
+
+typedef enum {
+    REQUEST_FILECHOOSER,
+    REQUEST_SCREENCAST_CREATE,
+    REQUEST_SCREENCAST_OTHER,
+    REQUEST_SCREENCAST_START,
+} RequestKind;
+
+typedef struct {
+    uint32_t node_id;
+    uint64_t serial;
+} ScreenCastSource;
 
 typedef struct {
     StatusItem *item;
@@ -341,10 +395,27 @@ typedef struct {
     BridgeState *state;
     char *client_sender;
     char *local_path;
+    char *host_path;
+    char *local_session_path;
     guint local_registration_id;
     guint host_signal_id;
+    RequestKind kind;
+    SessionRecord *session;
     bool completed;
+    bool close_requested;
 } RequestRecord;
+
+struct _SessionRecord {
+    BridgeState *state;
+    char *client_sender;
+    char *local_path;
+    char *host_path;
+    guint local_registration_id;
+    guint host_signal_id;
+    GArray *sources;
+    bool close_requested;
+    bool closed;
+};
 
 struct _BridgeState {
     char *app_id;
@@ -353,9 +424,11 @@ struct _BridgeState {
     char *mountpoint;
     GPtrArray *grants;
     GPtrArray *requests;
+    GPtrArray *sessions;
     GPtrArray *status_items;
     guint64 counter;
     guint64 request_counter;
+    guint64 host_token_counter;
     guint64 status_counter;
     GMainLoop *loop;
     GDBusConnection *host_bus;
@@ -363,9 +436,15 @@ struct _BridgeState {
     GDBusNodeInfo *desktop_node;
     GDBusNodeInfo *documents_node;
     GDBusNodeInfo *request_node;
+    GDBusNodeInfo *session_node;
     GDBusNodeInfo *status_watcher_node;
     GDBusNodeInfo *status_item_node;
     GDBusNodeInfo *dbusmenu_node;
+    PipeWireCompat *pipewire;
+    guint local_name_signal_id;
+    guint32 screencast_version;
+    guint32 screencast_source_types;
+    guint32 screencast_cursor_modes;
     bool local_objects_registered;
 };
 
@@ -377,6 +456,772 @@ static void log_line(const char *fmt, ...)
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
     va_end(ap);
+}
+
+typedef struct {
+    PipeWireCompat *compat;
+    uint32_t id;
+    struct pw_client *proxy;
+    struct spa_hook listener;
+    GArray *permissions;
+    bool is_portal;
+    bool permissions_received;
+} PipeWireClient;
+
+typedef struct {
+    uint32_t id;
+    uint32_t client_id;
+    uint64_t serial;
+    char *media_class;
+    char *target_object;
+} PipeWireNode;
+
+typedef struct {
+    uint32_t id;
+    uint32_t node_id;
+    bool is_input;
+    bool is_output;
+} PipeWirePort;
+
+typedef struct {
+    PipeWireCompat *compat;
+    SessionRecord *session;
+    struct pw_proxy *proxy;
+    struct spa_hook proxy_listener;
+    uint32_t source_node_id;
+    uint32_t source_port_id;
+    uint32_t consumer_client_id;
+    uint32_t consumer_node_id;
+    uint32_t consumer_port_id;
+} PipeWireLink;
+
+typedef struct {
+    GSource source;
+    PipeWireCompat *compat;
+} PipeWireSource;
+
+struct _PipeWireCompat {
+    BridgeState *state;
+    struct pw_main_loop *loop;
+    struct pw_context *context;
+    struct pw_core *core;
+    struct pw_registry *registry;
+    struct spa_hook core_listener;
+    struct spa_hook registry_listener;
+    GSource *source;
+    GPtrArray *clients;
+    GPtrArray *nodes;
+    GPtrArray *ports;
+    GPtrArray *links;
+};
+
+static void pipewire_compat_try_links(PipeWireCompat *compat);
+
+static uint32_t parse_pipewire_id(const char *value)
+{
+    if (value == NULL || *value == '\0') {
+        return SPA_ID_INVALID;
+    }
+    char *end = NULL;
+    errno = 0;
+    unsigned long parsed = strtoul(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed > UINT32_MAX) {
+        return SPA_ID_INVALID;
+    }
+    return (uint32_t)parsed;
+}
+
+static uint64_t parse_pipewire_serial(const char *value)
+{
+    if (value == NULL || *value == '\0') {
+        return 0;
+    }
+    char *end = NULL;
+    errno = 0;
+    unsigned long long parsed = strtoull(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0') {
+        return 0;
+    }
+    return (uint64_t)parsed;
+}
+
+static ScreenCastSource *session_source_for_id(SessionRecord *session,
+                                                uint32_t node_id)
+{
+    if (session == NULL || session->sources == NULL) {
+        return NULL;
+    }
+    for (guint i = 0; i < session->sources->len; i++) {
+        ScreenCastSource *source = &g_array_index(session->sources,
+                                                  ScreenCastSource, i);
+        if (source->node_id == node_id) {
+            return source;
+        }
+    }
+    return NULL;
+}
+
+static bool session_approves_source(SessionRecord *session, uint32_t node_id)
+{
+    return session_source_for_id(session, node_id) != NULL;
+}
+
+static bool source_generation_matches(const ScreenCastSource *source,
+                                      const PipeWireNode *node)
+{
+    return source != NULL && node != NULL && source->node_id == node->id &&
+           (source->serial == 0 || node->serial == 0 ||
+            source->serial == node->serial);
+}
+
+static void remove_session_source_for_node(SessionRecord *session,
+                                           const PipeWireNode *node)
+{
+    if (session == NULL || session->sources == NULL || node == NULL) {
+        return;
+    }
+    for (guint i = session->sources->len; i > 0; i--) {
+        ScreenCastSource *source = &g_array_index(session->sources,
+                                                  ScreenCastSource, i - 1);
+        if (source_generation_matches(source, node)) {
+            g_array_remove_index(session->sources, i - 1);
+        }
+    }
+}
+
+static void free_pipewire_client(PipeWireClient *client)
+{
+    if (client == NULL) {
+        return;
+    }
+    if (client->proxy != NULL) {
+        spa_hook_remove(&client->listener);
+        pw_proxy_destroy((struct pw_proxy *)client->proxy);
+    }
+    if (client->permissions != NULL) {
+        g_array_free(client->permissions, TRUE);
+    }
+    g_free(client);
+}
+
+static void free_pipewire_node(PipeWireNode *node)
+{
+    if (node == NULL) {
+        return;
+    }
+    g_free(node->media_class);
+    g_free(node->target_object);
+    g_free(node);
+}
+
+static void free_pipewire_port(PipeWirePort *port)
+{
+    g_free(port);
+}
+
+static void free_pipewire_link(PipeWireLink *link)
+{
+    if (link == NULL) {
+        return;
+    }
+    if (link->proxy != NULL) {
+        spa_hook_remove(&link->proxy_listener);
+        pw_proxy_destroy(link->proxy);
+    }
+    g_free(link);
+}
+
+static PipeWireNode *find_pipewire_node(PipeWireCompat *compat, uint32_t id)
+{
+    for (guint i = 0; i < compat->nodes->len; i++) {
+        PipeWireNode *node = g_ptr_array_index(compat->nodes, i);
+        if (node->id == id) {
+            return node;
+        }
+    }
+    return NULL;
+}
+
+static bool pipewire_client_permission(PipeWireClient *client,
+                                       uint32_t object_id,
+                                       uint32_t *out_permissions)
+{
+    for (guint i = 0; i < client->permissions->len; i++) {
+        struct pw_permission *permission =
+            &g_array_index(client->permissions, struct pw_permission, i);
+        if (permission->id == object_id) {
+            *out_permissions = permission->permissions;
+            return true;
+        }
+    }
+    *out_permissions = 0;
+    return false;
+}
+
+static bool pipewire_client_is_restricted(PipeWireClient *client)
+{
+    uint32_t default_permissions = 0;
+    return client->is_portal && client->permissions_received &&
+           pipewire_client_permission(client, PW_ID_ANY,
+                                      &default_permissions) &&
+           default_permissions == 0;
+}
+
+static bool pipewire_client_matches_session(PipeWireClient *client,
+                                            SessionRecord *session)
+{
+    if (!pipewire_client_is_restricted(client) || session == NULL ||
+        session->closed || session->close_requested || session->sources == NULL ||
+        session->sources->len == 0) {
+        return false;
+    }
+
+    for (guint i = 0; i < session->sources->len; i++) {
+        ScreenCastSource *source = &g_array_index(session->sources,
+                                                  ScreenCastSource, i);
+        uint32_t permissions = 0;
+        if (!pipewire_client_permission(client, source->node_id, &permissions) ||
+            (permissions & PW_PERM_R) == 0) {
+            return false;
+        }
+    }
+
+    BridgeState *state = session->state;
+    for (guint i = 0; i < state->sessions->len; i++) {
+        SessionRecord *other = g_ptr_array_index(state->sessions, i);
+        if (other == session || other->sources == NULL) {
+            continue;
+        }
+        for (guint j = 0; j < other->sources->len; j++) {
+            ScreenCastSource *source = &g_array_index(other->sources,
+                                                      ScreenCastSource, j);
+            uint32_t permissions = 0;
+            if (!session_approves_source(session, source->node_id) &&
+                pipewire_client_permission(client, source->node_id,
+                                           &permissions) &&
+                (permissions & PW_PERM_R) != 0) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static bool source_node_is_approved(SessionRecord *session,
+                                    PipeWireNode *node)
+{
+    return source_generation_matches(session_source_for_id(session, node->id),
+                                     node);
+}
+
+static PipeWireNode *source_node_for_consumer(PipeWireCompat *compat,
+                                              SessionRecord *session,
+                                              PipeWireNode *consumer)
+{
+    if (session->sources->len == 1) {
+        ScreenCastSource *source = &g_array_index(session->sources,
+                                                  ScreenCastSource, 0);
+        PipeWireNode *node = find_pipewire_node(compat, source->node_id);
+        return node != NULL && source_node_is_approved(session, node) ? node : NULL;
+    }
+
+    if (consumer->target_object == NULL) {
+        return NULL;
+    }
+    uint64_t target = parse_pipewire_serial(consumer->target_object);
+    for (guint i = 0; i < session->sources->len; i++) {
+        ScreenCastSource *source = &g_array_index(session->sources,
+                                                  ScreenCastSource, i);
+        if (target != source->node_id &&
+            (source->serial == 0 || target != source->serial)) {
+            continue;
+        }
+        PipeWireNode *node = find_pipewire_node(compat, source->node_id);
+        if (node != NULL && source_node_is_approved(session, node)) {
+            return node;
+        }
+    }
+    return NULL;
+}
+
+static bool pipewire_link_exists(PipeWireCompat *compat, SessionRecord *session,
+                                 uint32_t source_port_id,
+                                 uint32_t consumer_port_id)
+{
+    for (guint i = 0; i < compat->links->len; i++) {
+        PipeWireLink *link = g_ptr_array_index(compat->links, i);
+        if (link->proxy != NULL && link->session == session &&
+            link->source_port_id == source_port_id &&
+            link->consumer_port_id == consumer_port_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void on_pipewire_link_destroy(void *user_data)
+{
+    PipeWireLink *link = user_data;
+    spa_hook_remove(&link->proxy_listener);
+    link->proxy = NULL;
+}
+
+static void on_pipewire_link_removed(void *user_data)
+{
+    PipeWireLink *link = user_data;
+    PipeWireCompat *compat = link->compat;
+    pw_proxy_destroy(link->proxy);
+    g_ptr_array_remove(compat->links, link);
+}
+
+static void on_pipewire_link_error(void *user_data, int seq, int result,
+                                   const char *message)
+{
+    (void)seq;
+    PipeWireLink *link = user_data;
+    log_line("PipeWire compatibility link %u -> %u failed: %s (%s)",
+             link->source_node_id, link->consumer_node_id, message,
+             spa_strerror(result));
+}
+
+static const struct pw_proxy_events PIPEWIRE_LINK_PROXY_EVENTS = {
+    PW_VERSION_PROXY_EVENTS,
+    .destroy = on_pipewire_link_destroy,
+    .removed = on_pipewire_link_removed,
+    .error = on_pipewire_link_error,
+};
+
+static void create_pipewire_link(PipeWireCompat *compat, SessionRecord *session,
+                                 PipeWireClient *client, PipeWireNode *source,
+                                 PipeWirePort *source_port,
+                                 PipeWireNode *consumer,
+                                 PipeWirePort *consumer_port)
+{
+    if (!session_approves_source(session, source->id) ||
+        !source_node_is_approved(session, source) ||
+        pipewire_link_exists(compat, session, source_port->id,
+                             consumer_port->id)) {
+        return;
+    }
+
+    char *source_node_id = g_strdup_printf("%u", source->id);
+    char *source_port_id = g_strdup_printf("%u", source_port->id);
+    char *consumer_node_id = g_strdup_printf("%u", consumer->id);
+    char *consumer_port_id = g_strdup_printf("%u", consumer_port->id);
+    struct pw_properties *properties = pw_properties_new(
+        PW_KEY_LINK_OUTPUT_NODE, source_node_id,
+        PW_KEY_LINK_OUTPUT_PORT, source_port_id,
+        PW_KEY_LINK_INPUT_NODE, consumer_node_id,
+        PW_KEY_LINK_INPUT_PORT, consumer_port_id,
+        PW_KEY_OBJECT_LINGER, "false",
+        NULL);
+    struct pw_proxy *proxy = pw_core_create_object(
+        compat->core, "link-factory", PW_TYPE_INTERFACE_Link,
+        PW_VERSION_LINK, &properties->dict, 0);
+    pw_properties_free(properties);
+    g_free(source_node_id);
+    g_free(source_port_id);
+    g_free(consumer_node_id);
+    g_free(consumer_port_id);
+    if (proxy == NULL) {
+        log_line("create PipeWire compatibility link %u -> %u failed: %s",
+                 source->id, consumer->id, g_strerror(errno));
+        return;
+    }
+
+    PipeWireLink *link = g_new0(PipeWireLink, 1);
+    link->compat = compat;
+    link->session = session;
+    link->proxy = proxy;
+    link->source_node_id = source->id;
+    link->source_port_id = source_port->id;
+    link->consumer_client_id = client->id;
+    link->consumer_node_id = consumer->id;
+    link->consumer_port_id = consumer_port->id;
+    pw_proxy_add_listener(link->proxy, &link->proxy_listener,
+                          &PIPEWIRE_LINK_PROXY_EVENTS, link);
+    g_ptr_array_add(compat->links, link);
+    log_line("linked approved ScreenCast source %u:%u -> portal client %u node %u:%u",
+             source->id, source_port->id, client->id, consumer->id,
+             consumer_port->id);
+}
+
+static void pipewire_compat_try_links(PipeWireCompat *compat)
+{
+    if (compat == NULL || compat->core == NULL) {
+        return;
+    }
+    for (guint client_index = 0; client_index < compat->clients->len;
+         client_index++) {
+        PipeWireClient *client = g_ptr_array_index(compat->clients, client_index);
+        for (guint session_index = 0;
+             session_index < compat->state->sessions->len; session_index++) {
+            SessionRecord *session = g_ptr_array_index(compat->state->sessions,
+                                                       session_index);
+            if (!pipewire_client_matches_session(client, session)) {
+                continue;
+            }
+            for (guint node_index = 0; node_index < compat->nodes->len;
+                 node_index++) {
+                PipeWireNode *consumer = g_ptr_array_index(compat->nodes,
+                                                           node_index);
+                if (consumer->client_id != client->id ||
+                    g_strcmp0(consumer->media_class, "Stream/Input/Video") != 0) {
+                    continue;
+                }
+                PipeWireNode *source = source_node_for_consumer(
+                    compat, session, consumer);
+                if (source == NULL) {
+                    continue;
+                }
+                for (guint out_index = 0; out_index < compat->ports->len;
+                     out_index++) {
+                    PipeWirePort *output = g_ptr_array_index(compat->ports,
+                                                             out_index);
+                    if (!output->is_output || output->node_id != source->id) {
+                        continue;
+                    }
+                    for (guint in_index = 0; in_index < compat->ports->len;
+                         in_index++) {
+                        PipeWirePort *input = g_ptr_array_index(compat->ports,
+                                                               in_index);
+                        if (input->is_input && input->node_id == consumer->id) {
+                            create_pipewire_link(compat, session, client, source,
+                                                 output, consumer, input);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void remove_pipewire_links_for_session(SessionRecord *session)
+{
+    PipeWireCompat *compat = session != NULL ? session->state->pipewire : NULL;
+    if (compat == NULL) {
+        return;
+    }
+    for (guint i = compat->links->len; i > 0; i--) {
+        PipeWireLink *link = g_ptr_array_index(compat->links, i - 1);
+        if (link->session == session) {
+            g_ptr_array_remove_index(compat->links, i - 1);
+        }
+    }
+}
+
+static void remove_pipewire_links_for_object(PipeWireCompat *compat,
+                                             uint32_t object_id,
+                                             bool client)
+{
+    for (guint i = compat->links->len; i > 0; i--) {
+        PipeWireLink *link = g_ptr_array_index(compat->links, i - 1);
+        bool matches = client ? link->consumer_client_id == object_id
+                              : link->source_node_id == object_id ||
+                                    link->consumer_node_id == object_id ||
+                                    link->source_port_id == object_id ||
+                                    link->consumer_port_id == object_id;
+        if (matches) {
+            g_ptr_array_remove_index(compat->links, i - 1);
+        }
+    }
+}
+
+static void on_pipewire_client_permissions(
+    void *user_data, uint32_t index, uint32_t n_permissions,
+    const struct pw_permission *permissions)
+{
+    PipeWireClient *client = user_data;
+    if (index == 0) {
+        g_array_set_size(client->permissions, 0);
+    }
+    if (index > client->permissions->len) {
+        g_array_set_size(client->permissions, index);
+    }
+    for (uint32_t i = 0; i < n_permissions; i++) {
+        if (index + i < client->permissions->len) {
+            g_array_index(client->permissions, struct pw_permission,
+                          index + i) = permissions[i];
+        } else {
+            g_array_append_val(client->permissions, permissions[i]);
+        }
+    }
+    client->permissions_received = true;
+    pipewire_compat_try_links(client->compat);
+}
+
+static const struct pw_client_events PIPEWIRE_CLIENT_EVENTS = {
+    PW_VERSION_CLIENT_EVENTS,
+    .permissions = on_pipewire_client_permissions,
+};
+
+static void refresh_pipewire_client_permissions(PipeWireClient *client)
+{
+    if (client == NULL || client->proxy == NULL) {
+        return;
+    }
+    int result = pw_client_get_permissions(client->proxy, 0, UINT32_MAX);
+    if (result < 0) {
+        log_line("read PipeWire portal client %u permissions failed: %s",
+                 client->id, spa_strerror(result));
+    }
+}
+
+static void refresh_pipewire_permissions_for_client(PipeWireCompat *compat,
+                                                    uint32_t client_id)
+{
+    if (compat == NULL) {
+        return;
+    }
+    for (guint i = 0; i < compat->clients->len; i++) {
+        PipeWireClient *client = g_ptr_array_index(compat->clients, i);
+        if (client_id == SPA_ID_INVALID || client->id == client_id) {
+            refresh_pipewire_client_permissions(client);
+        }
+    }
+}
+
+static void on_pipewire_registry_global(
+    void *user_data, uint32_t id, uint32_t permissions, const char *type,
+    uint32_t version, const struct spa_dict *properties)
+{
+    (void)permissions;
+    PipeWireCompat *compat = user_data;
+    if (g_strcmp0(type, PW_TYPE_INTERFACE_Client) == 0) {
+        const char *access = spa_dict_lookup(properties, "pipewire.access");
+        if (g_strcmp0(access, "portal") != 0) {
+            return;
+        }
+        PipeWireClient *client = g_new0(PipeWireClient, 1);
+        client->compat = compat;
+        client->id = id;
+        client->is_portal = true;
+        client->permissions = g_array_new(FALSE, TRUE,
+                                          sizeof(struct pw_permission));
+        client->proxy = pw_registry_bind(
+            compat->registry, id, PW_TYPE_INTERFACE_Client,
+            SPA_MIN(version, PW_VERSION_CLIENT), 0);
+        if (client->proxy == NULL) {
+            free_pipewire_client(client);
+            return;
+        }
+        pw_client_add_listener(client->proxy, &client->listener,
+                               &PIPEWIRE_CLIENT_EVENTS, client);
+        g_ptr_array_add(compat->clients, client);
+        refresh_pipewire_client_permissions(client);
+    } else if (g_strcmp0(type, PW_TYPE_INTERFACE_Node) == 0) {
+        PipeWireNode *node = g_new0(PipeWireNode, 1);
+        node->id = id;
+        node->client_id = parse_pipewire_id(
+            spa_dict_lookup(properties, PW_KEY_CLIENT_ID));
+        node->serial = parse_pipewire_serial(
+            spa_dict_lookup(properties, PW_KEY_OBJECT_SERIAL));
+        node->media_class = g_strdup(
+            spa_dict_lookup(properties, PW_KEY_MEDIA_CLASS));
+        node->target_object = g_strdup(
+            spa_dict_lookup(properties, PW_KEY_TARGET_OBJECT));
+        g_ptr_array_add(compat->nodes, node);
+        if (g_strcmp0(node->media_class, "Stream/Input/Video") == 0) {
+            refresh_pipewire_permissions_for_client(compat, node->client_id);
+        }
+        pipewire_compat_try_links(compat);
+    } else if (g_strcmp0(type, PW_TYPE_INTERFACE_Port) == 0) {
+        PipeWirePort *port = g_new0(PipeWirePort, 1);
+        port->id = id;
+        port->node_id = parse_pipewire_id(
+            spa_dict_lookup(properties, PW_KEY_NODE_ID));
+        const char *direction = spa_dict_lookup(properties,
+                                                PW_KEY_PORT_DIRECTION);
+        port->is_input = g_strcmp0(direction, "in") == 0;
+        port->is_output = g_strcmp0(direction, "out") == 0;
+        g_ptr_array_add(compat->ports, port);
+        pipewire_compat_try_links(compat);
+    }
+}
+
+static void on_pipewire_registry_global_remove(void *user_data, uint32_t id)
+{
+    PipeWireCompat *compat = user_data;
+    for (guint i = compat->clients->len; i > 0; i--) {
+        PipeWireClient *client = g_ptr_array_index(compat->clients, i - 1);
+        if (client->id == id) {
+            remove_pipewire_links_for_object(compat, id, true);
+            g_ptr_array_remove_index(compat->clients, i - 1);
+        }
+    }
+    for (guint i = compat->nodes->len; i > 0; i--) {
+        PipeWireNode *node = g_ptr_array_index(compat->nodes, i - 1);
+        if (node->id != id) {
+            continue;
+        }
+        remove_pipewire_links_for_object(compat, id, false);
+        for (guint session_index = 0;
+             session_index < compat->state->sessions->len; session_index++) {
+            SessionRecord *session = g_ptr_array_index(compat->state->sessions,
+                                                       session_index);
+            if (session->sources == NULL) {
+                continue;
+            }
+            remove_session_source_for_node(session, node);
+        }
+        g_ptr_array_remove_index(compat->nodes, i - 1);
+    }
+    for (guint i = compat->ports->len; i > 0; i--) {
+        PipeWirePort *port = g_ptr_array_index(compat->ports, i - 1);
+        if (port->id == id) {
+            remove_pipewire_links_for_object(compat, id, false);
+            g_ptr_array_remove_index(compat->ports, i - 1);
+        }
+    }
+}
+
+static const struct pw_registry_events PIPEWIRE_REGISTRY_EVENTS = {
+    PW_VERSION_REGISTRY_EVENTS,
+    .global = on_pipewire_registry_global,
+    .global_remove = on_pipewire_registry_global_remove,
+};
+
+static void on_pipewire_core_error(void *user_data, uint32_t id, int seq,
+                                   int result, const char *message)
+{
+    (void)user_data;
+    (void)seq;
+    if (id == PW_ID_CORE) {
+        log_line("PipeWire compatibility connection failed: %s (%s)",
+                 message, spa_strerror(result));
+    }
+}
+
+static const struct pw_core_events PIPEWIRE_CORE_EVENTS = {
+    PW_VERSION_CORE_EVENTS,
+    .error = on_pipewire_core_error,
+};
+
+static gboolean pipewire_source_prepare(GSource *source, gint *timeout)
+{
+    (void)source;
+    *timeout = -1;
+    return FALSE;
+}
+
+static gboolean pipewire_source_dispatch(GSource *source, GSourceFunc callback,
+                                          gpointer user_data)
+{
+    (void)callback;
+    (void)user_data;
+    PipeWireSource *pipewire_source = (PipeWireSource *)source;
+    int result = pw_loop_iterate(
+        pw_main_loop_get_loop(pipewire_source->compat->loop), 0);
+    if (result < 0) {
+        log_line("PipeWire compatibility loop failed: %s",
+                 spa_strerror(result));
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+static void pipewire_source_finalize(GSource *source)
+{
+    PipeWireSource *pipewire_source = (PipeWireSource *)source;
+    pw_loop_leave(pw_main_loop_get_loop(pipewire_source->compat->loop));
+}
+
+static GSourceFuncs PIPEWIRE_SOURCE_FUNCS = {
+    .prepare = pipewire_source_prepare,
+    .dispatch = pipewire_source_dispatch,
+    .finalize = pipewire_source_finalize,
+};
+
+static void free_pipewire_compat(PipeWireCompat *compat)
+{
+    if (compat == NULL) {
+        return;
+    }
+    if (compat->source != NULL) {
+        g_source_destroy(compat->source);
+        g_source_unref(compat->source);
+    }
+    if (compat->links != NULL) {
+        g_ptr_array_free(compat->links, TRUE);
+    }
+    if (compat->clients != NULL) {
+        g_ptr_array_free(compat->clients, TRUE);
+    }
+    if (compat->ports != NULL) {
+        g_ptr_array_free(compat->ports, TRUE);
+    }
+    if (compat->nodes != NULL) {
+        g_ptr_array_free(compat->nodes, TRUE);
+    }
+    if (compat->registry != NULL) {
+        spa_hook_remove(&compat->registry_listener);
+        pw_proxy_destroy((struct pw_proxy *)compat->registry);
+    }
+    if (compat->core != NULL) {
+        spa_hook_remove(&compat->core_listener);
+        pw_core_disconnect(compat->core);
+    }
+    if (compat->context != NULL) {
+        pw_context_destroy(compat->context);
+    }
+    if (compat->loop != NULL) {
+        pw_main_loop_destroy(compat->loop);
+    }
+    g_free(compat);
+}
+
+static PipeWireCompat *new_pipewire_compat(BridgeState *state)
+{
+    pw_init(NULL, NULL);
+    PipeWireCompat *compat = g_new0(PipeWireCompat, 1);
+    compat->state = state;
+    compat->clients = g_ptr_array_new_with_free_func(
+        (GDestroyNotify)free_pipewire_client);
+    compat->nodes = g_ptr_array_new_with_free_func(
+        (GDestroyNotify)free_pipewire_node);
+    compat->ports = g_ptr_array_new_with_free_func(
+        (GDestroyNotify)free_pipewire_port);
+    compat->links = g_ptr_array_new_with_free_func(
+        (GDestroyNotify)free_pipewire_link);
+    compat->loop = pw_main_loop_new(NULL);
+    if (compat->loop == NULL) {
+        free_pipewire_compat(compat);
+        return NULL;
+    }
+    compat->context = pw_context_new(pw_main_loop_get_loop(compat->loop),
+                                     NULL, 0);
+    if (compat->context == NULL) {
+        free_pipewire_compat(compat);
+        return NULL;
+    }
+    struct pw_properties *properties = pw_properties_new(
+        PW_KEY_APP_NAME, "freebsd-flatpak portal compatibility", NULL);
+    compat->core = pw_context_connect(compat->context, properties, 0);
+    if (compat->core == NULL) {
+        free_pipewire_compat(compat);
+        return NULL;
+    }
+    pw_core_add_listener(compat->core, &compat->core_listener,
+                         &PIPEWIRE_CORE_EVENTS, compat);
+    compat->registry = pw_core_get_registry(compat->core,
+                                            PW_VERSION_REGISTRY, 0);
+    if (compat->registry == NULL) {
+        free_pipewire_compat(compat);
+        return NULL;
+    }
+    pw_registry_add_listener(compat->registry, &compat->registry_listener,
+                             &PIPEWIRE_REGISTRY_EVENTS, compat);
+
+    PipeWireSource *source = (PipeWireSource *)g_source_new(
+        &PIPEWIRE_SOURCE_FUNCS, sizeof(PipeWireSource));
+    source->compat = compat;
+    struct pw_loop *loop = pw_main_loop_get_loop(compat->loop);
+    pw_loop_enter(loop);
+    g_source_add_unix_fd(&source->source, pw_loop_get_fd(loop),
+                         G_IO_IN | G_IO_ERR | G_IO_HUP);
+    compat->source = &source->source;
+    g_source_attach(compat->source, NULL);
+    log_line("enabled ownership-based PipeWire ScreenCast linking");
+    return compat;
 }
 
 static GVariant *path_bytes_variant(const char *path)
@@ -488,7 +1333,32 @@ static void free_request(RequestRecord *request)
     }
     g_free(request->client_sender);
     g_free(request->local_path);
+    g_free(request->host_path);
+    g_free(request->local_session_path);
     g_free(request);
+}
+
+static void free_session(SessionRecord *session)
+{
+    if (session == NULL) {
+        return;
+    }
+    remove_pipewire_links_for_session(session);
+    if (session->host_signal_id != 0 && session->state->host_bus != NULL) {
+        g_dbus_connection_signal_unsubscribe(session->state->host_bus,
+                                             session->host_signal_id);
+    }
+    if (session->local_registration_id != 0 && session->state->local_bus != NULL) {
+        g_dbus_connection_unregister_object(session->state->local_bus,
+                                            session->local_registration_id);
+    }
+    g_free(session->client_sender);
+    g_free(session->local_path);
+    g_free(session->host_path);
+    if (session->sources != NULL) {
+        g_array_free(session->sources, TRUE);
+    }
+    g_free(session);
 }
 
 static void free_menu_proxy(MenuProxy *menu)
@@ -597,6 +1467,25 @@ static char *safe_path_element(const char *input)
         g_string_append(value, "x");
     }
     return g_string_free(value, FALSE);
+}
+
+static char *sender_path_element(const char *sender)
+{
+    if (sender != NULL && sender[0] == ':') {
+        sender++;
+    }
+    return safe_path_element(sender);
+}
+
+static char *portal_path(const char *kind, const char *sender, const char *token)
+{
+    char *sender_element = sender_path_element(sender);
+    char *token_element = safe_path_element(token);
+    char *path = g_strdup_printf("/org/freedesktop/portal/desktop/%s/%s/%s",
+                                 kind, sender_element, token_element);
+    g_free(sender_element);
+    g_free(token_element);
+    return path;
 }
 
 static char **permissions_from_variant(GVariant *permissions)
@@ -822,6 +1711,7 @@ static RequestRecord *find_request(BridgeState *state, const char *local_path)
 static void emit_request_response(RequestRecord *request, guint32 response, GVariant *results)
 {
     if (request->completed) {
+        g_variant_unref(results);
         return;
     }
     request->completed = true;
@@ -886,10 +1776,19 @@ static void on_host_filechooser_call(GObject *source_object, GAsyncResult *resul
 
     const char *host_handle = NULL;
     g_variant_get(reply, "(&o)", &host_handle);
+    g_free(request->host_path);
+    request->host_path = g_strdup(host_handle);
     request->host_signal_id = g_dbus_connection_signal_subscribe(
         request->state->host_bus, "org.freedesktop.portal.Desktop",
         "org.freedesktop.portal.Request", "Response", host_handle, NULL,
         G_DBUS_SIGNAL_FLAGS_NONE, on_host_response, request, NULL);
+    if (request->close_requested) {
+        g_dbus_connection_call(request->state->host_bus,
+                               "org.freedesktop.portal.Desktop", host_handle,
+                               "org.freedesktop.portal.Request", "Close",
+                               NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1,
+                               NULL, NULL, NULL);
+    }
     g_variant_unref(reply);
 }
 
@@ -908,26 +1807,73 @@ static GVariant *option_value(GVariant *options, const char *key)
     return NULL;
 }
 
-static char *request_path_for_call(BridgeState *state, const char *sender, GVariant *parameters)
+static char *token_from_options(BridgeState *state, GVariant *options, const char *key,
+                                const char *fallback)
 {
-    GVariant *options = g_variant_get_child_value(parameters, 2);
-    GVariant *token_value = option_value(options, "handle_token");
-    char *sender_element = safe_path_element(sender);
-    char *token_element = NULL;
+    GVariant *token_value = option_value(options, key);
+    char *token = NULL;
     if (token_value != NULL && g_variant_is_of_type(token_value, G_VARIANT_TYPE_STRING)) {
-        token_element = safe_path_element(g_variant_get_string(token_value, NULL));
+        token = safe_path_element(g_variant_get_string(token_value, NULL));
         g_variant_unref(token_value);
     } else {
-        token_element = g_strdup_printf("freebsd_flatpak_poc_%" G_GUINT64_FORMAT,
-                                        ++state->request_counter);
+        if (token_value != NULL) {
+            g_variant_unref(token_value);
+        }
+        token = g_strdup_printf("%s_%" G_GUINT64_FORMAT, fallback,
+                                ++state->request_counter);
     }
-    g_variant_unref(options);
+    return token;
+}
 
-    char *path = g_strdup_printf("/org/freedesktop/portal/desktop/request/%s/%s",
-                                 sender_element, token_element);
-    g_free(sender_element);
-    g_free(token_element);
+static char *request_path_for_options(BridgeState *state, const char *sender, GVariant *options)
+{
+    char *token = token_from_options(state, options, "handle_token",
+                                     "freebsd_flatpak_poc");
+    char *path = portal_path("request", sender, token);
+    g_free(token);
     return path;
+}
+
+static char *request_path_for_call(BridgeState *state, const char *sender,
+                                   GVariant *parameters, gsize options_index)
+{
+    GVariant *options = g_variant_get_child_value(parameters, options_index);
+    char *path = request_path_for_options(state, sender, options);
+    g_variant_unref(options);
+    return path;
+}
+
+static char *fresh_host_token(BridgeState *state, const char *label)
+{
+    return g_strdup_printf("freebsd_flatpak_%s_%" G_GUINT64_FORMAT, label,
+                           ++state->host_token_counter);
+}
+
+static GVariant *rewrite_options(GVariant *options, const char *handle_token,
+                                 const char *session_token)
+{
+    GVariantBuilder out;
+    g_variant_builder_init(&out, G_VARIANT_TYPE_VARDICT);
+    GVariantIter iter;
+    const char *key = NULL;
+    GVariant *value = NULL;
+    g_variant_iter_init(&iter, options);
+    while (g_variant_iter_next(&iter, "{&sv}", &key, &value)) {
+        if (g_strcmp0(key, "handle_token") != 0 &&
+            (session_token == NULL || g_strcmp0(key, "session_handle_token") != 0)) {
+            g_variant_builder_add(&out, "{sv}", key, value);
+        }
+        g_variant_unref(value);
+    }
+    if (handle_token != NULL) {
+        g_variant_builder_add(&out, "{sv}", "handle_token",
+                              g_variant_new_string(handle_token));
+    }
+    if (session_token != NULL) {
+        g_variant_builder_add(&out, "{sv}", "session_handle_token",
+                              g_variant_new_string(session_token));
+    }
+    return g_variant_builder_end(&out);
 }
 
 static void handle_request_method(GDBusConnection *connection, const gchar *sender,
@@ -936,7 +1882,6 @@ static void handle_request_method(GDBusConnection *connection, const gchar *send
                                   GDBusMethodInvocation *invocation, gpointer user_data)
 {
     (void)connection;
-    (void)sender;
     (void)interface_name;
     (void)parameters;
 
@@ -947,8 +1892,23 @@ static void handle_request_method(GDBusConnection *connection, const gchar *send
                                               "unknown request object");
         return;
     }
+    if (g_strcmp0(sender, request->client_sender) != 0) {
+        g_dbus_method_invocation_return_error(invocation, G_IO_ERROR,
+                                              G_IO_ERROR_PERMISSION_DENIED,
+                                              "request belongs to another client");
+        return;
+    }
     if (g_strcmp0(method_name, "Close") == 0) {
-        emit_cancel_response(request);
+        request->close_requested = true;
+        request->completed = true;
+        if (request->host_path != NULL) {
+            g_dbus_connection_call(request->state->host_bus,
+                                   "org.freedesktop.portal.Desktop",
+                                   request->host_path,
+                                   "org.freedesktop.portal.Request", "Close",
+                                   NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1,
+                                   NULL, NULL, NULL);
+        }
         g_dbus_method_invocation_return_value(invocation, NULL);
         return;
     }
@@ -976,12 +1936,533 @@ static const GDBusInterfaceVTable REQUEST_VTABLE = {
     .get_property = handle_request_property,
 };
 
+static SessionRecord *find_session(BridgeState *state, const char *local_path)
+{
+    for (guint i = 0; i < state->sessions->len; i++) {
+        SessionRecord *session = g_ptr_array_index(state->sessions, i);
+        if (g_strcmp0(session->local_path, local_path) == 0) {
+            return session;
+        }
+    }
+    return NULL;
+}
+
+static void close_host_session(SessionRecord *session)
+{
+    remove_pipewire_links_for_session(session);
+    if (session->closed || session->close_requested || session->host_path == NULL ||
+        session->state->host_bus == NULL) {
+        return;
+    }
+    session->close_requested = true;
+    g_dbus_connection_call(session->state->host_bus,
+                           "org.freedesktop.portal.Desktop", session->host_path,
+                           "org.freedesktop.portal.Session", "Close", NULL, NULL,
+                           G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
+}
+
+static void on_host_session_closed(GDBusConnection *connection, const gchar *sender_name,
+                                   const gchar *object_path, const gchar *interface_name,
+                                   const gchar *signal_name, GVariant *parameters,
+                                   gpointer user_data)
+{
+    (void)connection;
+    (void)sender_name;
+    (void)object_path;
+    (void)interface_name;
+    (void)signal_name;
+    SessionRecord *session = user_data;
+    if (session->closed) {
+        return;
+    }
+    remove_pipewire_links_for_session(session);
+    session->closed = true;
+    GError *error = NULL;
+    if (!g_dbus_connection_emit_signal(session->state->local_bus,
+                                       session->client_sender, session->local_path,
+                                       "org.freedesktop.portal.Session", "Closed",
+                                       g_variant_ref(parameters), &error)) {
+        log_line("emit Session.Closed to %s failed: %s",
+                 session->client_sender, error->message);
+        g_error_free(error);
+    }
+}
+
+static void handle_session_method(GDBusConnection *connection, const gchar *sender,
+                                  const gchar *object_path, const gchar *interface_name,
+                                  const gchar *method_name, GVariant *parameters,
+                                  GDBusMethodInvocation *invocation, gpointer user_data)
+{
+    (void)connection;
+    (void)interface_name;
+    (void)parameters;
+    BridgeState *state = user_data;
+    SessionRecord *session = find_session(state, object_path);
+    if (session == NULL) {
+        g_dbus_method_invocation_return_error(invocation, G_IO_ERROR,
+                                              G_IO_ERROR_NOT_FOUND,
+                                              "unknown session object");
+        return;
+    }
+    if (g_strcmp0(sender, session->client_sender) != 0) {
+        g_dbus_method_invocation_return_error(invocation, G_IO_ERROR,
+                                              G_IO_ERROR_PERMISSION_DENIED,
+                                              "session belongs to another client");
+        return;
+    }
+    if (g_strcmp0(method_name, "Close") == 0) {
+        close_host_session(session);
+        g_dbus_method_invocation_return_value(invocation, NULL);
+        return;
+    }
+    g_dbus_method_invocation_return_error(invocation, G_IO_ERROR,
+                                          G_IO_ERROR_NOT_SUPPORTED,
+                                          "%s is not implemented", method_name);
+}
+
+static GVariant *handle_session_property(GDBusConnection *connection, const gchar *sender,
+                                         const gchar *object_path,
+                                         const gchar *interface_name,
+                                         const gchar *property_name, GError **error,
+                                         gpointer user_data)
+{
+    (void)connection;
+    (void)sender;
+    (void)object_path;
+    (void)interface_name;
+    (void)user_data;
+    if (g_strcmp0(property_name, "version") == 0) {
+        return g_variant_new_uint32(1);
+    }
+    g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                "unknown property %s", property_name);
+    return NULL;
+}
+
+static const GDBusInterfaceVTable SESSION_VTABLE = {
+    .method_call = handle_session_method,
+    .get_property = handle_session_property,
+};
+
+static SessionRecord *register_session(RequestRecord *request, const char *host_path,
+                                       GError **error)
+{
+    BridgeState *state = request->state;
+    if (find_session(state, request->local_session_path) != NULL) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_EXISTS,
+                    "session already exists: %s", request->local_session_path);
+        return NULL;
+    }
+    SessionRecord *session = g_new0(SessionRecord, 1);
+    session->state = state;
+    session->client_sender = g_strdup(request->client_sender);
+    session->local_path = g_strdup(request->local_session_path);
+    session->host_path = g_strdup(host_path);
+    session->sources = g_array_new(FALSE, TRUE, sizeof(ScreenCastSource));
+    GDBusInterfaceInfo *iface =
+        g_dbus_node_info_lookup_interface(state->session_node,
+                                          "org.freedesktop.portal.Session");
+    session->local_registration_id = g_dbus_connection_register_object(
+        state->local_bus, session->local_path, iface, &SESSION_VTABLE,
+        state, NULL, error);
+    if (session->local_registration_id == 0) {
+        free_session(session);
+        return NULL;
+    }
+    session->host_signal_id = g_dbus_connection_signal_subscribe(
+        state->host_bus, "org.freedesktop.portal.Desktop",
+        "org.freedesktop.portal.Session", "Closed", session->host_path, NULL,
+        G_DBUS_SIGNAL_FLAGS_NONE, on_host_session_closed, session, NULL);
+    g_ptr_array_add(state->sessions, session);
+    log_line("mapped ScreenCast session %s -> %s",
+             session->local_path, session->host_path);
+    return session;
+}
+
+static GVariant *rewrite_create_session_results(RequestRecord *request, guint32 response,
+                                                GVariant *results, guint32 *out_response)
+{
+    *out_response = response;
+    if (response != 0) {
+        return g_variant_ref(results);
+    }
+    const char *host_session = NULL;
+    if (!g_variant_lookup(results, "session_handle", "&s", &host_session)) {
+        log_line("host CreateSession response omitted session_handle");
+        *out_response = 2;
+        GVariantBuilder empty;
+        g_variant_builder_init(&empty, G_VARIANT_TYPE_VARDICT);
+        return g_variant_builder_end(&empty);
+    }
+    GError *error = NULL;
+    if (register_session(request, host_session, &error) == NULL) {
+        log_line("register local ScreenCast session failed: %s", error->message);
+        g_error_free(error);
+        *out_response = 2;
+        GVariantBuilder empty;
+        g_variant_builder_init(&empty, G_VARIANT_TYPE_VARDICT);
+        return g_variant_builder_end(&empty);
+    }
+
+    GVariantBuilder out;
+    g_variant_builder_init(&out, G_VARIANT_TYPE_VARDICT);
+    GVariantIter iter;
+    const char *key = NULL;
+    GVariant *value = NULL;
+    g_variant_iter_init(&iter, results);
+    while (g_variant_iter_next(&iter, "{&sv}", &key, &value)) {
+        if (g_strcmp0(key, "session_handle") == 0) {
+            g_variant_builder_add(&out, "{sv}", key,
+                                  g_variant_new_string(request->local_session_path));
+        } else {
+            g_variant_builder_add(&out, "{sv}", key, value);
+        }
+        g_variant_unref(value);
+    }
+    return g_variant_builder_end(&out);
+}
+
+static void update_session_sources(SessionRecord *session, GVariant *results)
+{
+    GVariant *streams = g_variant_lookup_value(
+        results, "streams", G_VARIANT_TYPE("a(ua{sv})"));
+    if (streams == NULL) {
+        log_line("ScreenCast.Start response omitted streams");
+        return;
+    }
+
+    remove_pipewire_links_for_session(session);
+    g_array_set_size(session->sources, 0);
+    GVariantIter iter;
+    guint32 node_id = SPA_ID_INVALID;
+    GVariant *properties = NULL;
+    g_variant_iter_init(&iter, streams);
+    while (g_variant_iter_next(&iter, "(u@a{sv})", &node_id, &properties)) {
+        ScreenCastSource source = {
+            .node_id = node_id,
+            .serial = 0,
+        };
+        g_variant_lookup(properties, "pipewire-serial", "t", &source.serial);
+        if (!session_approves_source(session, node_id)) {
+            g_array_append_val(session->sources, source);
+            log_line("approved ScreenCast source node %u (serial %" G_GUINT64_FORMAT
+                     ") for session %s", node_id, source.serial,
+                     session->local_path);
+        }
+        g_variant_unref(properties);
+    }
+    g_variant_unref(streams);
+    refresh_pipewire_permissions_for_client(session->state->pipewire,
+                                            SPA_ID_INVALID);
+    pipewire_compat_try_links(session->state->pipewire);
+}
+
+static void on_host_screencast_response(GDBusConnection *connection,
+                                        const gchar *sender_name,
+                                        const gchar *object_path,
+                                        const gchar *interface_name,
+                                        const gchar *signal_name,
+                                        GVariant *parameters, gpointer user_data)
+{
+    (void)connection;
+    (void)sender_name;
+    (void)object_path;
+    (void)interface_name;
+    (void)signal_name;
+    RequestRecord *request = user_data;
+    guint32 response = 2;
+    GVariant *results = NULL;
+    g_variant_get(parameters, "(u@a{sv})", &response, &results);
+    if (request->close_requested) {
+        g_variant_unref(results);
+        if (request->host_signal_id != 0) {
+            g_dbus_connection_signal_unsubscribe(request->state->host_bus,
+                                                 request->host_signal_id);
+            request->host_signal_id = 0;
+        }
+        return;
+    }
+    if (response == 0 && request->kind == REQUEST_SCREENCAST_START &&
+        request->session != NULL) {
+        update_session_sources(request->session, results);
+    }
+    GVariant *forwarded = request->kind == REQUEST_SCREENCAST_CREATE
+                              ? rewrite_create_session_results(request, response,
+                                                               results, &response)
+                              : g_variant_ref(results);
+    g_variant_unref(results);
+    emit_request_response(request, response, forwarded);
+    if (request->host_signal_id != 0) {
+        g_dbus_connection_signal_unsubscribe(request->state->host_bus,
+                                             request->host_signal_id);
+        request->host_signal_id = 0;
+    }
+}
+
+static void subscribe_host_request(RequestRecord *request)
+{
+    if (request->host_signal_id != 0) {
+        g_dbus_connection_signal_unsubscribe(request->state->host_bus,
+                                             request->host_signal_id);
+    }
+    request->host_signal_id = g_dbus_connection_signal_subscribe(
+        request->state->host_bus, "org.freedesktop.portal.Desktop",
+        "org.freedesktop.portal.Request", "Response", request->host_path, NULL,
+        G_DBUS_SIGNAL_FLAGS_NONE, on_host_screencast_response, request, NULL);
+}
+
+static void on_host_screencast_call(GObject *source_object, GAsyncResult *result,
+                                    gpointer user_data)
+{
+    GDBusConnection *connection = G_DBUS_CONNECTION(source_object);
+    RequestRecord *request = user_data;
+    GError *error = NULL;
+    GVariant *reply = g_dbus_connection_call_finish(connection, result, &error);
+    if (reply == NULL) {
+        log_line("host ScreenCast call failed: %s", error->message);
+        g_error_free(error);
+        emit_cancel_response(request);
+        return;
+    }
+    const char *actual_path = NULL;
+    g_variant_get(reply, "(&o)", &actual_path);
+    if (g_strcmp0(actual_path, request->host_path) != 0) {
+        log_line("host returned unexpected request path %s (predicted %s)",
+                 actual_path, request->host_path);
+        g_free(request->host_path);
+        request->host_path = g_strdup(actual_path);
+        subscribe_host_request(request);
+    }
+    if (request->close_requested) {
+        g_dbus_connection_call(request->state->host_bus,
+                               "org.freedesktop.portal.Desktop",
+                               request->host_path,
+                               "org.freedesktop.portal.Request", "Close",
+                               NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1,
+                               NULL, NULL, NULL);
+    }
+    g_variant_unref(reply);
+}
+
+static RequestRecord *register_screencast_request(BridgeState *state,
+                                                  const char *sender,
+                                                  GVariant *options,
+                                                  RequestKind kind,
+                                                  const char *host_token,
+                                                  GError **error)
+{
+    RequestRecord *request = g_new0(RequestRecord, 1);
+    request->state = state;
+    request->client_sender = g_strdup(sender);
+    request->local_path = request_path_for_options(state, sender, options);
+    request->kind = kind;
+    const char *host_sender = g_dbus_connection_get_unique_name(state->host_bus);
+    request->host_path = portal_path("request", host_sender, host_token);
+    GDBusInterfaceInfo *iface =
+        g_dbus_node_info_lookup_interface(state->request_node,
+                                          "org.freedesktop.portal.Request");
+    request->local_registration_id = g_dbus_connection_register_object(
+        state->local_bus, request->local_path, iface, &REQUEST_VTABLE,
+        state, NULL, error);
+    if (request->local_registration_id == 0) {
+        free_request(request);
+        return NULL;
+    }
+    subscribe_host_request(request);
+    g_ptr_array_add(state->requests, request);
+    return request;
+}
+
+static SessionRecord *owned_session(BridgeState *state, const char *sender,
+                                    const char *local_path,
+                                    GDBusMethodInvocation *invocation)
+{
+    SessionRecord *session = find_session(state, local_path);
+    if (session == NULL || session->closed || session->close_requested) {
+        g_dbus_method_invocation_return_error(invocation, G_IO_ERROR,
+                                              G_IO_ERROR_NOT_FOUND,
+                                              "unknown or closed session: %s",
+                                              local_path);
+        return NULL;
+    }
+    if (g_strcmp0(sender, session->client_sender) != 0) {
+        g_dbus_method_invocation_return_error(invocation, G_IO_ERROR,
+                                              G_IO_ERROR_PERMISSION_DENIED,
+                                              "session belongs to another client");
+        return NULL;
+    }
+    return session;
+}
+
+static void handle_screencast_create(BridgeState *state, const char *sender,
+                                     GVariant *parameters,
+                                     GDBusMethodInvocation *invocation)
+{
+    GVariant *options = g_variant_get_child_value(parameters, 0);
+    char *host_handle_token = fresh_host_token(state, "request");
+    char *host_session_token = fresh_host_token(state, "session");
+    GError *error = NULL;
+    RequestRecord *request = register_screencast_request(
+        state, sender, options, REQUEST_SCREENCAST_CREATE,
+        host_handle_token, &error);
+    if (request == NULL) {
+        g_dbus_method_invocation_take_error(invocation, error);
+        goto out;
+    }
+    char *local_session_token = token_from_options(
+        state, options, "session_handle_token", "freebsd_flatpak_session");
+    request->local_session_path = portal_path("session", sender,
+                                              local_session_token);
+    g_free(local_session_token);
+    GVariant *host_options = rewrite_options(options, host_handle_token,
+                                             host_session_token);
+    g_dbus_connection_call(state->host_bus, "org.freedesktop.portal.Desktop",
+                           "/org/freedesktop/portal/desktop",
+                           "org.freedesktop.portal.ScreenCast", "CreateSession",
+                           g_variant_new("(@a{sv})", host_options),
+                           G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NONE, -1,
+                           NULL, on_host_screencast_call, request);
+    g_dbus_method_invocation_return_value(
+        invocation, g_variant_new("(o)", request->local_path));
+    log_line("forwarded ScreenCast.CreateSession as %s", request->local_path);
+out:
+    g_free(host_handle_token);
+    g_free(host_session_token);
+    g_variant_unref(options);
+}
+
+static void handle_screencast_request(BridgeState *state, const char *sender,
+                                      const char *method_name,
+                                      GVariant *parameters,
+                                      GDBusMethodInvocation *invocation)
+{
+    const char *local_session_path = NULL;
+    g_variant_get_child(parameters, 0, "&o", &local_session_path);
+    SessionRecord *session = owned_session(state, sender, local_session_path,
+                                           invocation);
+    if (session == NULL) {
+        return;
+    }
+    gsize options_index = g_strcmp0(method_name, "Start") == 0 ? 2 : 1;
+    GVariant *options = g_variant_get_child_value(parameters, options_index);
+    char *host_token = fresh_host_token(state, "request");
+    GError *error = NULL;
+    bool is_start = g_strcmp0(method_name, "Start") == 0;
+    RequestRecord *request = register_screencast_request(
+        state, sender, options,
+        is_start ? REQUEST_SCREENCAST_START : REQUEST_SCREENCAST_OTHER,
+        host_token, &error);
+    if (request == NULL) {
+        g_dbus_method_invocation_take_error(invocation, error);
+        g_free(host_token);
+        g_variant_unref(options);
+        return;
+    }
+    request->session = session;
+    GVariant *host_options = rewrite_options(options, host_token, NULL);
+    GVariant *host_parameters = NULL;
+    if (is_start) {
+        const char *parent_window = NULL;
+        g_variant_get_child(parameters, 1, "&s", &parent_window);
+        host_parameters = g_variant_new("(os@a{sv})", session->host_path,
+                                        parent_window, host_options);
+    } else {
+        host_parameters = g_variant_new("(o@a{sv})", session->host_path,
+                                        host_options);
+    }
+    g_dbus_connection_call(state->host_bus, "org.freedesktop.portal.Desktop",
+                           "/org/freedesktop/portal/desktop",
+                           "org.freedesktop.portal.ScreenCast", method_name,
+                           host_parameters, G_VARIANT_TYPE("(o)"),
+                           G_DBUS_CALL_FLAGS_NONE, -1, NULL,
+                           on_host_screencast_call, request);
+    g_dbus_method_invocation_return_value(
+        invocation, g_variant_new("(o)", request->local_path));
+    log_line("forwarded ScreenCast.%s as %s", method_name,
+             request->local_path);
+    g_free(host_token);
+    g_variant_unref(options);
+}
+
+static gint32 copy_unix_fd(GUnixFDList *source_fds, gint32 source_index,
+                           GUnixFDList *destination_fds, GError **error)
+{
+    if (source_fds == NULL) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                    "host portal returned no Unix FD list");
+        return -1;
+    }
+    int source_fd = g_unix_fd_list_get(source_fds, source_index, error);
+    if (source_fd < 0) {
+        return -1;
+    }
+    gint32 destination_index = g_unix_fd_list_append(destination_fds, source_fd,
+                                                     error);
+    close(source_fd);
+    return destination_index;
+}
+
+static void on_open_pipewire_remote(GObject *source_object, GAsyncResult *result,
+                                    gpointer user_data)
+{
+    GDBusConnection *connection = G_DBUS_CONNECTION(source_object);
+    GDBusMethodInvocation *invocation = user_data;
+    GError *error = NULL;
+    GUnixFDList *host_fds = NULL;
+    GVariant *reply = g_dbus_connection_call_with_unix_fd_list_finish(
+        connection, &host_fds, result, &error);
+    if (reply == NULL) {
+        g_dbus_method_invocation_take_error(invocation, error);
+        g_object_unref(invocation);
+        return;
+    }
+    gint32 host_index = -1;
+    g_variant_get(reply, "(h)", &host_index);
+    GUnixFDList *local_fds = g_unix_fd_list_new();
+    gint32 local_index = copy_unix_fd(host_fds, host_index, local_fds, &error);
+    if (local_index < 0) {
+        g_dbus_method_invocation_take_error(invocation, error);
+    } else {
+        g_dbus_method_invocation_return_value_with_unix_fd_list(
+            invocation, g_variant_new("(h)", local_index), local_fds);
+        log_line("forwarded restricted PipeWire remote fd");
+    }
+    g_object_unref(local_fds);
+    g_variant_unref(reply);
+    if (host_fds != NULL) {
+        g_object_unref(host_fds);
+    }
+    g_object_unref(invocation);
+}
+
+static void handle_open_pipewire_remote(BridgeState *state, const char *sender,
+                                        GVariant *parameters,
+                                        GDBusMethodInvocation *invocation)
+{
+    const char *local_session_path = NULL;
+    GVariant *options = NULL;
+    g_variant_get(parameters, "(&o@a{sv})", &local_session_path, &options);
+    SessionRecord *session = owned_session(state, sender, local_session_path,
+                                           invocation);
+    if (session == NULL) {
+        g_variant_unref(options);
+        return;
+    }
+    g_dbus_connection_call_with_unix_fd_list(
+        state->host_bus, "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.ScreenCast", "OpenPipeWireRemote",
+        g_variant_new("(o@a{sv})", session->host_path, options),
+        G_VARIANT_TYPE("(h)"), G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL,
+        on_open_pipewire_remote, g_object_ref(invocation));
+}
+
 static void handle_filechooser_open(BridgeState *state, const char *sender,
                                     GVariant *parameters,
                                     GDBusMethodInvocation *invocation)
 {
     GError *error = NULL;
-    char *local_path = request_path_for_call(state, sender, parameters);
+    char *local_path = request_path_for_call(state, sender, parameters, 2);
     GDBusInterfaceInfo *request_iface =
         g_dbus_node_info_lookup_interface(state->request_node,
                                           "org.freedesktop.portal.Request");
@@ -989,6 +2470,7 @@ static void handle_filechooser_open(BridgeState *state, const char *sender,
     request->state = state;
     request->client_sender = g_strdup(sender);
     request->local_path = g_strdup(local_path);
+    request->kind = REQUEST_FILECHOOSER;
     request->local_registration_id = g_dbus_connection_register_object(
         state->local_bus, local_path, request_iface, &REQUEST_VTABLE, state, NULL, &error);
     if (request->local_registration_id == 0) {
@@ -1284,7 +2766,17 @@ static void handle_desktop_method(GDBusConnection *connection, const gchar *send
     (void)object_path;
 
     BridgeState *state = user_data;
-    if (g_strcmp0(interface_name, "org.freedesktop.portal.FileChooser") == 0 &&
+    if (g_strcmp0(interface_name, "org.freedesktop.portal.ScreenCast") == 0 &&
+        g_strcmp0(method_name, "CreateSession") == 0) {
+        handle_screencast_create(state, sender, parameters, invocation);
+    } else if (g_strcmp0(interface_name, "org.freedesktop.portal.ScreenCast") == 0 &&
+               (g_strcmp0(method_name, "SelectSources") == 0 ||
+                g_strcmp0(method_name, "Start") == 0)) {
+        handle_screencast_request(state, sender, method_name, parameters, invocation);
+    } else if (g_strcmp0(interface_name, "org.freedesktop.portal.ScreenCast") == 0 &&
+               g_strcmp0(method_name, "OpenPipeWireRemote") == 0) {
+        handle_open_pipewire_remote(state, sender, parameters, invocation);
+    } else if (g_strcmp0(interface_name, "org.freedesktop.portal.FileChooser") == 0 &&
         g_strcmp0(method_name, "OpenFile") == 0) {
         handle_filechooser_open(state, sender, parameters, invocation);
     } else if (g_strcmp0(interface_name, "org.freedesktop.portal.FileChooser") == 0) {
@@ -1509,7 +3001,19 @@ static GVariant *handle_get_property(GDBusConnection *connection, const gchar *s
     (void)connection;
     (void)sender;
     (void)object_path;
-    (void)user_data;
+    BridgeState *state = user_data;
+
+    if (g_strcmp0(interface_name, "org.freedesktop.portal.ScreenCast") == 0) {
+        if (g_strcmp0(property_name, "version") == 0) {
+            return g_variant_new_uint32(state->screencast_version);
+        }
+        if (g_strcmp0(property_name, "AvailableSourceTypes") == 0) {
+            return g_variant_new_uint32(state->screencast_source_types);
+        }
+        if (g_strcmp0(property_name, "AvailableCursorModes") == 0) {
+            return g_variant_new_uint32(state->screencast_cursor_modes);
+        }
+    }
 
     if (g_strcmp0(property_name, "version") == 0) {
         if (g_strcmp0(interface_name, "org.freedesktop.portal.FileChooser") == 0) {
@@ -1713,6 +3217,83 @@ static const GDBusInterfaceVTable STATUS_WATCHER_VTABLE = {
     .get_property = handle_status_watcher_property,
 };
 
+static void load_host_screencast_properties(BridgeState *state)
+{
+    GError *error = NULL;
+    GVariant *reply = g_dbus_connection_call_sync(
+        state->host_bus, "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop", "org.freedesktop.DBus.Properties",
+        "GetAll", g_variant_new("(s)", "org.freedesktop.portal.ScreenCast"),
+        G_VARIANT_TYPE("(a{sv})"), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
+    if (reply == NULL) {
+        log_line("read host ScreenCast properties failed: %s", error->message);
+        g_error_free(error);
+        return;
+    }
+
+    GVariant *properties = NULL;
+    g_variant_get(reply, "(@a{sv})", &properties);
+    g_variant_lookup(properties, "version", "u", &state->screencast_version);
+    g_variant_lookup(properties, "AvailableSourceTypes", "u",
+                     &state->screencast_source_types);
+    g_variant_lookup(properties, "AvailableCursorModes", "u",
+                     &state->screencast_cursor_modes);
+    log_line("host ScreenCast version=%u source-types=%u cursor-modes=%u",
+             state->screencast_version, state->screencast_source_types,
+             state->screencast_cursor_modes);
+    g_variant_unref(properties);
+    g_variant_unref(reply);
+}
+
+static void close_resources_for_client(BridgeState *state, const char *client_sender)
+{
+    for (guint i = 0; i < state->requests->len; i++) {
+        RequestRecord *request = g_ptr_array_index(state->requests, i);
+        if (request->completed ||
+            g_strcmp0(request->client_sender, client_sender) != 0) {
+            continue;
+        }
+        request->close_requested = true;
+        request->completed = true;
+        if (request->host_path != NULL) {
+            g_dbus_connection_call(state->host_bus,
+                                   "org.freedesktop.portal.Desktop",
+                                   request->host_path,
+                                   "org.freedesktop.portal.Request", "Close",
+                                   NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1,
+                                   NULL, NULL, NULL);
+        }
+    }
+    for (guint i = 0; i < state->sessions->len; i++) {
+        SessionRecord *session = g_ptr_array_index(state->sessions, i);
+        if (g_strcmp0(session->client_sender, client_sender) == 0) {
+            close_host_session(session);
+        }
+    }
+}
+
+static void on_local_name_owner_changed(GDBusConnection *connection,
+                                        const gchar *sender_name,
+                                        const gchar *object_path,
+                                        const gchar *interface_name,
+                                        const gchar *signal_name,
+                                        GVariant *parameters,
+                                        gpointer user_data)
+{
+    (void)connection;
+    (void)sender_name;
+    (void)object_path;
+    (void)interface_name;
+    (void)signal_name;
+    const char *name = NULL;
+    const char *old_owner = NULL;
+    const char *new_owner = NULL;
+    g_variant_get(parameters, "(&s&s&s)", &name, &old_owner, &new_owner);
+    if (name[0] == ':' && old_owner[0] != '\0' && new_owner[0] == '\0') {
+        close_resources_for_client(user_data, name);
+    }
+}
+
 static bool register_node_interfaces(GDBusConnection *connection, const char *path,
                                      GDBusNodeInfo *node, const GDBusInterfaceVTable *vtable,
                                      BridgeState *state, GError **error)
@@ -1738,6 +3319,11 @@ static void on_bus_acquired(GDBusConnection *connection, const gchar *name, gpoi
     if (state->local_objects_registered) {
         return;
     }
+
+    state->local_name_signal_id = g_dbus_connection_signal_subscribe(
+        connection, "org.freedesktop.DBus", "org.freedesktop.DBus",
+        "NameOwnerChanged", "/org/freedesktop/DBus", NULL,
+        G_DBUS_SIGNAL_FLAGS_NONE, on_local_name_owner_changed, state, NULL);
 
     GError *error = NULL;
     if (!register_node_interfaces(connection, "/org/freedesktop/portal/desktop",
@@ -1828,9 +3414,11 @@ int main(int argc, char **argv)
         .mountpoint = g_strdup(mountpoint),
         .grants = g_ptr_array_new_with_free_func((GDestroyNotify)free_grant),
         .requests = g_ptr_array_new_with_free_func((GDestroyNotify)free_request),
+        .sessions = g_ptr_array_new_with_free_func((GDestroyNotify)free_session),
         .status_items = g_ptr_array_new_with_free_func((GDestroyNotify)free_status_item),
         .counter = 0,
         .request_counter = 0,
+        .host_token_counter = 0,
         .status_counter = 0,
         .loop = g_main_loop_new(NULL, FALSE),
         .host_bus = connect_to_bus_address(host_bus_address, &error),
@@ -1838,9 +3426,11 @@ int main(int argc, char **argv)
         .desktop_node = g_dbus_node_info_new_for_xml(DESKTOP_XML, &error),
         .documents_node = NULL,
         .request_node = NULL,
+        .session_node = NULL,
         .status_watcher_node = NULL,
         .status_item_node = NULL,
         .dbusmenu_node = NULL,
+        .pipewire = NULL,
     };
     if (state.host_bus == NULL || state.desktop_node == NULL) {
         fprintf(stderr, "portal bridge setup failed: %s\n", error->message);
@@ -1849,15 +3439,22 @@ int main(int argc, char **argv)
     }
     state.documents_node = g_dbus_node_info_new_for_xml(DOCUMENTS_XML, &error);
     state.request_node = g_dbus_node_info_new_for_xml(REQUEST_XML, &error);
+    state.session_node = g_dbus_node_info_new_for_xml(SESSION_XML, &error);
     state.status_watcher_node = g_dbus_node_info_new_for_xml(STATUS_WATCHER_XML, &error);
     state.status_item_node = g_dbus_node_info_new_for_xml(STATUS_ITEM_XML, &error);
     state.dbusmenu_node = g_dbus_node_info_new_for_xml(DBUSMENU_XML, &error);
     if (state.documents_node == NULL || state.request_node == NULL ||
+        state.session_node == NULL ||
         state.status_watcher_node == NULL || state.status_item_node == NULL ||
         state.dbusmenu_node == NULL) {
         fprintf(stderr, "portal bridge introspection failed: %s\n", error->message);
         g_error_free(error);
         return 1;
+    }
+    load_host_screencast_properties(&state);
+    state.pipewire = new_pipewire_compat(&state);
+    if (state.pipewire == NULL) {
+        log_line("PipeWire compatibility linking unavailable; ScreenCast forwarding will continue");
     }
 
     g_unix_signal_add(SIGINT, handle_signal, &state);
@@ -1882,8 +3479,34 @@ int main(int argc, char **argv)
     g_main_loop_run(state.loop);
 
     cleanup_all(&state);
+    for (guint i = 0; i < state.requests->len; i++) {
+        RequestRecord *request = g_ptr_array_index(state.requests, i);
+        if (!request->completed && request->host_path != NULL) {
+            g_dbus_connection_call(state.host_bus,
+                                   "org.freedesktop.portal.Desktop",
+                                   request->host_path,
+                                   "org.freedesktop.portal.Request", "Close",
+                                   NULL, NULL, G_DBUS_CALL_FLAGS_NONE, -1,
+                                   NULL, NULL, NULL);
+        }
+    }
+    for (guint i = 0; i < state.sessions->len; i++) {
+        close_host_session(g_ptr_array_index(state.sessions, i));
+    }
+    g_dbus_connection_flush_sync(state.host_bus, NULL, NULL);
+    if (state.local_name_signal_id != 0 && state.local_bus != NULL) {
+        g_dbus_connection_signal_unsubscribe(state.local_bus,
+                                             state.local_name_signal_id);
+        state.local_name_signal_id = 0;
+    }
+    free_pipewire_compat(state.pipewire);
+    state.pipewire = NULL;
     g_ptr_array_free(state.status_items, TRUE);
     state.status_items = NULL;
+    g_ptr_array_free(state.sessions, TRUE);
+    state.sessions = NULL;
+    g_ptr_array_free(state.requests, TRUE);
+    state.requests = NULL;
     g_bus_unown_name(status_owner_id);
     g_bus_unown_name(documents_owner_id);
     g_bus_unown_name(desktop_owner_id);
@@ -1896,11 +3519,11 @@ int main(int argc, char **argv)
     g_dbus_node_info_unref(state.desktop_node);
     g_dbus_node_info_unref(state.documents_node);
     g_dbus_node_info_unref(state.request_node);
+    g_dbus_node_info_unref(state.session_node);
     g_dbus_node_info_unref(state.status_watcher_node);
     g_dbus_node_info_unref(state.status_item_node);
     g_dbus_node_info_unref(state.dbusmenu_node);
     g_main_loop_unref(state.loop);
-    g_ptr_array_free(state.requests, TRUE);
     g_ptr_array_free(state.grants, TRUE);
     g_free(state.app_id);
     g_free(state.doc_dir);

@@ -43,8 +43,7 @@ impl HostPortal {
     ) -> Result<Self> {
         let mut warnings = Vec::new();
         let Some(bus_address) = desktop.dbus_session_bus_address.as_ref() else {
-            warnings
-                .push("DBUS_SESSION_BUS_ADDRESS is not set; FileChooser portals disabled".into());
+            warnings.push("DBUS_SESSION_BUS_ADDRESS is not set; desktop portals disabled".into());
             return Ok(Self {
                 proxy: None,
                 mode: PortalMode::Disabled,
@@ -233,7 +232,14 @@ fn ensure_bridge_helper(project_root: &Path) -> Result<PathBuf> {
     }
 
     let pkg_config = Command::new("pkg-config")
-        .args(["--cflags", "--libs", "gio-2.0", "gio-unix-2.0", "glib-2.0"])
+        .args([
+            "--cflags",
+            "--libs",
+            "gio-2.0",
+            "gio-unix-2.0",
+            "glib-2.0",
+            "libpipewire-0.3",
+        ])
         .output()
         .context("run pkg-config for portal bridge")?;
     if !pkg_config.status.success() {
@@ -371,7 +377,9 @@ fn wait_for_portal_proxy(bus_address: &str, mountpoint: &str) -> Result<()> {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    bail!("portal proxy did not publish FileChooser and document mountpoint {mountpoint}");
+    bail!(
+        "portal proxy did not publish FileChooser, ScreenCast, and document mountpoint {mountpoint}"
+    );
 }
 
 fn document_portal_ready(bus_address: &str, mountpoint: &str) -> bool {
@@ -392,6 +400,15 @@ fn document_portal_ready(bus_address: &str, mountpoint: &str) -> bool {
 }
 
 fn desktop_portal_ready(bus_address: &str) -> bool {
+    portal_property_ready(bus_address, "org.freedesktop.portal.FileChooser", "version")
+        && portal_property_ready(
+            bus_address,
+            "org.freedesktop.portal.ScreenCast",
+            "AvailableSourceTypes",
+        )
+}
+
+fn portal_property_ready(bus_address: &str, interface: &str, property: &str) -> bool {
     let output = Command::new("gdbus")
         .arg("call")
         .arg("--session")
@@ -401,8 +418,8 @@ fn desktop_portal_ready(bus_address: &str) -> bool {
         .arg("/org/freedesktop/portal/desktop")
         .arg("--method")
         .arg("org.freedesktop.DBus.Properties.Get")
-        .arg("org.freedesktop.portal.FileChooser")
-        .arg("version")
+        .arg(interface)
+        .arg(property)
         .env("DBUS_SESSION_BUS_ADDRESS", bus_address)
         .output();
 
