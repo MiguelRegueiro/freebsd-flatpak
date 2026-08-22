@@ -5,7 +5,8 @@ use glib::{Bytes, VariantDict};
 use ostree::gio;
 use ostree::{
     AsyncProgress, ObjectType, Repo, RepoCheckoutAtOptions, RepoCheckoutMode,
-    RepoCheckoutOverwriteMode, RepoListObjectsFlags, RepoMode, RepoPruneFlags, RepoRemoteChange,
+    RepoCheckoutOverwriteMode, RepoListObjectsFlags, RepoMode, RepoPruneFlags, RepoPullFlags,
+    RepoRemoteChange,
 };
 use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
@@ -28,6 +29,18 @@ pub struct Deployment<'a> {
     pub checksum: &'a str,
     pub destination: &'a Path,
     pub force: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitInfo {
+    pub checksum: String,
+    pub parent: Option<String>,
+    pub timestamp: u64,
+    pub subject: String,
+    pub body: String,
+    pub flatpak_metadata: Option<String>,
+    pub version: Option<String>,
+    pub collection_id: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -185,6 +198,76 @@ impl Storage {
             }],
         )
         .map(|_| ())
+    }
+
+    pub fn commit_history(
+        &self,
+        summary: &[u8],
+        ref_name: &str,
+        tip: &str,
+    ) -> Result<Vec<CommitInfo>> {
+        self.commit_history_with_verification(summary, ref_name, tip, true)
+    }
+
+    fn commit_history_with_verification(
+        &self,
+        summary: &[u8],
+        ref_name: &str,
+        tip: &str,
+        gpg_verify: bool,
+    ) -> Result<Vec<CommitInfo>> {
+        let refs = [ref_name];
+        let commits = [tip];
+        let options = VariantDict::new(None);
+        options.insert_value("refs", &refs.to_variant());
+        options.insert_value("override-commit-ids", &commits.to_variant());
+        options.insert("flags", RepoPullFlags::COMMIT_ONLY.bits() as i32);
+        options.insert("depth", -1i32);
+        options.insert("gpg-verify", gpg_verify);
+        options.insert("gpg-verify-summary", false);
+        options.insert_value("summary-bytes", &summary.to_variant());
+        options.insert_value("summary-sig-bytes", &Vec::<u8>::new().to_variant());
+        options.insert("n-network-retries", 5u32);
+        options.insert("retry-all-network-errors", true);
+        options.insert("append-user-agent", "freebsd-flatpak/0.1");
+
+        self.repo
+            .pull_with_options(REMOTE_NAME, &options.end(), None, gio::Cancellable::NONE)
+            .with_context(|| format!("pull OSTree history for {ref_name}"))?;
+
+        let mut history = Vec::new();
+        let mut checksum = Some(tip.to_string());
+        while let Some(current) = checksum {
+            let available = self
+                .repo
+                .has_object(ObjectType::Commit, &current, gio::Cancellable::NONE)
+                .with_context(|| format!("check for OSTree commit {current}"))?;
+            if !available {
+                if history.is_empty() {
+                    bail!("OSTree history pull did not store tip commit {current}");
+                }
+                break;
+            }
+            let (commit, _) = self
+                .repo
+                .load_commit(&current)
+                .with_context(|| format!("load OSTree commit {current}"))?;
+            let parent = ostree::commit_get_parent(&commit).map(|value| value.to_string());
+            let metadata = commit.child_value(0);
+            history.push(CommitInfo {
+                checksum: current,
+                parent: parent.clone(),
+                timestamp: ostree::commit_get_timestamp(&commit),
+                subject: commit.child_value(3).str().unwrap_or_default().to_string(),
+                body: commit.child_value(4).str().unwrap_or_default().to_string(),
+                flatpak_metadata: variant_dict_string(&metadata, "xa.metadata"),
+                version: variant_dict_string(&metadata, "xa.version"),
+                collection_id: variant_dict_string(&metadata, "ostree.collection-binding")
+                    .or_else(|| variant_dict_string(&metadata, "xa.collection-id")),
+            });
+            checksum = parent;
+        }
+        Ok(history)
     }
 
     pub fn fsck_commits(&self, commits: &[&str]) -> Result<()> {
@@ -384,6 +467,20 @@ impl Storage {
     }
 }
 
+fn variant_dict_string(map: &glib::Variant, key: &str) -> Option<String> {
+    for index in 0..map.n_children() {
+        let entry = map.child_value(index);
+        if entry.child_value(0).str() != Some(key) {
+            continue;
+        }
+        return entry
+            .child_value(1)
+            .as_variant()
+            .and_then(|value| value.str().map(ToString::to_string));
+    }
+    None
+}
+
 fn recover_activation_file(transaction_path: &Path) -> Result<()> {
     if !transaction_path.is_file() {
         return Ok(());
@@ -533,6 +630,7 @@ fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ostree::MutableTree;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
@@ -595,6 +693,121 @@ mod tests {
         assert!(!first_backup.exists());
         assert!(!second_backup.exists());
         assert!(!transaction.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remote_history_fetches_tip_into_an_empty_repo_and_tolerates_pruned_tail() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("source-repo");
+        let source = Repo::new_for_path(&source_path);
+        source
+            .create(RepoMode::Archive, gio::Cancellable::NONE)
+            .unwrap();
+
+        let tree_path = root.join("tree");
+        fs::create_dir_all(&tree_path).unwrap();
+        fs::write(tree_path.join("metadata"), "test").unwrap();
+        let mtree = MutableTree::new();
+        source
+            .write_directory_to_mtree(
+                &gio::File::for_path(&tree_path),
+                &mtree,
+                None,
+                gio::Cancellable::NONE,
+            )
+            .unwrap();
+        let transaction = source.auto_transaction(gio::Cancellable::NONE).unwrap();
+        let repo_file = source
+            .write_mtree(&mtree, gio::Cancellable::NONE)
+            .unwrap()
+            .downcast::<ostree::RepoFile>()
+            .unwrap();
+        let commit_metadata = VariantDict::new(None);
+        commit_metadata.insert(
+            "xa.metadata",
+            "[Application]\nname=org.example.App\nruntime=org.example.Platform/x86_64/stable\ncommand=example\n",
+        );
+        let oldest = source
+            .write_commit_with_time(
+                None,
+                Some("oldest"),
+                None,
+                Some(&commit_metadata.end()),
+                &repo_file,
+                1,
+                gio::Cancellable::NONE,
+            )
+            .unwrap();
+        let commit_metadata = VariantDict::new(None);
+        commit_metadata.insert(
+            "xa.metadata",
+            "[Application]\nname=org.example.App\nruntime=org.example.Platform/x86_64/stable\ncommand=example\n",
+        );
+        let tip = source
+            .write_commit_with_time(
+                Some(&oldest),
+                Some("tip"),
+                None,
+                Some(&commit_metadata.end()),
+                &repo_file,
+                2,
+                gio::Cancellable::NONE,
+            )
+            .unwrap();
+        let ref_name = "app/org.example.App/x86_64/stable";
+        source.transaction_set_ref(None, ref_name, Some(&tip));
+        transaction.commit(gio::Cancellable::NONE).unwrap();
+        source
+            .regenerate_summary(None, gio::Cancellable::NONE)
+            .unwrap();
+        let summary = fs::read(source_path.join("summary")).unwrap();
+
+        let oldest_object = source_path
+            .join("objects")
+            .join(&oldest[..2])
+            .join(format!("{}.commit", &oldest[2..]));
+        fs::remove_file(oldest_object).unwrap();
+
+        let paths = Installation::for_test(&root.join("destination"));
+        let storage = Storage::open(&paths).unwrap();
+        assert!(!storage
+            .repo
+            .has_object(ObjectType::Commit, &tip, gio::Cancellable::NONE)
+            .unwrap());
+        let remote_options = VariantDict::new(None);
+        remote_options.insert("gpg-verify", false);
+        remote_options.insert("gpg-verify-summary", false);
+        storage
+            .repo
+            .remote_change(
+                None::<&gio::File>,
+                RepoRemoteChange::Replace,
+                REMOTE_NAME,
+                Some(&format!("file://{}", source_path.display())),
+                Some(&remote_options.end()),
+                gio::Cancellable::NONE,
+            )
+            .unwrap();
+
+        let history = storage
+            .commit_history_with_verification(&summary, ref_name, &tip, false)
+            .unwrap();
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].checksum, tip);
+        assert_eq!(history[0].subject, "tip");
+        assert!(storage
+            .repo
+            .has_object(
+                ObjectType::Commit,
+                &history[0].checksum,
+                gio::Cancellable::NONE
+            )
+            .unwrap());
+        drop(storage);
+        drop(source);
         fs::remove_dir_all(root).unwrap();
     }
 }

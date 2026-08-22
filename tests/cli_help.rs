@@ -6,6 +6,7 @@ const EXPECTED_HELP: &str = r#"Usage:
 Commands:
   install       Install an application
   update        Update installed applications
+  remote-info   Show information about an application in a remote
   uninstall     Uninstall an application
   list          List installed applications
   search        Search Flathub

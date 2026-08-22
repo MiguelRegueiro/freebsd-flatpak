@@ -6,7 +6,7 @@ FreeBSD Flatpak downloads applications and runtimes from Flathub, runs their unm
 
 ## Features
 
-- Manage Flathub applications with search, install, update, run, and uninstall commands.
+- Manage Flathub applications with search, install, update, downgrade, run, and uninstall commands.
 - Integrate with Wayland desktops, including application launchers and tray icons.
 - Use Mesa GPU acceleration and host audio services.
 - Apply filesystem permissions and portal access from Flatpak metadata.
@@ -42,6 +42,7 @@ paths; no `XDG_DATA_DIRS` change is needed.
 
 ```sh
 flatpak search <query>
+flatpak remote-info [--log | --commit=COMMIT] flathub <app-id>
 flatpak install <app-id>
 flatpak list
 flatpak ps [--columns=instance,application,pid,child-pid]
@@ -50,8 +51,14 @@ flatpak repair
 flatpak prune
 flatpak run <app-id> -- <app-arguments>
 flatpak update [app-id...]
+flatpak update --commit=COMMIT <app-id>
 flatpak uninstall <app-id>
 ```
+
+`remote-info --log` shows the OSTree commit history available for an app ref,
+including apps that are not installed. Use `remote-info --commit=COMMIT` to
+inspect a historical commit and `update --commit=COMMIT` to move an installed
+app to that exact commit. A normal `update` follows the current Flathub tip.
 
 `flatpak ps` lists active application instances, including their instance ID,
 wrapper PID, application, and runtime. Use `--columns` to select debugging

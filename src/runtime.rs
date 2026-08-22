@@ -1,5 +1,5 @@
 use crate::paths::Installation;
-use crate::storage::{Deployment, Storage};
+use crate::storage::{CommitInfo, Deployment, Storage};
 use anyhow::{bail, Context, Result};
 use glib::{Bytes, Checksum, ChecksumType, Variant, VariantTy};
 use miniz_oxide::inflate::decompress_to_vec;
@@ -84,6 +84,14 @@ pub struct SearchResult {
     pub branch: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppstreamInfo {
+    pub name: Option<String>,
+    pub summary: Option<String>,
+    pub version: Option<String>,
+    pub license: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RemoteApp {
     pub app_id: String,
@@ -93,6 +101,9 @@ pub struct RemoteApp {
     pub branch: String,
     pub runtime_ref: String,
     pub runtime_commit: String,
+    pub sdk_ref: Option<String>,
+    pub download_size: Option<u64>,
+    pub installed_size: Option<u64>,
     pub command: String,
 }
 
@@ -101,6 +112,8 @@ struct RemoteRef {
     name: String,
     checksum: String,
     metadata: Option<String>,
+    download_size: Option<u64>,
+    installed_size: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +121,8 @@ pub struct RemoteMetadata {
     arch: String,
     refs: Vec<RemoteRef>,
     remote_dir: PathBuf,
+    summary_path: PathBuf,
+    collection_id: Option<String>,
 }
 
 impl RemoteMetadata {
@@ -126,6 +141,77 @@ impl RemoteMetadata {
         let app_ref = self.resolve_app_ref(app_id, replacements)?;
         trace_resolution("select application ref", started);
         remote_app_from_ref(&self.refs, app_ref, &self.arch)
+    }
+
+    pub fn appstream_info(&self, app_id: &str) -> Result<Option<AppstreamInfo>> {
+        let path = fetch_appstream(&self.remote_dir, &self.arch)?;
+        let compressed = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        let xml = decompress_appstream_xml(&compressed)
+            .with_context(|| format!("decompress {}", path.display()))?;
+        Ok(parse_appstream_info(&xml, app_id))
+    }
+
+    pub fn collection_id(&self) -> Option<&str> {
+        self.collection_id.as_deref()
+    }
+
+    pub fn app_history(
+        &self,
+        paths: &Installation,
+        app_id: &str,
+    ) -> Result<(RemoteApp, Vec<CommitInfo>)> {
+        let remote = self.resolve_app(app_id, true)?;
+        let history = self.history_for_remote(paths, &remote)?;
+        Ok((remote, history))
+    }
+
+    pub fn resolve_app_commit(
+        &self,
+        paths: &Installation,
+        app_ref: &str,
+        requested_commit: &str,
+    ) -> Result<RemoteApp> {
+        self.app_commit(paths, app_ref, requested_commit)
+            .map(|(app, _)| app)
+    }
+
+    pub fn app_commit(
+        &self,
+        paths: &Installation,
+        app_ref: &str,
+        requested_commit: &str,
+    ) -> Result<(RemoteApp, CommitInfo)> {
+        let tip = self.resolve_exact_ref(app_ref)?;
+        let history = self.history_for_remote(paths, &tip)?;
+        let commit = select_history_commit(&history, requested_commit)?;
+        let metadata = commit.flatpak_metadata.clone().with_context(|| {
+            format!(
+                "historical commit {} has no Flatpak metadata",
+                commit.checksum
+            )
+        })?;
+        let app = remote_app_from_ref(
+            &self.refs,
+            RemoteRef {
+                name: app_ref.to_string(),
+                checksum: commit.checksum.clone(),
+                metadata: Some(metadata),
+                download_size: None,
+                installed_size: None,
+            },
+            &self.arch,
+        )?;
+        Ok((app, commit.clone()))
+    }
+
+    fn history_for_remote(
+        &self,
+        paths: &Installation,
+        remote: &RemoteApp,
+    ) -> Result<Vec<CommitInfo>> {
+        let summary = fs::read(&self.summary_path)
+            .with_context(|| format!("read {}", self.summary_path.display()))?;
+        Storage::open(paths)?.commit_history(&summary, &remote.app_ref, &remote.app_commit)
     }
 
     fn resolve_app_ref(&self, app_id: &str, replacements: bool) -> Result<RemoteRef> {
@@ -208,7 +294,7 @@ pub fn resolve_remote_app(paths: &Installation, app_id: &str) -> Result<RemoteAp
     }
     let total_started = Instant::now();
     let started = Instant::now();
-    let (arch, summary_path) = load_arch_summary(paths)?;
+    let (arch, summary_path, collection_id) = load_arch_summary(paths)?;
     trace_resolution("load indexed architecture metadata", started);
     let started = Instant::now();
     if let Some(app) = resolve_exact_app_from_summary(&summary_path, app_id, &arch)? {
@@ -224,6 +310,8 @@ pub fn resolve_remote_app(paths: &Installation, app_id: &str) -> Result<RemoteAp
         arch,
         refs,
         remote_dir: paths.remote_metadata(),
+        summary_path,
+        collection_id,
     };
     let app = metadata.resolve_app(app_id, true)?;
     trace_resolution("resolve replacement app", started);
@@ -232,7 +320,7 @@ pub fn resolve_remote_app(paths: &Installation, app_id: &str) -> Result<RemoteAp
 }
 
 pub fn load_remote_metadata(paths: &Installation) -> Result<RemoteMetadata> {
-    let (arch, summary_path) = load_arch_summary(paths)?;
+    let (arch, summary_path, collection_id) = load_arch_summary(paths)?;
     let started = Instant::now();
     let refs = parse_summary_refs(&summary_path)?;
     trace_resolution("parse architecture refs", started);
@@ -240,10 +328,29 @@ pub fn load_remote_metadata(paths: &Installation) -> Result<RemoteMetadata> {
         arch,
         refs,
         remote_dir: paths.remote_metadata(),
+        summary_path,
+        collection_id,
     })
 }
 
-fn load_arch_summary(paths: &Installation) -> Result<(String, PathBuf)> {
+fn select_history_commit<'a>(history: &'a [CommitInfo], requested: &str) -> Result<&'a CommitInfo> {
+    if requested.is_empty() || !requested.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("invalid OSTree commit: {requested:?}");
+    }
+    let requested = requested.to_ascii_lowercase();
+    let mut matches = history
+        .iter()
+        .filter(|commit| commit.checksum.starts_with(&requested));
+    let selected = matches
+        .next()
+        .with_context(|| format!("commit {requested} is not in the history of this app ref"))?;
+    if matches.next().is_some() {
+        bail!("commit prefix {requested} is ambiguous");
+    }
+    Ok(selected)
+}
+
+fn load_arch_summary(paths: &Installation) -> Result<(String, PathBuf, Option<String>)> {
     let started = Instant::now();
     let arch = host_flatpak_arch()?;
     trace_resolution("detect architecture", started);
@@ -251,7 +358,7 @@ fn load_arch_summary(paths: &Installation) -> Result<(String, PathBuf)> {
     let index_path = fetch_summary_index(paths)?;
     trace_resolution("fetch summary index", started);
     let started = Instant::now();
-    let digest = parse_summary_index(&index_path, &arch)?;
+    let (digest, collection_id) = parse_summary_index(&index_path, &arch)?;
     if std::env::var_os("FREEBSD_FLATPAK_TRACE_RESOLUTION").is_some() {
         eprintln!("resolution metadata: {arch} summary {digest}");
     }
@@ -262,7 +369,7 @@ fn load_arch_summary(paths: &Installation) -> Result<(String, PathBuf)> {
     let started = Instant::now();
     let summary_path = cache_uncompressed_subsummary(paths, &digest, &summary_path)?;
     trace_resolution("prepare architecture summary cache", started);
-    Ok((arch, summary_path))
+    Ok((arch, summary_path, collection_id))
 }
 
 fn trace_resolution(label: &str, started: Instant) {
@@ -300,11 +407,7 @@ fn resolve_exact_app_from_summary(
             }
             let info = item.child_value(1);
             candidates.push((
-                RemoteRef {
-                    name,
-                    checksum: bytes_to_checksum(&info.child_value(1))?,
-                    metadata: lookup_flatpak_metadata(&info.child_value(2)),
-                },
+                remote_ref_from_summary_info(name, &info)?,
                 lookup_flatpak_metadata(&info.child_value(2)),
             ));
         }
@@ -362,11 +465,7 @@ fn find_summary_entry(
             std::cmp::Ordering::Equal => {
                 let info = item.child_value(1);
                 return Ok(Some((
-                    RemoteRef {
-                        name: name.to_string(),
-                        checksum: bytes_to_checksum(&info.child_value(1))?,
-                        metadata: lookup_flatpak_metadata(&info.child_value(2)),
-                    },
+                    remote_ref_from_summary_info(name.to_string(), &info)?,
                     lookup_flatpak_metadata(&info.child_value(2)),
                 )));
             }
@@ -382,11 +481,7 @@ fn find_summary_entry(
         }
         let info = item.child_value(1);
         return Ok(Some((
-            RemoteRef {
-                name: ref_name.to_string(),
-                checksum: bytes_to_checksum(&info.child_value(1))?,
-                metadata: lookup_flatpak_metadata(&info.child_value(2)),
-            },
+            remote_ref_from_summary_info(ref_name.to_string(), &info)?,
             lookup_flatpak_metadata(&info.child_value(2)),
         )));
     }
@@ -435,6 +530,7 @@ fn remote_app_from_metadata(
 
     let runtime_ref = metadata_value(&metadata, "Application", "runtime")
         .context("remote app metadata has no Application/runtime")?;
+    let sdk_ref = metadata_value(&metadata, "Application", "sdk");
     let command = metadata_value(&metadata, "Application", "command")
         .context("remote app metadata has no Application/command")?;
     if command.split_whitespace().count() != 1 {
@@ -449,6 +545,9 @@ fn remote_app_from_metadata(
         branch: app_ref_parts.branch,
         runtime_ref,
         runtime_commit: runtime_remote_ref.checksum,
+        sdk_ref,
+        download_size: app_remote_ref.download_size,
+        installed_size: app_remote_ref.installed_size,
         command,
     })
 }
@@ -495,7 +594,7 @@ fn checkout_remote_app(
     let runtime_dir = paths
         .runtimes()
         .join(runtime_checkout_dir(&remote.runtime_ref));
-    let (_, summary_path) = load_arch_summary(paths)?;
+    let (_, summary_path, _) = load_arch_summary(paths)?;
     let summary =
         fs::read(&summary_path).with_context(|| format!("read {}", summary_path.display()))?;
     let runtime_full_ref = format!("runtime/{}", remote.runtime_ref);
@@ -781,7 +880,7 @@ fn checkout_if_missing(
     dest: &Path,
     force: bool,
 ) -> Result<crate::storage::StorageTimings> {
-    let (_, summary_path) = load_arch_summary(paths)?;
+    let (_, summary_path, _) = load_arch_summary(paths)?;
     let summary =
         fs::read(&summary_path).with_context(|| format!("read {}", summary_path.display()))?;
     let refs = parse_summary_refs(&summary_path)?;
@@ -1097,19 +1196,37 @@ fn parse_summary_refs_bytes(data: Vec<u8>) -> Result<Vec<RemoteRef>> {
         let item = refs_v.child_value(i);
         let name = item.child_value(0).str().unwrap_or_default().to_string();
         let info = item.child_value(1);
-        refs.push(RemoteRef {
-            name,
-            checksum: bytes_to_checksum(&info.child_value(1))?,
-            metadata: lookup_flatpak_metadata(&info.child_value(2)),
-        });
+        refs.push(remote_ref_from_summary_info(name, &info)?);
     }
 
     Ok(refs)
 }
 
-fn parse_summary_index(path: &Path, arch: &str) -> Result<String> {
+fn remote_ref_from_summary_info(name: String, info: &Variant) -> Result<RemoteRef> {
+    let map = info.child_value(2);
+    let (installed_size, download_size) = lookup_variant_value(&map, "xa.data")
+        .filter(|data| data.n_children() == 3)
+        .map(|data| {
+            (
+                data.child_value(0).get::<u64>().map(u64::from_be),
+                data.child_value(1).get::<u64>().map(u64::from_be),
+            )
+        })
+        .unwrap_or((None, None));
+    Ok(RemoteRef {
+        name,
+        checksum: bytes_to_checksum(&info.child_value(1))?,
+        metadata: lookup_flatpak_metadata(&map),
+        download_size,
+        installed_size,
+    })
+}
+
+fn parse_summary_index(path: &Path, arch: &str) -> Result<(String, Option<String>)> {
     let variant = variant_from_file(path, "(a{s(ayaaya{sv})}a{sv})")
         .with_context(|| format!("parse Flathub summary index {}", path.display()))?;
+    let collection_id =
+        lookup_variant_string(&variant.child_value(1), "ostree.summary.collection-id");
     let summaries = variant.child_value(0);
     for index in 0..summaries.n_children() {
         let entry = summaries.child_value(index);
@@ -1117,7 +1234,7 @@ fn parse_summary_index(path: &Path, arch: &str) -> Result<String> {
             continue;
         }
         let details = entry.child_value(1);
-        return bytes_to_checksum(&details.child_value(0));
+        return Ok((bytes_to_checksum(&details.child_value(0))?, collection_id));
     }
     bail!("Flathub summary index has no metadata for architecture {arch}")
 }
@@ -1206,7 +1323,7 @@ fn fetch_appstream(remote_dir: &Path, arch: &str) -> Result<PathBuf> {
     match fetch_metadata_file(
         &format!("{REMOTE}/appstream/{arch}/appstream.xml.gz"),
         &path,
-        "Flathub app replacement metadata",
+        "Flathub AppStream metadata",
     ) {
         Ok(()) => {
             fs::write(&checked, format!("{}\n", unix_timestamp()))
@@ -1306,6 +1423,52 @@ fn parse_appstream_replacements(xml: &str) -> BTreeMap<String, Vec<String>> {
     }
 
     replacements
+}
+
+fn parse_appstream_info(xml: &str, app_id: &str) -> Option<AppstreamInfo> {
+    let mut rest = xml;
+    while let Some(start) = rest.find("<component") {
+        rest = &rest[start..];
+        let tag_end = rest.find('>')?;
+        let component_body = &rest[tag_end + 1..];
+        let end = component_body.find("</component>")?;
+        let component = &component_body[..end];
+        rest = &component_body[end + "</component>".len()..];
+        if first_xml_text(component, "id").as_deref() != Some(app_id) {
+            continue;
+        }
+
+        let version = first_release_version(component);
+        return Some(AppstreamInfo {
+            name: first_xml_text(component, "name"),
+            summary: first_xml_text(component, "summary"),
+            version,
+            license: first_xml_text(component, "project_license"),
+        });
+    }
+    None
+}
+
+fn first_release_version(component: &str) -> Option<String> {
+    let mut rest = component;
+    while let Some(start) = rest.find("<release") {
+        rest = &rest[start..];
+        let end = rest.find('>')?;
+        let tag = &rest[..=end];
+        if let Some(version) = xml_attribute(tag, "version") {
+            return Some(version);
+        }
+        rest = &rest[end + 1..];
+    }
+    None
+}
+
+fn xml_attribute(tag: &str, attribute: &str) -> Option<String> {
+    let needle = format!("{attribute}=\"");
+    let value = &tag[tag.find(&needle)? + needle.len()..];
+    let end = value.find('"')?;
+    let value = value[..end].trim();
+    (!value.is_empty()).then(|| xml_unescape_text(value))
 }
 
 fn first_xml_text(xml: &str, tag: &str) -> Option<String> {
@@ -1419,7 +1582,7 @@ fn host_flatpak_arch() -> Result<String> {
 }
 
 pub fn checkout_ref(paths: &Installation, ref_name: &str, dest: PathBuf) -> Result<()> {
-    let (_, summary_path) = load_arch_summary(paths)?;
+    let (_, summary_path, _) = load_arch_summary(paths)?;
     let refs = parse_summary_refs(&summary_path)?;
     let checksum = refs
         .iter()
@@ -1619,9 +1782,10 @@ fn bytes_to_checksum(variant: &Variant) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_appstream_replacements, resolve_current_app_id_from_replacements, RemoteMetadata,
-        RemoteRef,
+        parse_appstream_info, parse_appstream_replacements,
+        resolve_current_app_id_from_replacements, select_history_commit, RemoteMetadata, RemoteRef,
     };
+    use crate::storage::CommitInfo;
     use std::collections::BTreeMap;
 
     #[test]
@@ -1632,12 +1796,54 @@ mod tests {
                 name: "app/org.example.App/x86_64/stable".to_string(),
                 checksum: "app-commit".to_string(),
                 metadata: None,
+                download_size: None,
+                installed_size: None,
             }],
             remote_dir: std::path::PathBuf::from("/dev/null"),
+            summary_path: std::path::PathBuf::from("/dev/null"),
+            collection_id: None,
         };
 
         let remote_ref = metadata.resolve_app_ref("org.example.App", true).unwrap();
         assert_eq!(remote_ref.name, "app/org.example.App/x86_64/stable");
+    }
+
+    fn commit(checksum: &str) -> CommitInfo {
+        CommitInfo {
+            checksum: checksum.to_string(),
+            parent: None,
+            timestamp: 0,
+            subject: String::new(),
+            body: String::new(),
+            flatpak_metadata: None,
+            version: None,
+            collection_id: None,
+        }
+    }
+
+    #[test]
+    fn historical_commit_selection_accepts_unique_prefixes() {
+        let history = vec![
+            commit("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            commit("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        ];
+
+        assert_eq!(
+            select_history_commit(&history, "BBBBBBBBBBBB")
+                .unwrap()
+                .checksum,
+            history[1].checksum
+        );
+    }
+
+    #[test]
+    fn historical_commit_selection_rejects_commits_outside_ref_history() {
+        let history = vec![commit(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )];
+
+        let error = select_history_commit(&history, "bbbbbbbbbbbb").unwrap_err();
+        assert!(error.to_string().contains("not in the history"));
     }
 
     #[test]
@@ -1668,11 +1874,58 @@ mod tests {
     }
 
     #[test]
+    fn appstream_info_reads_display_fields_and_latest_version() {
+        let xml = r#"
+<components>
+  <component type="desktop-application">
+    <id>org.example.App</id>
+    <name>Example &amp; More</name>
+    <summary>Do useful things</summary>
+    <project_license>GPL-3.0-or-later</project_license>
+    <releases>
+      <release version="50.0" date="2026-01-01"/>
+      <release version="49.0" date="2025-01-01"/>
+    </releases>
+  </component>
+</components>
+"#;
+
+        let info = parse_appstream_info(xml, "org.example.App").unwrap();
+
+        assert_eq!(info.name.as_deref(), Some("Example & More"));
+        assert_eq!(info.summary.as_deref(), Some("Do useful things"));
+        assert_eq!(info.version.as_deref(), Some("50.0"));
+        assert_eq!(info.license.as_deref(), Some("GPL-3.0-or-later"));
+    }
+
+    #[test]
+    fn appstream_info_preserves_missing_optional_fields() {
+        let xml = r#"
+<components>
+  <component type="desktop-application">
+    <id>org.example.App</id>
+    <name>Example</name>
+  </component>
+</components>
+"#;
+
+        let info = parse_appstream_info(xml, "org.example.App").unwrap();
+
+        assert_eq!(info.name.as_deref(), Some("Example"));
+        assert_eq!(info.summary, None);
+        assert_eq!(info.version, None);
+        assert_eq!(info.license, None);
+        assert!(parse_appstream_info(xml, "org.example.Missing").is_none());
+    }
+
+    #[test]
     fn current_app_id_follows_available_replacement() {
         let refs = vec![RemoteRef {
             name: "app/app.example.Current/x86_64/stable".to_string(),
             checksum: "app-2".to_string(),
             metadata: None,
+            download_size: None,
+            installed_size: None,
         }];
         let replacements = BTreeMap::from([(
             "org.example.Old".to_string(),
@@ -1697,6 +1950,8 @@ mod tests {
             name: "app/app.example.Current/aarch64/stable".to_string(),
             checksum: "app-2".to_string(),
             metadata: None,
+            download_size: None,
+            installed_size: None,
         }];
         let replacements = BTreeMap::from([(
             "org.example.Old".to_string(),
@@ -1722,11 +1977,15 @@ mod tests {
                 name: "app/app.example.One/x86_64/stable".to_string(),
                 checksum: "app-1".to_string(),
                 metadata: None,
+                download_size: None,
+                installed_size: None,
             },
             RemoteRef {
                 name: "app/app.example.Two/x86_64/stable".to_string(),
                 checksum: "app-2".to_string(),
                 metadata: None,
+                download_size: None,
+                installed_size: None,
             },
         ];
         let replacements = BTreeMap::from([(
@@ -1754,11 +2013,15 @@ mod tests {
                 name: "app/org.example.A/x86_64/stable".to_string(),
                 checksum: "app-a".to_string(),
                 metadata: None,
+                download_size: None,
+                installed_size: None,
             },
             RemoteRef {
                 name: "app/org.example.B/x86_64/stable".to_string(),
                 checksum: "app-b".to_string(),
                 metadata: None,
+                download_size: None,
+                installed_size: None,
             },
         ];
         let replacements = BTreeMap::from([
