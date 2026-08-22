@@ -1,2 +1,6 @@
 [target.'cfg(target_os = "freebsd")']
 rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/local/libexec/freebsd-flatpak"]
+
+[env]
+PKG_CONFIG_PATH = { value = "target/vendor-ostree/prefix/lib/pkgconfig", relative = true }
+LD_LIBRARY_PATH = { value = "target/vendor-ostree/prefix/lib", relative = true }
