@@ -20,15 +20,39 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+const HELP: &str = r#"Usage:
+  flatpak [OPTION] COMMAND
+
+Commands:
+  install       Install an application
+  update        Update installed applications
+  uninstall     Uninstall an application
+  list          List installed applications
+  search        Search Flathub
+  run           Run an application
+  permissions   Show application permissions
+  repair        Verify and repair the installation
+  prune         Remove unused stored data
+
+Options:
+  -h, --help    Show help
+"#;
+
 fn main() -> Result<()> {
+    let mut args = std::env::args().skip(1);
+    let command = args.next();
+    if matches!(command.as_deref(), Some("-h" | "--help")) {
+        print_help();
+        return Ok(());
+    }
+
     let paths = Installation::from_env()?;
     state::ensure_layout(&paths)?;
     sandbox::recover_stale_mounts(&paths)?;
     portal::recover_stale_portal_mounts(&paths)?;
     graphics::recover_stale_graphics_dirs(&paths)?;
 
-    let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
+    match command.as_deref() {
         Some("search") => cmd_search(&paths, args.collect()),
         Some("install") => cmd_install(&paths, args.collect()),
         Some("list") => cmd_list(&paths, args.collect()),
@@ -595,6 +619,10 @@ fn print_usage() {
     eprintln!("  flatpak run <app-id> [-- app-args...]");
     eprintln!("  flatpak uninstall <app-id>");
     eprintln!("  flatpak update [app-id...]");
+}
+
+fn print_help() {
+    print!("{HELP}");
 }
 
 #[cfg(test)]
