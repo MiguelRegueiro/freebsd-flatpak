@@ -81,12 +81,17 @@ struct PciInfo {
 }
 
 impl HostGraphics {
-    pub fn prepare(paths: &Installation, app: &FlatpakApp) -> Result<Self> {
+    pub fn prepare(paths: &Installation, app: &FlatpakApp, instance_id: &str) -> Result<Self> {
         let mut warnings = Vec::new();
         let gl = runtime::ensure_default_gl_extension(paths, &app.runtime_ref, &app.runtime_dir)?;
         let drm = if gl.is_some() {
             match DrmDevice::detect() {
-                Ok(device) => Some(DrmSysfsBridge::prepare(paths, &app.app_id, device)?),
+                Ok(device) => Some(DrmSysfsBridge::prepare(
+                    paths,
+                    &app.app_id,
+                    instance_id,
+                    device,
+                )?),
                 Err(error) => {
                     warnings.push(format!("DRM sysfs bridge disabled: {error:#}"));
                     None
@@ -355,10 +360,16 @@ impl GraphicsMount {
 }
 
 impl DrmSysfsBridge {
-    fn prepare(paths: &Installation, app_id: &str, device: DrmDevice) -> Result<Self> {
-        let source_root = paths
-            .gpu()
-            .join(format!("{}-{}", safe_name(app_id), std::process::id()));
+    fn prepare(
+        paths: &Installation,
+        app_id: &str,
+        instance_id: &str,
+        device: DrmDevice,
+    ) -> Result<Self> {
+        let source_root =
+            paths
+                .gpu()
+                .join(format!("{}-{}", safe_name(app_id), safe_name(instance_id)));
         if source_root.exists() {
             fs::remove_dir_all(&source_root)
                 .with_context(|| format!("replace {}", source_root.display()))?;

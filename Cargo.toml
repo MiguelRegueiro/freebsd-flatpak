@@ -14,3 +14,6 @@ glib = "0.20"
 libc = "0.2"
 miniz_oxide = "0.8"
 ostree = { version = "0.20.5", features = ["v2025_3"] }
+
+[dev-dependencies]
+gio = "0.20"

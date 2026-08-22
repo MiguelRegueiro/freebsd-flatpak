@@ -33,6 +33,37 @@ static void test_introspection(void)
     g_assert_nonnull(g_dbus_interface_info_lookup_method(session_interface, "Close"));
     g_assert_nonnull(g_dbus_interface_info_lookup_signal(session_interface, "Closed"));
     g_dbus_node_info_unref(session);
+
+    GDBusNodeInfo *control = g_dbus_node_info_new_for_xml(CONTROL_XML, &error);
+    g_assert_no_error(error);
+    g_assert_nonnull(control);
+    GDBusInterfaceInfo *control_interface = g_dbus_node_info_lookup_interface(
+        control, "org.freebsd.Flatpak.PortalBridge");
+    g_assert_nonnull(control_interface);
+    g_assert_nonnull(g_dbus_interface_info_lookup_method(control_interface,
+                                                         "AddSandbox"));
+    g_assert_nonnull(g_dbus_interface_info_lookup_method(control_interface,
+                                                         "RemoveSandbox"));
+    g_dbus_node_info_unref(control);
+}
+
+static void test_shared_sandbox_scope_validation(void)
+{
+    BridgeState state = {
+        .sandbox_root = "/runtime/chroots/org.example.App",
+    };
+    g_assert_true(sandbox_doc_dir_allowed(
+        &state,
+        "/runtime/chroots/org.example.App/one/run/user/1001/doc"));
+    g_assert_true(sandbox_doc_dir_allowed(
+        &state,
+        "/runtime/chroots/org.example.App/two/run/user/1001/doc"));
+    g_assert_false(sandbox_doc_dir_allowed(
+        &state,
+        "/runtime/chroots/org.example.Other/one/run/user/1001/doc"));
+    g_assert_false(sandbox_doc_dir_allowed(
+        &state,
+        "/runtime/chroots/org.example.App/../org.example.Other/doc"));
 }
 
 static void test_path_and_option_translation(void)
@@ -212,6 +243,7 @@ static void test_pipewire_source_generation_tracking(void)
 int main(void)
 {
     test_introspection();
+    test_shared_sandbox_scope_validation();
     test_path_and_option_translation();
     test_unix_fd_copy();
     test_screencast_source_tracking();

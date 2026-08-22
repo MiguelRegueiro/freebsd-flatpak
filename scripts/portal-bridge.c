@@ -346,11 +346,23 @@ static const char *DBUSMENU_XML =
     "  </interface>"
     "</node>";
 
+static const char *CONTROL_XML =
+    "<node>"
+    "  <interface name='org.freebsd.Flatpak.PortalBridge'>"
+    "    <method name='AddSandbox'>"
+    "      <arg type='s' name='sandbox_doc_dir' direction='in'/>"
+    "    </method>"
+    "    <method name='RemoveSandbox'>"
+    "      <arg type='s' name='sandbox_doc_dir' direction='in'/>"
+    "    </method>"
+    "  </interface>"
+    "</node>";
+
 typedef struct {
     char *doc_id;
     char *host_path;
     char *placeholder_path;
-    char *target_path;
+    GPtrArray *target_paths;
     char *app_id;
     char **permissions;
 } DocumentGrant;
@@ -420,8 +432,9 @@ struct _SessionRecord {
 struct _BridgeState {
     char *app_id;
     char *doc_dir;
-    char *sandbox_doc_dir;
+    char *sandbox_root;
     char *mountpoint;
+    GPtrArray *sandbox_doc_dirs;
     GPtrArray *grants;
     GPtrArray *requests;
     GPtrArray *sessions;
@@ -440,6 +453,7 @@ struct _BridgeState {
     GDBusNodeInfo *status_watcher_node;
     GDBusNodeInfo *status_item_node;
     GDBusNodeInfo *dbusmenu_node;
+    GDBusNodeInfo *control_node;
     PipeWireCompat *pipewire;
     guint local_name_signal_id;
     guint32 screencast_version;
@@ -1245,7 +1259,9 @@ static void free_grant(DocumentGrant *grant)
     g_free(grant->doc_id);
     g_free(grant->host_path);
     g_free(grant->placeholder_path);
-    g_free(grant->target_path);
+    if (grant->target_paths != NULL) {
+        g_ptr_array_free(grant->target_paths, TRUE);
+    }
     g_free(grant->app_id);
     g_strfreev(grant->permissions);
     g_free(grant);
@@ -1303,12 +1319,19 @@ static bool unmount_path(const char *target)
 
 static void cleanup_grant(DocumentGrant *grant)
 {
-    if (grant == NULL || grant->target_path == NULL) {
+    if (grant == NULL) {
         return;
     }
-    unmount_path(grant->target_path);
-    const char *placeholder =
-        grant->placeholder_path != NULL ? grant->placeholder_path : grant->target_path;
+    if (grant->target_paths != NULL) {
+        for (guint i = 0; i < grant->target_paths->len; i++) {
+            unmount_path(g_ptr_array_index(grant->target_paths, i));
+        }
+        g_ptr_array_set_size(grant->target_paths, 0);
+    }
+    const char *placeholder = grant->placeholder_path;
+    if (placeholder == NULL) {
+        return;
+    }
     if (g_remove(placeholder) != 0 && errno != ENOENT) {
         log_line("remove %s failed: %s", placeholder, g_strerror(errno));
     }
@@ -1317,6 +1340,51 @@ static void cleanup_grant(DocumentGrant *grant)
         log_line("remove %s failed: %s", dir, g_strerror(errno));
     }
     g_free(dir);
+}
+
+static bool sandbox_doc_dir_allowed(BridgeState *state, const char *path)
+{
+    if (path == NULL || !g_path_is_absolute(path)) {
+        return false;
+    }
+    char *root_prefix = g_strconcat(state->sandbox_root, G_DIR_SEPARATOR_S, NULL);
+    bool allowed = g_str_has_prefix(path, root_prefix) && strstr(path, "/../") == NULL &&
+                   !g_str_has_suffix(path, "/..");
+    g_free(root_prefix);
+    return allowed;
+}
+
+static bool mount_grant_in_sandbox(DocumentGrant *grant, const char *sandbox_doc_dir,
+                                   GError **error)
+{
+    char *base = g_path_get_basename(grant->host_path);
+    char *target_dir = g_build_filename(sandbox_doc_dir, grant->doc_id, NULL);
+    char *target = g_build_filename(target_dir, base, NULL);
+    g_free(base);
+    g_free(target_dir);
+
+    if (!mount_file_read_only(grant->host_path, target, error)) {
+        g_free(target);
+        return false;
+    }
+    g_ptr_array_add(grant->target_paths, target);
+    return true;
+}
+
+static void remove_sandbox_grants(BridgeState *state, const char *sandbox_doc_dir)
+{
+    char *prefix = g_strconcat(sandbox_doc_dir, G_DIR_SEPARATOR_S, NULL);
+    for (guint i = 0; i < state->grants->len; i++) {
+        DocumentGrant *grant = g_ptr_array_index(state->grants, i);
+        for (guint j = grant->target_paths->len; j > 0; j--) {
+            const char *target = g_ptr_array_index(grant->target_paths, j - 1);
+            if (g_str_has_prefix(target, prefix)) {
+                unmount_path(target);
+                g_ptr_array_remove_index(grant->target_paths, j - 1);
+            }
+        }
+    }
+    g_free(prefix);
 }
 
 static void free_request(RequestRecord *request)
@@ -1545,34 +1613,30 @@ static bool create_document_grant_from_path(BridgeState *state, const char *host
     }
     close(placeholder_fd);
 
-    char *sandbox_doc_dir = g_build_filename(state->sandbox_doc_dir, doc_id, NULL);
-    char *target = g_build_filename(sandbox_doc_dir, base, NULL);
-
-    if (!mount_file_read_only(host_path, target, error)) {
-        g_remove(placeholder);
-        g_rmdir(source_doc_dir);
-        g_free(base);
-        g_free(doc_id);
-        g_free(source_doc_dir);
-        g_free(sandbox_doc_dir);
-        g_free(placeholder);
-        g_free(target);
-        return false;
-    }
-
     DocumentGrant *grant = g_new0(DocumentGrant, 1);
     grant->doc_id = doc_id;
     grant->host_path = g_strdup(host_path);
     grant->placeholder_path = placeholder;
-    grant->target_path = target;
+    grant->target_paths = g_ptr_array_new_with_free_func(g_free);
     grant->app_id = g_strdup(app_id != NULL && *app_id != '\0' ? app_id : state->app_id);
     grant->permissions = permissions != NULL ? g_strdupv(permissions) : read_permissions();
+
+    for (guint i = 0; i < state->sandbox_doc_dirs->len; i++) {
+        if (!mount_grant_in_sandbox(
+                grant, g_ptr_array_index(state->sandbox_doc_dirs, i), error)) {
+            cleanup_grant(grant);
+            free_grant(grant);
+            g_free(base);
+            g_free(source_doc_dir);
+            return false;
+        }
+    }
     *out = grant;
 
-    log_line("%s -> %s as %s/%s", grant->host_path, grant->target_path, grant->doc_id, base);
+    log_line("%s -> %u sandbox(s) as %s/%s", grant->host_path,
+             grant->target_paths->len, grant->doc_id, base);
     g_free(base);
     g_free(source_doc_dir);
-    g_free(sandbox_doc_dir);
     return true;
 }
 
@@ -1609,7 +1673,7 @@ static void add_mountpoint_extra(BridgeState *state, GVariantBuilder *extra)
 
 static char *sandbox_uri_for_grant(BridgeState *state, DocumentGrant *grant)
 {
-    char *base = g_path_get_basename(grant->target_path);
+    char *base = g_path_get_basename(grant->host_path);
     char *sandbox_path = g_build_filename(state->mountpoint, grant->doc_id, base, NULL);
     GError *error = NULL;
     char *uri = g_filename_to_uri(sandbox_path, NULL, &error);
@@ -3217,6 +3281,74 @@ static const GDBusInterfaceVTable STATUS_WATCHER_VTABLE = {
     .get_property = handle_status_watcher_property,
 };
 
+static gint find_sandbox_doc_dir(BridgeState *state, const char *path)
+{
+    for (guint i = 0; i < state->sandbox_doc_dirs->len; i++) {
+        if (g_strcmp0(g_ptr_array_index(state->sandbox_doc_dirs, i), path) == 0) {
+            return (gint)i;
+        }
+    }
+    return -1;
+}
+
+static void handle_control_method(GDBusConnection *connection, const gchar *sender,
+                                  const gchar *object_path, const gchar *interface_name,
+                                  const gchar *method_name, GVariant *parameters,
+                                  GDBusMethodInvocation *invocation, gpointer user_data)
+{
+    (void)connection;
+    (void)sender;
+    (void)object_path;
+    (void)interface_name;
+    BridgeState *state = user_data;
+    const char *sandbox_doc_dir = NULL;
+    g_variant_get(parameters, "(&s)", &sandbox_doc_dir);
+    if (!sandbox_doc_dir_allowed(state, sandbox_doc_dir)) {
+        g_dbus_method_invocation_return_error(invocation, G_IO_ERROR,
+                                              G_IO_ERROR_PERMISSION_DENIED,
+                                              "sandbox document directory is outside %s",
+                                              state->sandbox_root);
+        return;
+    }
+
+    gint index = find_sandbox_doc_dir(state, sandbox_doc_dir);
+    if (g_strcmp0(method_name, "AddSandbox") == 0) {
+        if (index >= 0) {
+            g_dbus_method_invocation_return_value(invocation, NULL);
+            return;
+        }
+        for (guint i = 0; i < state->grants->len; i++) {
+            GError *error = NULL;
+            if (!mount_grant_in_sandbox(g_ptr_array_index(state->grants, i),
+                                        sandbox_doc_dir, &error)) {
+                remove_sandbox_grants(state, sandbox_doc_dir);
+                g_dbus_method_invocation_take_error(invocation, error);
+                return;
+            }
+        }
+        g_ptr_array_add(state->sandbox_doc_dirs, g_strdup(sandbox_doc_dir));
+        log_line("attached sandbox document root %s", sandbox_doc_dir);
+        g_dbus_method_invocation_return_value(invocation, NULL);
+        return;
+    }
+    if (g_strcmp0(method_name, "RemoveSandbox") == 0) {
+        if (index >= 0) {
+            remove_sandbox_grants(state, sandbox_doc_dir);
+            g_ptr_array_remove_index(state->sandbox_doc_dirs, (guint)index);
+            log_line("detached sandbox document root %s", sandbox_doc_dir);
+        }
+        g_dbus_method_invocation_return_value(invocation, NULL);
+        return;
+    }
+    g_dbus_method_invocation_return_error(invocation, G_IO_ERROR,
+                                          G_IO_ERROR_NOT_SUPPORTED,
+                                          "%s is not implemented", method_name);
+}
+
+static const GDBusInterfaceVTable CONTROL_VTABLE = {
+    .method_call = handle_control_method,
+};
+
 static void load_host_screencast_properties(BridgeState *state)
 {
     GError *error = NULL;
@@ -3348,6 +3480,13 @@ static void on_bus_acquired(GDBusConnection *connection, const gchar *name, gpoi
         g_main_loop_quit(state->loop);
         return;
     }
+    if (!register_node_interfaces(connection, "/org/freebsd/Flatpak/PortalBridge",
+                                  state->control_node, &CONTROL_VTABLE, state, &error)) {
+        log_line("register sandbox control failed: %s", error->message);
+        g_error_free(error);
+        g_main_loop_quit(state->loop);
+        return;
+    }
     state->local_objects_registered = true;
 }
 
@@ -3389,13 +3528,13 @@ int main(int argc, char **argv)
 {
     const char *app_id = arg_value(argc, argv, "--app-id");
     const char *doc_dir = arg_value(argc, argv, "--doc-dir");
-    const char *sandbox_doc_dir = arg_value(argc, argv, "--sandbox-doc-dir");
+    const char *sandbox_root = arg_value(argc, argv, "--sandbox-root");
     const char *mountpoint = arg_value(argc, argv, "--mountpoint");
     const char *host_bus_address = getenv("HOST_DBUS_SESSION_BUS_ADDRESS");
-    if (app_id == NULL || doc_dir == NULL || sandbox_doc_dir == NULL || mountpoint == NULL ||
+    if (app_id == NULL || doc_dir == NULL || sandbox_root == NULL || mountpoint == NULL ||
         host_bus_address == NULL || *host_bus_address == '\0') {
         fprintf(stderr,
-                "usage: %s --app-id APP_ID --doc-dir HOST_DOC_DIR --sandbox-doc-dir CHROOT_DOC_DIR --mountpoint SANDBOX_MOUNTPOINT\n",
+                "usage: %s --app-id APP_ID --doc-dir HOST_DOC_DIR --sandbox-root APP_CHROOT_ROOT --mountpoint SANDBOX_MOUNTPOINT\n",
                 argv[0]);
         fprintf(stderr, "HOST_DBUS_SESSION_BUS_ADDRESS must point at the host session bus\n");
         return 64;
@@ -3410,8 +3549,9 @@ int main(int argc, char **argv)
     BridgeState state = {
         .app_id = g_strdup(app_id),
         .doc_dir = g_strdup(doc_dir),
-        .sandbox_doc_dir = g_strdup(sandbox_doc_dir),
+        .sandbox_root = g_strdup(sandbox_root),
         .mountpoint = g_strdup(mountpoint),
+        .sandbox_doc_dirs = g_ptr_array_new_with_free_func(g_free),
         .grants = g_ptr_array_new_with_free_func((GDestroyNotify)free_grant),
         .requests = g_ptr_array_new_with_free_func((GDestroyNotify)free_request),
         .sessions = g_ptr_array_new_with_free_func((GDestroyNotify)free_session),
@@ -3430,6 +3570,7 @@ int main(int argc, char **argv)
         .status_watcher_node = NULL,
         .status_item_node = NULL,
         .dbusmenu_node = NULL,
+        .control_node = NULL,
         .pipewire = NULL,
     };
     if (state.host_bus == NULL || state.desktop_node == NULL) {
@@ -3443,10 +3584,11 @@ int main(int argc, char **argv)
     state.status_watcher_node = g_dbus_node_info_new_for_xml(STATUS_WATCHER_XML, &error);
     state.status_item_node = g_dbus_node_info_new_for_xml(STATUS_ITEM_XML, &error);
     state.dbusmenu_node = g_dbus_node_info_new_for_xml(DBUSMENU_XML, &error);
+    state.control_node = g_dbus_node_info_new_for_xml(CONTROL_XML, &error);
     if (state.documents_node == NULL || state.request_node == NULL ||
         state.session_node == NULL ||
         state.status_watcher_node == NULL || state.status_item_node == NULL ||
-        state.dbusmenu_node == NULL) {
+        state.dbusmenu_node == NULL || state.control_node == NULL) {
         fprintf(stderr, "portal bridge introspection failed: %s\n", error->message);
         g_error_free(error);
         return 1;
@@ -3523,11 +3665,13 @@ int main(int argc, char **argv)
     g_dbus_node_info_unref(state.status_watcher_node);
     g_dbus_node_info_unref(state.status_item_node);
     g_dbus_node_info_unref(state.dbusmenu_node);
+    g_dbus_node_info_unref(state.control_node);
     g_main_loop_unref(state.loop);
     g_ptr_array_free(state.grants, TRUE);
+    g_ptr_array_free(state.sandbox_doc_dirs, TRUE);
     g_free(state.app_id);
     g_free(state.doc_dir);
-    g_free(state.sandbox_doc_dir);
+    g_free(state.sandbox_root);
     g_free(state.mountpoint);
     return 0;
 }

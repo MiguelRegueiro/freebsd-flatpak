@@ -15,16 +15,16 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static SIGNAL_HANDLERS_INSTALLED: AtomicBool = AtomicBool::new(false);
 static ACTIVE_CHILD_PID: AtomicI32 = AtomicI32::new(0);
 static LAST_SIGNAL: AtomicI32 = AtomicI32::new(0);
+static INSTANCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub trait SandboxBackend {
     fn run(&self, app: &FlatpakApp, desktop: &DesktopSession) -> Result<ExitStatus>;
@@ -32,7 +32,6 @@ pub trait SandboxBackend {
 
 pub fn recover_stale_mounts(paths: &Installation) -> Result<()> {
     state::ensure_layout(paths)?;
-    let mut active_roots = Vec::new();
 
     for record in state::read_run_records(paths)? {
         let Some(record_path) = record.get("_path").map(PathBuf::from) else {
@@ -49,9 +48,6 @@ pub fn recover_stale_mounts(paths: &Installation) -> Result<()> {
         let root = record.get("root").map(PathBuf::from);
 
         if launcher_pid > 0 && process_alive(launcher_pid) {
-            if let Some(root) = root {
-                active_roots.push(root);
-            }
             continue;
         }
 
@@ -62,12 +58,17 @@ pub fn recover_stale_mounts(paths: &Installation) -> Result<()> {
         if let Some(root) = root {
             terminate_chroot_processes(&root)?;
             unmount_under(&root)?;
+            remove_instance_root(&root)?;
         }
         state::remove_run_record(&record_path)?;
     }
 
+    // Refresh active roots after observing the mount table. A concurrent run
+    // publishes its record before creating any mounts, so every mount that can
+    // appear here has an ownership record visible in this second snapshot.
     let chroot_root = paths.chroots();
     let mut stale_mounts = mount_points_under(&chroot_root)?;
+    let active_roots = active_run_roots(paths)?;
     stale_mounts.retain(|mountpoint| !active_roots.iter().any(|root| mountpoint.starts_with(root)));
     let mut stale_roots = BTreeSet::new();
     for mountpoint in &stale_mounts {
@@ -90,6 +91,61 @@ pub fn app_has_mounts(paths: &Installation, app_id: &str) -> Result<bool> {
     Ok(!mount_points_under(&root)?.is_empty())
 }
 
+fn active_run_roots(paths: &Installation) -> Result<Vec<PathBuf>> {
+    Ok(state::read_run_records(paths)?
+        .into_iter()
+        .filter(|record| {
+            record
+                .get("launcher_pid")
+                .and_then(|value| value.parse::<i32>().ok())
+                .is_some_and(|pid| pid > 0 && process_alive(pid))
+        })
+        .filter_map(|record| record.get("root").map(PathBuf::from))
+        .collect())
+}
+
+fn new_instance_id() -> String {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = INSTANCE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    // Keep the launcher PID as the final component for compatibility with
+    // existing transient-resource stale recovery.
+    format!("{nonce:x}-{sequence:x}-{}", std::process::id())
+}
+
+struct PendingRunRecord {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl PendingRunRecord {
+    fn new(paths: &Installation, app_id: &str, instance_id: &str, root: &Path) -> Result<Self> {
+        let path =
+            state::write_run_record(paths, app_id, instance_id, root, std::process::id(), 0)?;
+        Ok(Self {
+            path,
+            committed: false,
+        })
+    }
+
+    fn commit(mut self) -> PathBuf {
+        self.committed = true;
+        self.path.clone()
+    }
+}
+
+impl Drop for PendingRunRecord {
+    fn drop(&mut self) {
+        if !self.committed {
+            if let Err(error) = state::remove_run_record(&self.path) {
+                eprintln!("warning: remove uncommitted run record failed: {error:#}");
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ChrootNullfsBackend {
     paths: Installation,
@@ -105,7 +161,13 @@ impl ChrootNullfsBackend {
         let gid = numeric_id("id", "-g")?;
         let supplementary_gids = numeric_ids("id", "-G")?;
         let user = host_user(uid);
-        let root = self.paths.chroots().join(sandbox_name(&app.app_id));
+        let instance_id = new_instance_id();
+        let root = self
+            .paths
+            .chroots()
+            .join(sandbox_name(&app.app_id))
+            .join(&instance_id);
+        let pending_run = PendingRunRecord::new(&self.paths, &app.app_id, &instance_id, &root)?;
         let metadata_path = app.app_dir.join("metadata");
         let network_enabled = app_allows_network(&metadata_path)?;
         let host_filesystem = HostFilesystem::from_metadata_file_for_user(
@@ -118,8 +180,9 @@ impl ChrootNullfsBackend {
             HostAudio::from_metadata_file(&metadata_path, &desktop.xdg_runtime_dir, uid)?;
         let host_cursor = HostCursorTheme::from_host();
         let host_fonts = HostFonts::from_host();
-        let host_portal = HostPortal::prepare(&self.paths, &app.app_id, desktop, uid, &root)?;
-        let host_graphics = HostGraphics::prepare(&self.paths, app)?;
+        let host_portal =
+            HostPortal::prepare(&self.paths, &app.app_id, &instance_id, desktop, uid, &root)?;
+        let host_graphics = HostGraphics::prepare(&self.paths, app, &instance_id)?;
         let host_video = HostVideo::prepare(&self.paths, app)?;
         let app_extensions = runtime::ensure_app_codec_extensions(&self.paths, app)?;
 
@@ -129,13 +192,14 @@ impl ChrootNullfsBackend {
             &app.runtime_dir.join("files").join("etc"),
             network_enabled,
         )?;
-        write_flatpak_info(&root, app)?;
+        write_flatpak_info(&root, app, &instance_id)?;
         host_filesystem.write_xdg_user_dirs_config(&root)?;
         host_audio.prepare(&root)?;
         host_fonts.prepare(&root)?;
         let mut instance = ChrootInstance::new(
             self.paths.clone(),
             app.app_id.clone(),
+            instance_id,
             root,
             uid,
             gid,
@@ -148,6 +212,7 @@ impl ChrootNullfsBackend {
             host_graphics,
             host_video,
             app_extensions,
+            pending_run.commit(),
         );
 
         instance.mount_nullfs(&app.runtime_dir.join("files"), "usr", true)?;
@@ -188,6 +253,7 @@ impl ChrootNullfsBackend {
         instance.mount_nullfs(&desktop.xdg_runtime_dir, format!("run/user/{uid}"), false)?;
         if let Some(doc_dir) = instance.host_portal.doc_dir().map(Path::to_path_buf) {
             instance.mount_nullfs(&doc_dir, format!("run/user/{uid}/doc"), true)?;
+            instance.host_portal.attach_sandbox()?;
         }
         instance.mount_nullfs(Path::new("/tmp"), "tmp", false)?;
         instance.mount_special("dev", "devfs", "devfs")?;
@@ -225,6 +291,7 @@ impl SandboxBackend for ChrootNullfsBackend {
 struct ChrootInstance {
     paths: Installation,
     app_id: String,
+    instance_id: String,
     root: PathBuf,
     uid: u32,
     gid: u32,
@@ -238,7 +305,7 @@ struct ChrootInstance {
     host_video: HostVideo,
     app_extensions: Vec<runtime::AppExtension>,
     owned_mounts: Vec<OwnedMount>,
-    run_record: Option<PathBuf>,
+    run_record: PathBuf,
     cleaned: bool,
 }
 
@@ -253,6 +320,7 @@ impl ChrootInstance {
     fn new(
         paths: Installation,
         app_id: String,
+        instance_id: String,
         root: PathBuf,
         uid: u32,
         gid: u32,
@@ -265,10 +333,12 @@ impl ChrootInstance {
         host_graphics: HostGraphics,
         host_video: HostVideo,
         app_extensions: Vec<runtime::AppExtension>,
+        run_record: PathBuf,
     ) -> Self {
         Self {
             paths,
             app_id,
+            instance_id,
             root,
             uid,
             gid,
@@ -282,7 +352,7 @@ impl ChrootInstance {
             host_video,
             app_extensions,
             owned_mounts: Vec::new(),
-            run_record: None,
+            run_record,
             cleaned: false,
         }
     }
@@ -497,13 +567,14 @@ impl ChrootInstance {
         LAST_SIGNAL.store(0, Ordering::SeqCst);
         let mut child = command.spawn().context("launch app through chroot")?;
         ACTIVE_CHILD_PID.store(child.id() as i32, Ordering::SeqCst);
-        self.run_record = Some(state::write_run_record(
+        state::write_run_record(
             &self.paths,
             &self.app_id,
+            &self.instance_id,
             &self.root,
             std::process::id(),
             child.id(),
-        )?);
+        )?;
         let status = child.wait().context("wait for app process")?;
         ACTIVE_CHILD_PID.store(0, Ordering::SeqCst);
 
@@ -538,9 +609,8 @@ impl ChrootInstance {
         }
 
         if errors.is_empty() {
-            if let Some(path) = &self.run_record {
-                state::remove_run_record(path)?;
-            }
+            remove_instance_root(&self.root)?;
+            state::remove_run_record(&self.run_record)?;
             self.cleaned = true;
             Ok(())
         } else {
@@ -677,7 +747,7 @@ fn app_allows_network(metadata_path: &Path) -> Result<bool> {
         .unwrap_or(false))
 }
 
-fn write_flatpak_info(root: &Path, app: &FlatpakApp) -> Result<()> {
+fn write_flatpak_info(root: &Path, app: &FlatpakApp, instance_id: &str) -> Result<()> {
     let data = format!(
         "\
 [Application]
@@ -690,9 +760,7 @@ instance-id={}
 [Context]
 filesystems=
 ",
-        app.app_id,
-        app.runtime_ref,
-        std::process::id()
+        app.app_id, app.runtime_ref, instance_id
     );
     fs::write(root.join(".flatpak-info"), data)
         .with_context(|| format!("write {}", root.join(".flatpak-info").display()))
@@ -1274,12 +1342,25 @@ fn process_rooted_in(pid: i32, root: &Path) -> Result<bool> {
 }
 
 fn chroot_root_for_mount(chroot_root: &Path, mountpoint: &Path) -> Option<PathBuf> {
-    let relative = mountpoint.strip_prefix(chroot_root).ok()?;
-    let first = relative.components().next()?;
-    let Component::Normal(name) = first else {
-        return None;
-    };
-    Some(chroot_root.join(name))
+    let mut candidate = mountpoint.parent();
+    while let Some(path) = candidate {
+        if path == chroot_root {
+            break;
+        }
+        if path.starts_with(chroot_root) && path.join(".flatpak-info").is_file() {
+            return Some(path.to_path_buf());
+        }
+        candidate = path.parent();
+    }
+    None
+}
+
+fn remove_instance_root(root: &Path) -> Result<()> {
+    match fs::remove_dir_all(root) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove sandbox root {}", root.display())),
+    }
 }
 
 fn unmount_mountpoints(mountpoints: Vec<PathBuf>) -> Result<()> {
@@ -1449,6 +1530,34 @@ mod tests {
             command: "app".to_string(),
             args: Vec::new(),
         }
+    }
+
+    #[test]
+    fn concurrent_instances_get_distinct_roots_and_cleanup_isolation() {
+        let dir = test_dir("concurrent-instance-roots");
+        let app_root = dir.join("chroots").join("org.example.App");
+        let first_id = new_instance_id();
+        let second_id = new_instance_id();
+        let first_root = app_root.join(&first_id);
+        let second_root = app_root.join(&second_id);
+        fs::create_dir_all(first_root.join("usr")).unwrap();
+        fs::create_dir_all(second_root.join("usr")).unwrap();
+        fs::write(first_root.join(".flatpak-info"), "first").unwrap();
+        fs::write(second_root.join(".flatpak-info"), "second").unwrap();
+
+        assert_ne!(first_id, second_id);
+        assert_eq!(
+            chroot_root_for_mount(&dir.join("chroots"), &first_root.join("usr")),
+            Some(first_root.clone())
+        );
+        assert_eq!(
+            chroot_root_for_mount(&dir.join("chroots"), &second_root.join("usr")),
+            Some(second_root.clone())
+        );
+
+        remove_instance_root(&first_root).unwrap();
+        assert!(!first_root.exists());
+        assert!(second_root.join(".flatpak-info").is_file());
     }
 
     #[test]

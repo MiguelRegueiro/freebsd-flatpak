@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 pub struct AppRecord {
@@ -149,21 +152,26 @@ pub fn runtime_is_required(paths: &Installation, runtime_ref: &str) -> Result<bo
     Ok(false)
 }
 
-pub fn run_record_path(paths: &Installation, app_id: &str) -> Result<PathBuf> {
-    Ok(paths.runs().join(format!("{}.ini", safe_name(app_id)?)))
+pub fn run_record_path(paths: &Installation, app_id: &str, instance_id: &str) -> Result<PathBuf> {
+    Ok(paths.runs().join(format!(
+        "{}.{}.ini",
+        safe_name(app_id)?,
+        safe_name(instance_id)?
+    )))
 }
 
 pub fn write_run_record(
     paths: &Installation,
     app_id: &str,
+    instance_id: &str,
     root: &Path,
     launcher_pid: u32,
     child_pid: u32,
 ) -> Result<PathBuf> {
     ensure_layout(paths)?;
-    let path = run_record_path(paths, app_id)?;
+    let path = run_record_path(paths, app_id, instance_id)?;
     let data = format!(
-        "app_id={app_id}\nroot={}\nlauncher_pid={launcher_pid}\nchild_pid={child_pid}\n",
+        "app_id={app_id}\ninstance_id={instance_id}\nroot={}\nlauncher_pid={launcher_pid}\nchild_pid={child_pid}\n",
         root.display()
     );
     write_atomic(&path, data.as_bytes())?;
@@ -337,11 +345,12 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_file_name(format!(
-        ".{}.{}.tmp",
+        ".{}.{}.{}.tmp",
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("state"),
-        std::process::id()
+        std::process::id(),
+        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     let mut file = fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
     file.write_all(data)?;
@@ -387,4 +396,42 @@ fn safe_name_lossy(value: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_run_records_are_distinct_and_cleanup_is_isolated() {
+        let temp = std::env::temp_dir().join(format!(
+            "freebsd-flatpak-state-concurrent-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        let paths = Installation::for_test(&temp);
+        let first_root = paths.chroots().join("org.example.App/first");
+        let second_root = paths.chroots().join("org.example.App/second");
+
+        let first =
+            write_run_record(&paths, "org.example.App", "first", &first_root, 100, 101).unwrap();
+        let second =
+            write_run_record(&paths, "org.example.App", "second", &second_root, 200, 201).unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(read_run_records(&paths).unwrap().len(), 2);
+        remove_run_record(&first).unwrap();
+        let remaining = read_run_records(&paths).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            remaining[0].get("instance_id").map(String::as_str),
+            Some("second")
+        );
+        assert_eq!(
+            remaining[0].get("root").map(String::as_str),
+            second_root.to_str()
+        );
+
+        let _ = fs::remove_dir_all(&temp);
+    }
 }
