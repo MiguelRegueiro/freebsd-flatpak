@@ -1,17 +1,14 @@
 use crate::paths::Installation;
+use crate::storage::{Deployment, Storage};
 use anyhow::{bail, Context, Result};
-use glib::{Bytes, Variant, VariantTy};
+use glib::{Bytes, Checksum, ChecksumType, Variant, VariantTy};
 use miniz_oxide::inflate::decompress_to_vec;
-use miniz_oxide::inflate::decompress_to_vec_zlib;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs as unix_fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const REMOTE: &str = "https://dl.flathub.org/repo";
 
@@ -45,6 +42,14 @@ pub struct InstalledApp {
     pub runtime_commit: String,
     pub runtime_dir: PathBuf,
     pub command: String,
+    pub timings: InstallTimings,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct InstallTimings {
+    pub resolution: Duration,
+    pub pull: Duration,
+    pub checkout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -95,13 +100,13 @@ pub struct RemoteApp {
 struct RemoteRef {
     name: String,
     checksum: String,
+    metadata: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct RemoteMetadata {
     arch: String,
     refs: Vec<RemoteRef>,
-    objects: PathBuf,
     remote_dir: PathBuf,
 }
 
@@ -113,42 +118,27 @@ impl RemoteMetadata {
             .find(|item| item.name == app_ref)
             .cloned()
             .with_context(|| format!("app ref is no longer present in Flathub: {app_ref}"))?;
-        remote_app_from_ref(&self.refs, remote_ref, &self.arch, &self.objects)
+        remote_app_from_ref(&self.refs, remote_ref, &self.arch)
     }
 
     pub fn resolve_app(&self, app_id: &str, replacements: bool) -> Result<RemoteApp> {
+        let started = Instant::now();
+        let app_ref = self.resolve_app_ref(app_id, replacements)?;
+        trace_resolution("select application ref", started);
+        remote_app_from_ref(&self.refs, app_ref, &self.arch)
+    }
+
+    fn resolve_app_ref(&self, app_id: &str, replacements: bool) -> Result<RemoteRef> {
         if app_id.contains('/') {
             bail!("app id must not contain '/': {app_id}");
         }
-        let app_id = if replacements {
+        let app_id = if replacements && !app_ref_exists(&self.refs, app_id, &self.arch) {
             resolve_current_app_id(&self.refs, app_id, &self.arch, &self.remote_dir)?
         } else {
             app_id.to_string()
         };
-        let app_ref = choose_app_ref(&self.refs, &app_id, &self.arch)?;
-        remote_app_from_ref(&self.refs, app_ref, &self.arch, &self.objects)
+        choose_app_ref(&self.refs, &app_id, &self.arch)
     }
-}
-
-#[derive(Debug, Clone)]
-struct Commit {
-    checksum: String,
-    tree: String,
-    dirmeta: String,
-    metadata: String,
-}
-
-#[derive(Debug, Clone)]
-struct FileEntry {
-    name: String,
-    checksum: String,
-}
-
-#[derive(Debug, Clone)]
-struct DirEntry {
-    name: String,
-    tree: String,
-    _dirmeta: String,
 }
 
 pub fn inspect_refs(paths: &Installation, refs: &[String]) -> Result<()> {
@@ -161,26 +151,46 @@ pub fn inspect_refs(paths: &Installation, refs: &[String]) -> Result<()> {
         refs.to_vec()
     };
 
+    let metadata = load_remote_metadata(paths)?;
     for ref_name in refs {
-        let checksum = fetch_ref(&ref_name)?;
-        let commit = fetch_commit(&paths.objects(), &checksum)?;
+        let remote_ref = metadata
+            .refs
+            .iter()
+            .find(|candidate| candidate.name == ref_name)
+            .with_context(|| format!("ref is not present in Flathub: {ref_name}"))?;
         println!("{ref_name}");
-        println!("  commit: {}", commit.checksum);
-        println!("  tree: {}", commit.tree);
-        println!("  dirmeta: {}", commit.dirmeta);
-        if let Some(command) = metadata_value(&commit.metadata, "Application", "command") {
-            println!("  command: {command}");
-        }
-        if let Some(runtime) = metadata_value(&commit.metadata, "Application", "runtime") {
-            println!("  runtime: {runtime}");
+        println!("  commit: {}", remote_ref.checksum);
+        if let Some(ref commit_metadata) = remote_ref.metadata {
+            if let Some(command) = metadata_value(commit_metadata, "Application", "command") {
+                println!("  command: {command}");
+            }
+            if let Some(runtime) = metadata_value(commit_metadata, "Application", "runtime") {
+                println!("  runtime: {runtime}");
+            }
         }
     }
     Ok(())
 }
 
 pub fn install_app(paths: &Installation, app_id: &str) -> Result<InstalledApp> {
+    let started = Instant::now();
     let remote = resolve_remote_app(paths, app_id)?;
-    checkout_remote_app(paths, &remote, false, false)
+    let resolution = started.elapsed();
+    let mut installed = checkout_remote_app(paths, &remote, false, false)?;
+    installed.timings.resolution = resolution;
+    Ok(installed)
+}
+
+pub fn repair_repo(paths: &Installation) -> Result<usize> {
+    Storage::open(paths)?.fsck_all()
+}
+
+pub fn prune_repo(paths: &Installation) -> Result<(i32, i32, u64)> {
+    Storage::open(paths)?.prune()
+}
+
+pub fn remove_repo_refs(paths: &Installation, refs: &[&str]) -> Result<()> {
+    Storage::open(paths)?.remove_refs(refs)
 }
 
 pub fn update_app(
@@ -193,45 +203,211 @@ pub fn update_app(
 }
 
 pub fn resolve_remote_app(paths: &Installation, app_id: &str) -> Result<RemoteApp> {
-    load_remote_metadata(paths)?.resolve_app(app_id, true)
+    if app_id.contains('/') {
+        bail!("app id must not contain '/': {app_id}");
+    }
+    let total_started = Instant::now();
+    let started = Instant::now();
+    let (arch, summary_path) = load_arch_summary(paths)?;
+    trace_resolution("load indexed architecture metadata", started);
+    let started = Instant::now();
+    if let Some(app) = resolve_exact_app_from_summary(&summary_path, app_id, &arch)? {
+        trace_resolution("resolve exact app", started);
+        trace_resolution("total exact resolution", total_started);
+        return Ok(app);
+    }
+    trace_resolution("search exact app", started);
+
+    let started = Instant::now();
+    let refs = parse_summary_refs(&summary_path)?;
+    let metadata = RemoteMetadata {
+        arch,
+        refs,
+        remote_dir: paths.remote_metadata(),
+    };
+    let app = metadata.resolve_app(app_id, true)?;
+    trace_resolution("resolve replacement app", started);
+    trace_resolution("total replacement resolution", total_started);
+    Ok(app)
 }
 
 pub fn load_remote_metadata(paths: &Installation) -> Result<RemoteMetadata> {
-    let arch = host_flatpak_arch()?;
-    let summary_path = fetch_summary(paths)?;
+    let (arch, summary_path) = load_arch_summary(paths)?;
+    let started = Instant::now();
     let refs = parse_summary_refs(&summary_path)?;
+    trace_resolution("parse architecture refs", started);
     Ok(RemoteMetadata {
         arch,
         refs,
-        objects: paths.objects(),
         remote_dir: paths.remote_metadata(),
     })
+}
+
+fn load_arch_summary(paths: &Installation) -> Result<(String, PathBuf)> {
+    let started = Instant::now();
+    let arch = host_flatpak_arch()?;
+    trace_resolution("detect architecture", started);
+    let started = Instant::now();
+    let index_path = fetch_summary_index(paths)?;
+    trace_resolution("fetch summary index", started);
+    let started = Instant::now();
+    let digest = parse_summary_index(&index_path, &arch)?;
+    if std::env::var_os("FREEBSD_FLATPAK_TRACE_RESOLUTION").is_some() {
+        eprintln!("resolution metadata: {arch} summary {digest}");
+    }
+    trace_resolution("parse summary index", started);
+    let started = Instant::now();
+    let summary_path = fetch_subsummary(paths, &arch, &digest)?;
+    trace_resolution("fetch architecture summary", started);
+    let started = Instant::now();
+    let summary_path = cache_uncompressed_subsummary(paths, &digest, &summary_path)?;
+    trace_resolution("prepare architecture summary cache", started);
+    Ok((arch, summary_path))
+}
+
+fn trace_resolution(label: &str, started: Instant) {
+    if std::env::var_os("FREEBSD_FLATPAK_TRACE_RESOLUTION").is_some() {
+        eprintln!(
+            "resolution timing: {label}: {:.3}s",
+            started.elapsed().as_secs_f64()
+        );
+    }
+}
+
+fn resolve_exact_app_from_summary(
+    summary_path: &Path,
+    app_id: &str,
+    arch: &str,
+) -> Result<Option<RemoteApp>> {
+    let variant = variant_from_file(summary_path, "(a(s(taya{sv}))a{sv})")
+        .with_context(|| format!("parse {}", summary_path.display()))?;
+    let refs = variant.child_value(0);
+    let prefix = format!("app/{app_id}/{arch}/");
+    let stable_ref = format!("{prefix}stable");
+    let mut candidates = match find_summary_entry(&refs, &stable_ref)? {
+        Some(candidate) => vec![candidate],
+        None => Vec::new(),
+    };
+
+    if candidates.is_empty() {
+        for index in 0..refs.n_children() {
+            let item = refs.child_value(index);
+            let Some(name) = item.child_value(0).str().map(ToOwned::to_owned) else {
+                continue;
+            };
+            if !name.starts_with(&prefix) {
+                continue;
+            }
+            let info = item.child_value(1);
+            candidates.push((
+                RemoteRef {
+                    name,
+                    checksum: bytes_to_checksum(&info.child_value(1))?,
+                    metadata: lookup_flatpak_metadata(&info.child_value(2)),
+                },
+                lookup_flatpak_metadata(&info.child_value(2)),
+            ));
+        }
+    }
+
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let candidate_refs = candidates
+        .iter()
+        .map(|(remote_ref, _)| remote_ref.clone())
+        .collect::<Vec<_>>();
+    let app_remote_ref = choose_app_ref(&candidate_refs, app_id, arch)?;
+    let cached_metadata = candidates
+        .into_iter()
+        .find(|(remote_ref, _)| remote_ref.name == app_remote_ref.name)
+        .and_then(|(_, metadata)| metadata);
+    let metadata = match cached_metadata {
+        Some(metadata) => {
+            trace_resolution("reuse application metadata from summary", Instant::now());
+            metadata
+        }
+        None => bail!(
+            "Flathub summary has no xa.data metadata for {}",
+            app_remote_ref.name
+        ),
+    };
+    let runtime_ref = metadata_value(&metadata, "Application", "runtime")
+        .context("remote app metadata has no Application/runtime")?;
+    let runtime_full_ref = format!("runtime/{runtime_ref}");
+    let runtime_remote_ref = find_summary_ref(&refs, &runtime_full_ref)?.with_context(|| {
+        format!("required runtime ref not found in Flathub summary: {runtime_full_ref}")
+    })?;
+    remote_app_from_metadata(app_remote_ref, metadata, runtime_remote_ref, arch).map(Some)
+}
+
+fn find_summary_ref(refs: &Variant, ref_name: &str) -> Result<Option<RemoteRef>> {
+    Ok(find_summary_entry(refs, ref_name)?.map(|(remote_ref, _)| remote_ref))
+}
+
+fn find_summary_entry(
+    refs: &Variant,
+    ref_name: &str,
+) -> Result<Option<(RemoteRef, Option<String>)>> {
+    let mut left = 0usize;
+    let mut right = refs.n_children();
+    while left < right {
+        let middle = left + (right - left) / 2;
+        let item = refs.child_value(middle);
+        let name_value = item.child_value(0);
+        let name = name_value.str().unwrap_or_default();
+        match name.cmp(ref_name) {
+            std::cmp::Ordering::Less => left = middle + 1,
+            std::cmp::Ordering::Greater => right = middle,
+            std::cmp::Ordering::Equal => {
+                let info = item.child_value(1);
+                return Ok(Some((
+                    RemoteRef {
+                        name: name.to_string(),
+                        checksum: bytes_to_checksum(&info.child_value(1))?,
+                        metadata: lookup_flatpak_metadata(&info.child_value(2)),
+                    },
+                    lookup_flatpak_metadata(&info.child_value(2)),
+                )));
+            }
+        }
+    }
+
+    // OSTree summaries are sorted, but retain a correctness fallback for
+    // non-conforming repositories.
+    for index in 0..refs.n_children() {
+        let item = refs.child_value(index);
+        if item.child_value(0).str() != Some(ref_name) {
+            continue;
+        }
+        let info = item.child_value(1);
+        return Ok(Some((
+            RemoteRef {
+                name: ref_name.to_string(),
+                checksum: bytes_to_checksum(&info.child_value(1))?,
+                metadata: lookup_flatpak_metadata(&info.child_value(2)),
+            },
+            lookup_flatpak_metadata(&info.child_value(2)),
+        )));
+    }
+    Ok(None)
 }
 
 fn remote_app_from_ref(
     refs: &[RemoteRef],
     app_remote_ref: RemoteRef,
     arch: &str,
-    objects: &Path,
 ) -> Result<RemoteApp> {
-    let app_ref_parts = split_flatpak_ref(&app_remote_ref.name)?;
-    let app_id = app_ref_parts.name;
-    let app_commit = fetch_commit(objects, &app_remote_ref.checksum)?;
-    let metadata_app_id = metadata_value(&app_commit.metadata, "Application", "name")
-        .context("remote app metadata has no Application/name")?;
-    if metadata_app_id != app_id {
-        bail!("remote metadata app id mismatch: requested {app_id}, found {metadata_app_id}");
-    }
-
-    let runtime_ref = metadata_value(&app_commit.metadata, "Application", "runtime")
+    let app_metadata = app_remote_ref.metadata.clone().with_context(|| {
+        format!(
+            "Flathub summary has no xa.data metadata for {}",
+            app_remote_ref.name
+        )
+    })?;
+    let runtime_ref = metadata_value(&app_metadata, "Application", "runtime")
         .context("remote app metadata has no Application/runtime")?;
-    let command = metadata_value(&app_commit.metadata, "Application", "command")
-        .context("remote app metadata has no Application/command")?;
-    if command.split_whitespace().count() != 1 {
-        bail!("entry command must be a single executable for this POC: {command:?}");
-    }
-
     let runtime_full_ref = format!("runtime/{runtime_ref}");
+    let started = Instant::now();
     let runtime_remote_ref = refs
         .iter()
         .find(|remote_ref| remote_ref.name == runtime_full_ref)
@@ -239,6 +415,32 @@ fn remote_app_from_ref(
         .with_context(|| {
             format!("required runtime ref not found in Flathub summary: {runtime_full_ref}")
         })?;
+    trace_resolution("select runtime ref", started);
+    remote_app_from_metadata(app_remote_ref, app_metadata, runtime_remote_ref, arch)
+}
+
+fn remote_app_from_metadata(
+    app_remote_ref: RemoteRef,
+    metadata: String,
+    runtime_remote_ref: RemoteRef,
+    arch: &str,
+) -> Result<RemoteApp> {
+    let app_ref_parts = split_flatpak_ref(&app_remote_ref.name)?;
+    let app_id = app_ref_parts.name;
+    let metadata_app_id = metadata_value(&metadata, "Application", "name")
+        .context("remote app metadata has no Application/name")?;
+    if metadata_app_id != app_id {
+        bail!("remote metadata app id mismatch: requested {app_id}, found {metadata_app_id}");
+    }
+
+    let runtime_ref = metadata_value(&metadata, "Application", "runtime")
+        .context("remote app metadata has no Application/runtime")?;
+    let command = metadata_value(&metadata, "Application", "command")
+        .context("remote app metadata has no Application/command")?;
+    if command.split_whitespace().count() != 1 {
+        bail!("entry command must be a single executable for this POC: {command:?}");
+    }
+
     Ok(RemoteApp {
         app_id,
         app_ref: app_remote_ref.name,
@@ -293,15 +495,35 @@ fn checkout_remote_app(
     let runtime_dir = paths
         .runtimes()
         .join(runtime_checkout_dir(&remote.runtime_ref));
-
-    checkout_if_missing(paths, &remote.app_ref, &app_dir, force_app)?;
-    checkout_if_missing(
-        paths,
-        &format!("runtime/{}", remote.runtime_ref),
-        &runtime_dir,
-        force_runtime,
+    let (_, summary_path) = load_arch_summary(paths)?;
+    let summary =
+        fs::read(&summary_path).with_context(|| format!("read {}", summary_path.display()))?;
+    let runtime_full_ref = format!("runtime/{}", remote.runtime_ref);
+    let storage = Storage::open(paths)?;
+    let mut timings = storage.deploy(
+        &summary,
+        &[
+            Deployment {
+                kind: "application",
+                ref_name: &remote.app_ref,
+                checksum: &remote.app_commit,
+                destination: &app_dir,
+                force: force_app,
+            },
+            Deployment {
+                kind: "runtime",
+                ref_name: &runtime_full_ref,
+                checksum: &remote.runtime_commit,
+                destination: &runtime_dir,
+                force: force_runtime,
+            },
+        ],
     )?;
-    let _ = ensure_default_gl_extension(paths, &remote.runtime_ref, &runtime_dir)?;
+    drop(storage);
+    let (_, extension_timings) =
+        ensure_default_gl_extension_timed(paths, &remote.runtime_ref, &runtime_dir)?;
+    timings.pull += extension_timings.pull;
+    timings.checkout += extension_timings.checkout;
 
     Ok(InstalledApp {
         app_id: remote.app_id.clone(),
@@ -314,6 +536,11 @@ fn checkout_remote_app(
         runtime_commit: remote.runtime_commit.clone(),
         runtime_dir,
         command: remote.command.clone(),
+        timings: InstallTimings {
+            resolution: Duration::ZERO,
+            pull: timings.pull,
+            checkout: timings.checkout,
+        },
     })
 }
 
@@ -322,12 +549,20 @@ pub fn ensure_default_gl_extension(
     runtime_ref: &str,
     runtime_dir: &Path,
 ) -> Result<Option<RuntimeGlExtension>> {
+    Ok(ensure_default_gl_extension_timed(paths, runtime_ref, runtime_dir)?.0)
+}
+
+fn ensure_default_gl_extension_timed(
+    paths: &Installation,
+    runtime_ref: &str,
+    runtime_dir: &Path,
+) -> Result<(Option<RuntimeGlExtension>, crate::storage::StorageTimings)> {
     let metadata_path = runtime_dir.join("metadata");
     let metadata = fs::read_to_string(&metadata_path)
         .with_context(|| format!("read runtime metadata {}", metadata_path.display()))?;
     let section = "Extension org.freedesktop.Platform.GL";
     if !metadata_has_section(&metadata, section) {
-        return Ok(None);
+        return Ok((None, Default::default()));
     }
 
     let parts = split_runtime_ref(runtime_ref)?;
@@ -353,13 +588,16 @@ pub fn ensure_default_gl_extension(
         "org.freedesktop.Platform.GL.default-{}",
         safe_dir_fragment(&extension_branch)
     ));
-    checkout_if_missing(paths, &ref_name, &checkout_dir, false)?;
+    let timings = checkout_if_missing(paths, "extension", &ref_name, None, &checkout_dir, false)?;
 
-    Ok(Some(RuntimeGlExtension {
-        ref_name,
-        checkout_dir,
-        runtime_mount_relative,
-    }))
+    Ok((
+        Some(RuntimeGlExtension {
+            ref_name,
+            checkout_dir,
+            runtime_mount_relative,
+        }),
+        timings,
+    ))
 }
 
 pub fn ensure_intel_vaapi_extension(
@@ -401,7 +639,7 @@ pub fn ensure_intel_vaapi_extension(
         "org.freedesktop.Platform.VAAPI.Intel-{}",
         safe_dir_fragment(&extension_branch)
     ));
-    checkout_if_missing(paths, &ref_name, &checkout_dir, false)?;
+    checkout_if_missing(paths, "extension", &ref_name, None, &checkout_dir, false)?;
 
     let ld_library_relative = metadata_value(&metadata, section, "add-ld-path")
         .filter(|path| !path.is_empty())
@@ -458,7 +696,7 @@ pub fn ensure_app_codec_extensions(
             safe_dir_fragment(name),
             safe_dir_fragment(&extension_branch)
         ));
-        checkout_if_missing(paths, &ref_name, &checkout_dir, false)?;
+        checkout_if_missing(paths, "extension", &ref_name, None, &checkout_dir, false)?;
         let ld_library_relative = metadata_value(&metadata, &section, "add-ld-path")
             .filter(|path| !path.is_empty())
             .map(PathBuf::from);
@@ -537,62 +775,222 @@ pub fn resolve_app(
 
 fn checkout_if_missing(
     paths: &Installation,
+    kind: &str,
     ref_name: &str,
+    expected_checksum: Option<&str>,
     dest: &Path,
     force: bool,
-) -> Result<()> {
-    if !force && dest.join("metadata").is_file() && dest.join("files").is_dir() {
-        println!("reusing checkout for {ref_name}: {}", dest.display());
-        return Ok(());
-    }
-    if force && dest.exists() {
-        fs::remove_dir_all(dest)
-            .with_context(|| format!("remove old checkout {}", dest.display()))?;
-    }
-    checkout_ref(paths, ref_name, dest.to_path_buf())
+) -> Result<crate::storage::StorageTimings> {
+    let (_, summary_path) = load_arch_summary(paths)?;
+    let summary =
+        fs::read(&summary_path).with_context(|| format!("read {}", summary_path.display()))?;
+    let refs = parse_summary_refs(&summary_path)?;
+    let checksum = match expected_checksum {
+        Some(checksum) => checksum,
+        None => refs
+            .iter()
+            .find(|candidate| candidate.name == ref_name)
+            .map(|candidate| candidate.checksum.as_str())
+            .with_context(|| format!("ref is not present in Flathub: {ref_name}"))?,
+    };
+    Storage::open(paths)?.deploy(
+        &summary,
+        &[Deployment {
+            kind,
+            ref_name,
+            checksum,
+            destination: dest,
+            force,
+        }],
+    )
 }
 
-fn fetch_summary(paths: &Installation) -> Result<PathBuf> {
+fn fetch_summary_index(paths: &Installation) -> Result<PathBuf> {
     let remote_dir = paths.remote_metadata();
-    let path = remote_dir.join("summary");
-    let checked = remote_dir.join("summary.checked");
+    let path = remote_dir.join("summary.idx");
+    let signature_path = remote_dir.join("summary.idx.sig");
+    let checked = remote_dir.join("summary.idx.checked");
     fs::create_dir_all(&remote_dir).context("create remote metadata directory")?;
-    if metadata_is_fresh(&path, &checked)? {
+    if signature_path.is_file() && metadata_is_fresh(&path, &checked)? {
         return Ok(path);
     }
-    let _lock = MetadataLock::acquire(&remote_dir.join("summary.lock"))?;
-    if metadata_is_fresh(&path, &checked)? {
+    let _lock = MetadataLock::acquire(&remote_dir.join("summary.idx.lock"))?;
+    if signature_path.is_file() && metadata_is_fresh(&path, &checked)? {
         return Ok(path);
     }
-    let tmp = path.with_file_name(format!(
-        ".summary.{}.{}.tmp",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0)
-    ));
+    let candidate = remote_dir.join("summary.idx.candidate");
+    let signature_candidate = remote_dir.join("summary.idx.sig.candidate");
+    let refresh = || -> Result<()> {
+        fetch_metadata_file(
+            &format!("{REMOTE}/summary.idx"),
+            &candidate,
+            "Flathub metadata index",
+        )?;
+        fetch_metadata_file(
+            &format!("{REMOTE}/summary.idx.sig"),
+            &signature_candidate,
+            "Flathub metadata signature",
+        )?;
+        let summary =
+            fs::read(&candidate).with_context(|| format!("read {}", candidate.display()))?;
+        let signatures = fs::read(&signature_candidate)
+            .with_context(|| format!("read {}", signature_candidate.display()))?;
+        Storage::open(paths)?.verify_summary(&summary, &signatures)?;
+        fs::rename(&candidate, &path).with_context(|| format!("activate {}", path.display()))?;
+        fs::rename(&signature_candidate, &signature_path)
+            .with_context(|| format!("activate {}", signature_path.display()))?;
+        Ok(())
+    };
+    match refresh() {
+        Ok(()) => {
+            fs::write(&checked, format!("{}\n", unix_timestamp()))
+                .with_context(|| format!("write {}", checked.display()))?;
+        }
+        Err(error) if path.is_file() => {
+            eprintln!("warning: refresh Flathub metadata index failed; using cache: {error:#}");
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(path)
+}
 
-    let status = Command::new("fetch")
-        .arg("-qo")
-        .arg(&tmp)
-        .arg(format!("{REMOTE}/summary"))
-        .status()
-        .context("fetch Flathub summary")?;
-    if status.success() {
-        fs::rename(&tmp, &path)
-            .with_context(|| format!("move {} to {}", tmp.display(), path.display()))?;
-        fs::write(&checked, format!("{}\n", unix_timestamp()))
-            .with_context(|| format!("write {}", checked.display()))?;
-        return Ok(path);
-    }
-
-    let _ = fs::remove_file(&tmp);
+fn fetch_subsummary(paths: &Installation, arch: &str, digest: &str) -> Result<PathBuf> {
+    let summaries = paths.remote_metadata().join("summaries");
+    fs::create_dir_all(&summaries).context("create architecture summary cache")?;
+    let path = summaries.join(format!("{digest}.gz"));
     if path.is_file() {
-        eprintln!("warning: refresh Flathub summary failed with {status}; using cached metadata");
         return Ok(path);
     }
-    bail!("refresh Flathub summary failed with status {status}");
+    let _lock = MetadataLock::acquire(&summaries.join(format!("{digest}.lock")))?;
+    if path.is_file() {
+        return Ok(path);
+    }
+    fetch_metadata_file(
+        &format!("{REMOTE}/summaries/{digest}.gz"),
+        &path,
+        &format!("Flathub metadata for {arch}"),
+    )?;
+    Ok(path)
+}
+
+fn summary_digest_matches(data: &[u8], expected: &str) -> Result<bool> {
+    let mut checksum = Checksum::new(ChecksumType::Sha256).context("create SHA-256 checksum")?;
+    checksum.update(data);
+    Ok(checksum
+        .string()
+        .is_some_and(|actual| actual.eq_ignore_ascii_case(expected)))
+}
+
+fn cache_uncompressed_subsummary(
+    paths: &Installation,
+    digest: &str,
+    compressed_path: &Path,
+) -> Result<PathBuf> {
+    let path = paths
+        .remote_metadata()
+        .join("summaries")
+        .join(format!("{digest}.sub"));
+    if path.is_file() {
+        let data = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        if summary_digest_matches(&data, digest)? {
+            return Ok(path);
+        }
+        fs::remove_file(&path).with_context(|| format!("remove invalid {}", path.display()))?;
+    }
+    let _lock = MetadataLock::acquire(&path.with_extension("sub.lock"))?;
+    if path.is_file() {
+        let data = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        if summary_digest_matches(&data, digest)? {
+            return Ok(path);
+        }
+        fs::remove_file(&path).with_context(|| format!("remove invalid {}", path.display()))?;
+    }
+    let compressed =
+        fs::read(compressed_path).with_context(|| format!("read {}", compressed_path.display()))?;
+    let data = decompress_gzip(&compressed)
+        .with_context(|| format!("decompress {}", compressed_path.display()))?;
+    if !summary_digest_matches(&data, digest)? {
+        let _ = fs::remove_file(compressed_path);
+        bail!("downloaded Flathub architecture summary failed SHA-256 verification");
+    }
+    let partial = path.with_extension("sub.part");
+    fs::write(&partial, data).with_context(|| format!("write {}", partial.display()))?;
+    fs::rename(&partial, &path)
+        .with_context(|| format!("complete summary cache {}", path.display()))?;
+    Ok(path)
+}
+
+fn fetch_metadata_file(url: &str, path: &Path, label: &str) -> Result<()> {
+    let partial = path.with_file_name(format!(
+        ".{}.part",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("metadata")
+    ));
+    println!("  Downloading {label}...");
+    let _ = std::io::stdout().flush();
+
+    let mut command = Command::new("fetch");
+    command
+        .arg("-a")
+        .arg("-F")
+        .arg("-r")
+        .arg("-R")
+        .arg("-q")
+        .arg("-o")
+        .arg(&partial);
+    let mut child = command
+        .arg(url)
+        .spawn()
+        .with_context(|| format!("download {label}"))?;
+    let terminal = std::io::stdout().is_terminal();
+    let mut last_bytes = None;
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("wait for {label} download"))?
+        {
+            break status;
+        }
+        if terminal {
+            let bytes = fs::metadata(&partial)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            if last_bytes != Some(bytes) {
+                print!("\r\x1b[2K    Received {}", format_byte_count(bytes));
+                let _ = std::io::stdout().flush();
+                last_bytes = Some(bytes);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    };
+    let bytes = fs::metadata(&partial)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    if terminal {
+        print!("\r\x1b[2K");
+    }
+    if !status.success() {
+        bail!("download {label} failed with status {status}; partial download kept for retry");
+    }
+    fs::rename(&partial, path)
+        .with_context(|| format!("complete metadata download {}", path.display()))?;
+    println!("  Downloaded {label} ({})", format_byte_count(bytes));
+    let _ = std::io::stdout().flush();
+    Ok(())
+}
+
+fn format_byte_count(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= MIB {
+        format!("{:.1} MiB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes / KIB)
+    } else {
+        format!("{bytes:.0} B")
+    }
 }
 
 struct MetadataLock {
@@ -685,8 +1083,13 @@ fn unix_timestamp() -> u64 {
 }
 
 fn parse_summary_refs(path: &Path) -> Result<Vec<RemoteRef>> {
-    let variant = variant_from_file(path, "(a(s(taya{sv}))a{sv})")
-        .with_context(|| format!("parse Flathub summary {}", path.display()))?;
+    let data = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    parse_summary_refs_bytes(data)
+        .with_context(|| format!("parse Flathub architecture summary {}", path.display()))
+}
+
+fn parse_summary_refs_bytes(data: Vec<u8>) -> Result<Vec<RemoteRef>> {
+    let variant = variant_from_bytes(data, "(a(s(taya{sv}))a{sv})")?;
     let refs_v = variant.child_value(0);
     let mut refs = Vec::with_capacity(refs_v.n_children());
 
@@ -697,10 +1100,26 @@ fn parse_summary_refs(path: &Path) -> Result<Vec<RemoteRef>> {
         refs.push(RemoteRef {
             name,
             checksum: bytes_to_checksum(&info.child_value(1))?,
+            metadata: lookup_flatpak_metadata(&info.child_value(2)),
         });
     }
 
     Ok(refs)
+}
+
+fn parse_summary_index(path: &Path, arch: &str) -> Result<String> {
+    let variant = variant_from_file(path, "(a{s(ayaaya{sv})}a{sv})")
+        .with_context(|| format!("parse Flathub summary index {}", path.display()))?;
+    let summaries = variant.child_value(0);
+    for index in 0..summaries.n_children() {
+        let entry = summaries.child_value(index);
+        if entry.child_value(0).str() != Some(arch) {
+            continue;
+        }
+        let details = entry.child_value(1);
+        return bytes_to_checksum(&details.child_value(0));
+    }
+    bail!("Flathub summary index has no metadata for architecture {arch}")
 }
 
 fn resolve_current_app_id(
@@ -773,40 +1192,43 @@ fn fetch_appstream_replacements(
 
 fn fetch_appstream(remote_dir: &Path, arch: &str) -> Result<PathBuf> {
     let path = remote_dir.join(format!("appstream-{}.xml.gz", safe_dir_fragment(arch)));
+    let checked = remote_dir.join(format!("appstream-{}.checked", safe_dir_fragment(arch)));
     fs::create_dir_all(remote_dir).context("create remote metadata directory")?;
-    let tmp = path.with_file_name(format!(
-        ".{}.{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("appstream.xml.gz"),
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0)
-    ));
-
-    let status = Command::new("fetch")
-        .arg("-qo")
-        .arg(&tmp)
-        .arg(format!("{REMOTE}/appstream/{arch}/appstream.xml.gz"))
-        .status()
-        .with_context(|| format!("fetch Flathub AppStream metadata for {arch}"))?;
-    if status.success() {
-        fs::rename(&tmp, &path)
-            .with_context(|| format!("move {} to {}", tmp.display(), path.display()))?;
+    if metadata_is_fresh(&path, &checked)? {
         return Ok(path);
     }
-
-    let _ = fs::remove_file(&tmp);
-    bail!("refresh Flathub AppStream metadata for {arch} failed with status {status}");
+    let _lock = MetadataLock::acquire(
+        &remote_dir.join(format!("appstream-{}.lock", safe_dir_fragment(arch))),
+    )?;
+    if metadata_is_fresh(&path, &checked)? {
+        return Ok(path);
+    }
+    match fetch_metadata_file(
+        &format!("{REMOTE}/appstream/{arch}/appstream.xml.gz"),
+        &path,
+        "Flathub app replacement metadata",
+    ) {
+        Ok(()) => {
+            fs::write(&checked, format!("{}\n", unix_timestamp()))
+                .with_context(|| format!("write {}", checked.display()))?;
+        }
+        Err(error) if path.is_file() => {
+            eprintln!(
+                "warning: refresh Flathub app replacement metadata failed; using cache: {error:#}"
+            );
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(path)
 }
 
 fn decompress_appstream_xml(data: &[u8]) -> Result<String> {
+    String::from_utf8(decompress_gzip(data)?).context("AppStream XML is not UTF-8")
+}
+
+fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>> {
     let payload = gzip_deflate_payload(data)?;
-    let xml = decompress_to_vec(payload)
-        .map_err(|error| anyhow::anyhow!("inflate AppStream gzip payload: {error:?}"))?;
-    String::from_utf8(xml).context("AppStream XML is not UTF-8")
+    decompress_to_vec(payload).map_err(|error| anyhow::anyhow!("inflate gzip payload: {error:?}"))
 }
 
 fn gzip_deflate_payload(data: &[u8]) -> Result<&[u8]> {
@@ -997,49 +1419,16 @@ fn host_flatpak_arch() -> Result<String> {
 }
 
 pub fn checkout_ref(paths: &Installation, ref_name: &str, dest: PathBuf) -> Result<()> {
-    let checksum = fetch_ref(ref_name)?;
-    let objects = paths.objects();
-    let commit = fetch_commit(&objects, &checksum)?;
-    fs::create_dir_all(&dest).with_context(|| format!("create {}", dest.display()))?;
-
-    let mut frontier = Vec::new();
-    let mut file_groups: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
-    frontier.push((PathBuf::new(), commit.tree.clone()));
-
-    let mut count_dirs = 0usize;
-
-    while !frontier.is_empty() {
-        eprintln!("fetching {} dirtree object(s)...", frontier.len());
-        let batch = fetch_dirtree_batch(&objects, frontier)?;
-        frontier = Vec::new();
-
-        for (rel, tree) in batch {
-            let target_dir = dest.join(&rel);
-            fs::create_dir_all(&target_dir)
-                .with_context(|| format!("create directory {}", target_dir.display()))?;
-            count_dirs += 1;
-
-            for file in tree.files {
-                let target = target_dir.join(&file.name);
-                file_groups.entry(file.checksum).or_default().push(target);
-            }
-
-            for dir in tree.dirs {
-                frontier.push((rel.join(&dir.name), dir.tree));
-            }
-        }
-    }
-
-    let count_files: usize = file_groups.values().map(Vec::len).sum();
-    let count_objects = file_groups.len();
-    eprintln!("materializing {count_files} paths from {count_objects} unique file objects...");
-    materialize_groups(&objects, file_groups)?;
-
-    println!(
-        "checked out {ref_name} to {} ({count_dirs} dirs, {count_files} files)",
-        dest.display()
-    );
-    Ok(())
+    let (_, summary_path) = load_arch_summary(paths)?;
+    let refs = parse_summary_refs(&summary_path)?;
+    let checksum = refs
+        .iter()
+        .find(|candidate| candidate.name == ref_name)
+        .map(|candidate| candidate.checksum.as_str())
+        .with_context(|| format!("ref is not present in Flathub: {ref_name}"))?;
+    let summary =
+        fs::read(&summary_path).with_context(|| format!("read {}", summary_path.display()))?;
+    Storage::open(paths)?.checkout(&summary, ref_name, checksum, &dest)
 }
 
 pub fn metadata_value(metadata: &str, section: &str, key: &str) -> Option<String> {
@@ -1176,198 +1565,35 @@ fn validate_checkout_dir(kind: &str, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-struct Dirtree {
-    files: Vec<FileEntry>,
-    dirs: Vec<DirEntry>,
-}
-
-fn fetch_ref(ref_name: &str) -> Result<String> {
-    let out = Command::new("fetch")
-        .arg("-qo")
-        .arg("-")
-        .arg(format!("{REMOTE}/refs/heads/{ref_name}"))
-        .output()
-        .with_context(|| format!("fetch ref {ref_name}"))?;
-    if !out.status.success() {
-        bail!("fetch ref {ref_name} failed with status {}", out.status);
-    }
-    let checksum = String::from_utf8(out.stdout)?.trim().to_string();
-    if checksum.len() != 64 {
-        bail!("invalid checksum for {ref_name}: {checksum:?}");
-    }
-    Ok(checksum)
-}
-
-fn object_path(objects: &Path, checksum: &str, suffix: &str) -> PathBuf {
-    objects
-        .join(&checksum[0..2])
-        .join(format!("{}.{}", &checksum[2..], suffix))
-}
-
-fn object_url(checksum: &str, suffix: &str) -> String {
-    format!(
-        "{REMOTE}/objects/{}/{}.{}",
-        &checksum[0..2],
-        &checksum[2..],
-        suffix
-    )
-}
-
-fn ensure_object(objects: &Path, checksum: &str, suffix: &str) -> Result<PathBuf> {
-    let path = object_path(objects, checksum, suffix);
-    if path.exists() {
-        return Ok(path);
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_file_name(format!(
-        ".{}.{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("object"),
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or(0)
-    ));
-    let status = Command::new("curl")
-        .arg("--fail")
-        .arg("--silent")
-        .arg("--show-error")
-        .arg("--location")
-        .arg("--ipv4")
-        .arg("--connect-timeout")
-        .arg("30")
-        .arg("--max-time")
-        .arg("300")
-        .arg("--retry")
-        .arg("5")
-        .arg("--retry-delay")
-        .arg("1")
-        .arg("--retry-all-errors")
-        .arg("--output")
-        .arg(&tmp)
-        .arg(object_url(checksum, suffix))
-        .status()
-        .with_context(|| format!("fetch {checksum}.{suffix}"))?;
-    if !status.success() {
-        let _ = fs::remove_file(&tmp);
-        bail!("fetch {checksum}.{suffix} failed with status {status}");
-    }
-    fs::rename(&tmp, &path)
-        .with_context(|| format!("move {} to {}", tmp.display(), path.display()))?;
-    Ok(path)
-}
-
 fn variant_from_file(path: &Path, ty: &'static str) -> Result<Variant> {
     let data = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    variant_from_bytes(data, ty)
+}
+
+fn variant_from_bytes(data: Vec<u8>, ty: &'static str) -> Result<Variant> {
     let bytes = Bytes::from_owned(data);
     let ty = VariantTy::new(ty).context("invalid GVariant type")?;
-    Ok(unsafe { Variant::from_bytes_with_type_trusted(&bytes, &ty) })
-}
-
-fn fetch_commit(objects: &Path, checksum: &str) -> Result<Commit> {
-    let path = ensure_object(objects, checksum, "commit")?;
-    let variant = variant_from_file(&path, "(a{sv}aya(say)sstayay)")?;
-
-    let metadata_map = variant.child_value(0);
-    let metadata = lookup_variant_string(&metadata_map, "xa.metadata").unwrap_or_default();
-    let tree = checksum_from_child(&variant, 6)?;
-    let dirmeta = checksum_from_child(&variant, 7)?;
-
-    Ok(Commit {
-        checksum: checksum.to_string(),
-        tree,
-        dirmeta,
-        metadata,
-    })
-}
-
-fn fetch_dirtree(objects: &Path, checksum: &str) -> Result<Dirtree> {
-    let path = ensure_object(objects, checksum, "dirtree")?;
-    let variant = variant_from_file(&path, "(a(say)a(sayay))")?;
-    let files_v = variant.child_value(0);
-    let dirs_v = variant.child_value(1);
-
-    let mut files = Vec::new();
-    for i in 0..files_v.n_children() {
-        let item = files_v.child_value(i);
-        files.push(FileEntry {
-            name: item.child_value(0).str().unwrap_or_default().to_string(),
-            checksum: bytes_to_checksum(&item.child_value(1))?,
-        });
-    }
-
-    let mut dirs = Vec::new();
-    for i in 0..dirs_v.n_children() {
-        let item = dirs_v.child_value(i);
-        dirs.push(DirEntry {
-            name: item.child_value(0).str().unwrap_or_default().to_string(),
-            tree: bytes_to_checksum(&item.child_value(1))?,
-            _dirmeta: bytes_to_checksum(&item.child_value(2))?,
-        });
-    }
-
-    Ok(Dirtree { files, dirs })
-}
-
-fn fetch_dirtree_batch(
-    objects: &Path,
-    tasks: Vec<(PathBuf, String)>,
-) -> Result<Vec<(PathBuf, Dirtree)>> {
-    let total = tasks.len();
-    let queue = Arc::new(Mutex::new(VecDeque::from_iter(tasks)));
-    let done = Arc::new(AtomicUsize::new(0));
-    let results = Arc::new(Mutex::new(Vec::with_capacity(total)));
-    let errors = Arc::new(Mutex::new(Vec::new()));
-    let workers = worker_count();
-
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            let objects = objects.to_path_buf();
-            let queue = Arc::clone(&queue);
-            let done = Arc::clone(&done);
-            let results = Arc::clone(&results);
-            let errors = Arc::clone(&errors);
-            scope.spawn(move || loop {
-                let task = queue.lock().unwrap().pop_front();
-                let Some((rel, checksum)) = task else {
-                    break;
-                };
-
-                match fetch_dirtree(&objects, &checksum) {
-                    Ok(tree) => results.lock().unwrap().push((rel, tree)),
-                    Err(error) => errors
-                        .lock()
-                        .unwrap()
-                        .push(format!("{checksum}: {error:#}")),
-                }
-
-                let current = done.fetch_add(1, Ordering::Relaxed) + 1;
-                if current % 500 == 0 || current == total {
-                    eprintln!("fetched {current}/{total} dirtree objects...");
-                }
-            });
-        }
-    });
-
-    let errors = errors.lock().unwrap();
-    if !errors.is_empty() {
-        bail!(
-            "failed to fetch {} dirtree object(s):\n{}",
-            errors.len(),
-            errors.join("\n")
-        );
-    }
-    drop(errors);
-
-    let mut results = results.lock().unwrap();
-    Ok(std::mem::take(&mut *results))
+    Ok(Variant::from_bytes_with_type(&bytes, ty))
 }
 
 fn lookup_variant_string(map: &Variant, key: &str) -> Option<String> {
+    lookup_variant_value(map, key)?
+        .str()
+        .map(ToString::to_string)
+}
+
+fn lookup_flatpak_metadata(map: &Variant) -> Option<String> {
+    if let Some(metadata) = lookup_variant_string(map, "xa.metadata") {
+        return Some(metadata);
+    }
+    let data = lookup_variant_value(map, "xa.data")?;
+    if data.n_children() != 3 {
+        return None;
+    }
+    data.child_value(2).str().map(ToString::to_string)
+}
+
+fn lookup_variant_value(map: &Variant, key: &str) -> Option<Variant> {
     for i in 0..map.n_children() {
         let entry = map.child_value(i);
         let key_variant = entry.child_value(0);
@@ -1376,22 +1602,9 @@ fn lookup_variant_string(map: &Variant, key: &str) -> Option<String> {
             continue;
         }
         let boxed = entry.child_value(1);
-        let value = boxed.as_variant()?;
-        return value.str().map(ToString::to_string);
+        return boxed.as_variant();
     }
     None
-}
-
-fn worker_count() -> usize {
-    std::env::var("POC_FETCH_WORKERS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(6)
-        .clamp(2, 12)
-}
-
-fn checksum_from_child(variant: &Variant, index: usize) -> Result<String> {
-    bytes_to_checksum(&variant.child_value(index))
 }
 
 fn bytes_to_checksum(variant: &Variant) -> Result<String> {
@@ -1403,151 +1616,29 @@ fn bytes_to_checksum(variant: &Variant) -> Result<String> {
     Ok(data.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-fn materialize_groups(objects: &Path, file_groups: BTreeMap<String, Vec<PathBuf>>) -> Result<()> {
-    let total = file_groups.len();
-    let queue = Arc::new(Mutex::new(VecDeque::from_iter(file_groups)));
-    let done = Arc::new(AtomicUsize::new(0));
-    let errors = Arc::new(Mutex::new(Vec::new()));
-    let workers = worker_count();
-
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            let objects = objects.to_path_buf();
-            let queue = Arc::clone(&queue);
-            let done = Arc::clone(&done);
-            let errors = Arc::clone(&errors);
-            scope.spawn(move || loop {
-                let task = queue.lock().unwrap().pop_front();
-                let Some((checksum, targets)) = task else {
-                    break;
-                };
-                if let Err(error) = materialize_file_object(&objects, &checksum, &targets) {
-                    errors
-                        .lock()
-                        .unwrap()
-                        .push(format!("{checksum}: {error:#}"));
-                }
-                let current = done.fetch_add(1, Ordering::Relaxed) + 1;
-                if current % 500 == 0 || current == total {
-                    eprintln!("materialized {current}/{total} file objects...");
-                }
-            });
-        }
-    });
-
-    let errors = errors.lock().unwrap();
-    if !errors.is_empty() {
-        bail!(
-            "failed to materialize {} file object(s):\n{}",
-            errors.len(),
-            errors.join("\n")
-        );
-    }
-    Ok(())
-}
-
-fn materialize_file_object(objects: &Path, checksum: &str, targets: &[PathBuf]) -> Result<()> {
-    let (mode, payload) = load_file_object(objects, checksum)?;
-    for target in targets {
-        write_file_payload(mode, &payload, target)
-            .with_context(|| format!("checkout file {}", target.display()))?;
-    }
-    Ok(())
-}
-
-fn load_file_object(objects: &Path, checksum: &str) -> Result<(u32, Vec<u8>)> {
-    let mut last_error = None;
-    for attempt in 0..2 {
-        let path = ensure_object(objects, checksum, "filez")?;
-        let data =
-            fs::read(&path).with_context(|| format!("read file object {}", path.display()))?;
-        match decode_file_object(&data) {
-            Ok(decoded) => return Ok(decoded),
-            Err(error) if attempt == 0 => {
-                last_error = Some(error);
-                let _ = fs::remove_file(&path);
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("unable to load file object")))
-}
-
-fn write_file_payload(mode: u32, payload: &[u8], target: &Path) -> Result<()> {
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let kind = mode & 0o170000;
-    match kind {
-        0o100000 => {
-            let mut file = fs::File::create(target)?;
-            file.write_all(payload)?;
-            file.flush()?;
-            fs::set_permissions(target, fs::Permissions::from_mode((mode & 0o7777) as u32))?;
-        }
-        0o120000 => {
-            let link_target =
-                std::str::from_utf8(payload).context("symlink payload is not UTF-8")?;
-            if fs::symlink_metadata(target).is_ok() {
-                fs::remove_file(target)?;
-            }
-            unix_fs::symlink(link_target, target)?;
-        }
-        _ => bail!("unsupported file mode {mode:o} for {}", target.display()),
-    }
-    Ok(())
-}
-
-fn decode_file_object(data: &[u8]) -> Result<(u32, Vec<u8>)> {
-    if data.len() < 28 {
-        bail!("file object too small");
-    }
-
-    // OSTree archive-z2 file objects start with a short content metadata header.
-    // The first word is the header size. For the Flathub objects observed here,
-    // the big-endian mode is at bytes 24..28, followed shortly by raw deflate.
-    let mode = u32::from_be_bytes(data[24..28].try_into().unwrap());
-    let kind = mode & 0o170000;
-
-    if kind == 0o120000 {
-        if data.len() < 33 {
-            bail!("symlink object too small");
-        }
-        let start = 32;
-        let Some(end) = data[start..]
-            .iter()
-            .position(|b| *b == 0)
-            .map(|p| start + p)
-        else {
-            bail!("symlink object has no target terminator");
-        };
-        return Ok((mode, data[start..end].to_vec()));
-    }
-
-    let expected_len = u32::from_be_bytes(data[12..16].try_into().unwrap()) as usize;
-    for offset in 28..usize::min(256, data.len()) {
-        if let Ok(payload) = decompress_to_vec(&data[offset..]) {
-            if payload.len() == expected_len {
-                return Ok((mode, payload));
-            }
-        }
-        if let Ok(payload) = decompress_to_vec_zlib(&data[offset..]) {
-            if payload.len() == expected_len {
-                return Ok((mode, payload));
-            }
-        }
-    }
-
-    bail!("unable to inflate file object")
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_appstream_replacements, resolve_current_app_id_from_replacements, RemoteRef,
+        parse_appstream_replacements, resolve_current_app_id_from_replacements, RemoteMetadata,
+        RemoteRef,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn exact_app_ref_does_not_require_appstream_metadata() {
+        let metadata = RemoteMetadata {
+            arch: "x86_64".to_string(),
+            refs: vec![RemoteRef {
+                name: "app/org.example.App/x86_64/stable".to_string(),
+                checksum: "app-commit".to_string(),
+                metadata: None,
+            }],
+            remote_dir: std::path::PathBuf::from("/dev/null"),
+        };
+
+        let remote_ref = metadata.resolve_app_ref("org.example.App", true).unwrap();
+        assert_eq!(remote_ref.name, "app/org.example.App/x86_64/stable");
+    }
 
     #[test]
     fn appstream_replacements_map_old_ids_to_current_component() {
@@ -1581,6 +1672,7 @@ mod tests {
         let refs = vec![RemoteRef {
             name: "app/app.example.Current/x86_64/stable".to_string(),
             checksum: "app-2".to_string(),
+            metadata: None,
         }];
         let replacements = BTreeMap::from([(
             "org.example.Old".to_string(),
@@ -1604,6 +1696,7 @@ mod tests {
         let refs = vec![RemoteRef {
             name: "app/app.example.Current/aarch64/stable".to_string(),
             checksum: "app-2".to_string(),
+            metadata: None,
         }];
         let replacements = BTreeMap::from([(
             "org.example.Old".to_string(),
@@ -1628,10 +1721,12 @@ mod tests {
             RemoteRef {
                 name: "app/app.example.One/x86_64/stable".to_string(),
                 checksum: "app-1".to_string(),
+                metadata: None,
             },
             RemoteRef {
                 name: "app/app.example.Two/x86_64/stable".to_string(),
                 checksum: "app-2".to_string(),
+                metadata: None,
             },
         ];
         let replacements = BTreeMap::from([(
@@ -1658,10 +1753,12 @@ mod tests {
             RemoteRef {
                 name: "app/org.example.A/x86_64/stable".to_string(),
                 checksum: "app-a".to_string(),
+                metadata: None,
             },
             RemoteRef {
                 name: "app/org.example.B/x86_64/stable".to_string(),
                 checksum: "app-b".to_string(),
+                metadata: None,
             },
         ];
         let replacements = BTreeMap::from([

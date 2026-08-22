@@ -1,0 +1,590 @@
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -742,8 +742,7 @@
+ am__DEPENDENCIES_1 =
+ am__DEPENDENCIES_2 = $(am__DEPENDENCIES_1)
+ libglnx_la_DEPENDENCIES = $(am__DEPENDENCIES_2)
+-am_libglnx_la_OBJECTS = libglnx/la-glnx-backport-testutils.lo \
+-	libglnx/la-glnx-backports.lo libglnx/la-glnx-local-alloc.lo \
++am_libglnx_la_OBJECTS = libglnx/la-glnx-backports.lo libglnx/la-glnx-local-alloc.lo \
+ 	libglnx/la-glnx-errors.lo libglnx/la-glnx-console.lo \
+ 	libglnx/la-glnx-dirfd.lo libglnx/la-glnx-fdio.lo \
+ 	libglnx/la-glnx-lockfile.lo libglnx/la-glnx-xattrs.lo \
+@@ -776,8 +775,6 @@
+ 	$(am__DEPENDENCIES_12) $(am__DEPENDENCIES_13)
+ am__libostree_1_la_SOURCES_DIST =  \
+ 	src/libostree/ostree-async-progress.c \
+-	src/libostree/ostree-cmd-private.h \
+-	src/libostree/ostree-cmd-private.c \
+ 	src/libostree/ostree-core-private.h \
+ 	src/libostree/ostree-core.c src/libostree/ostree-date-utils.c \
+ 	src/libostree/ostree-date-utils-private.h \
+@@ -796,8 +793,7 @@
+ 	src/libostree/ostree-lzma-decompressor.h \
+ 	src/libostree/ostree-rollsum.h src/libostree/ostree-rollsum.c \
+ 	src/libostree/ostree-varint.h src/libostree/ostree-varint.c \
+-	src/libostree/ostree-linuxfsutil.h \
+-	src/libostree/ostree-linuxfsutil.c src/libostree/ostree-diff.c \
++	src/libostree/ostree-diff.c \
+ 	src/libostree/ostree-mutable-tree.c src/libostree/ostree-ref.c \
+ 	src/libostree/ostree-remote.c \
+ 	src/libostree/ostree-remote-private.h \
+@@ -819,32 +815,8 @@
+ 	src/libostree/ostree-repo-file-enumerator.h \
+ 	src/libostree/ostree-sepolicy.c \
+ 	src/libostree/ostree-sepolicy-private.h \
+-	src/libostree/ostree-sysroot-private.h \
+-	src/libostree/ostree-sysroot.c \
+-	src/libostree/ostree-sysroot-cleanup.c \
+-	src/libostree/ostree-sysroot-deploy.c \
+-	src/libostree/ostree-sysroot-upgrader.c \
+-	src/libostree/ostree-soft-reboot.c \
+-	src/libostree/ostree-impl-system-generator.c \
+-	src/libostree/ostree-bootconfig-parser.c \
+-	src/libostree/ostree-bootconfig-parser-private.h \
+-	src/libostree/ostree-deployment.c \
+-	src/libostree/ostree-bootloader.h \
+-	src/libostree/ostree-bootloader.c \
+-	src/libostree/ostree-bootloader-aboot.h \
+-	src/libostree/ostree-bootloader-aboot.c \
+-	src/libostree/ostree-bootloader-grub2.h \
+-	src/libostree/ostree-bootloader-grub2.c \
+-	src/libostree/ostree-bootloader-zipl.h \
+-	src/libostree/ostree-bootloader-zipl.c \
+-	src/libostree/ostree-bootloader-syslinux.h \
+-	src/libostree/ostree-bootloader-syslinux.c \
+-	src/libostree/ostree-bootloader-uboot.h \
+-	src/libostree/ostree-bootloader-uboot.c \
+ 	src/libostree/ostree-repo-static-delta-core.c \
+ 	src/libostree/ostree-repo-static-delta-processing.c \
+-	src/libostree/ostree-repo-static-delta-compilation.c \
+-	src/libostree/ostree-repo-static-delta-compilation-analysis.c \
+ 	src/libostree/ostree-repo-static-delta-private.h \
+ 	src/libostree/ostree-autocleanups.h \
+ 	src/libostree/ostree-bloom.c \
+@@ -854,9 +826,6 @@
+ 	src/libostree/ostree-repo-finder-config.c \
+ 	src/libostree/ostree-repo-finder-mount.c \
+ 	src/libostree/ostree-repo-finder-override.c \
+-	src/libostree/ostree-kernel-args.h \
+-	src/libostree/ostree-kernel-args-private.h \
+-	src/libostree/ostree-kernel-args.c \
+ 	src/libostree/ostree-libarchive-input-stream.h \
+ 	src/libostree/ostree-libarchive-input-stream.c \
+ 	src/libostree/ostree-libarchive-private.h \
+@@ -916,7 +885,6 @@
+ @USE_CURL_FALSE@@USE_LIBSOUP3_FALSE@@USE_LIBSOUP_TRUE@am__objects_10 = src/libostree/libostree_1_la-ostree-fetcher-soup.lo
+ am_libostree_1_la_OBJECTS =  \
+ 	src/libostree/libostree_1_la-ostree-async-progress.lo \
+-	src/libostree/libostree_1_la-ostree-cmd-private.lo \
+ 	src/libostree/libostree_1_la-ostree-core.lo \
+ 	src/libostree/libostree_1_la-ostree-date-utils.lo \
+ 	src/libostree/libostree_1_la-ostree-dummy-enumtypes.lo \
+@@ -928,7 +896,6 @@
+ 	src/libostree/libostree_1_la-ostree-lzma-decompressor.lo \
+ 	src/libostree/libostree_1_la-ostree-rollsum.lo \
+ 	src/libostree/libostree_1_la-ostree-varint.lo \
+-	src/libostree/libostree_1_la-ostree-linuxfsutil.lo \
+ 	src/libostree/libostree_1_la-ostree-diff.lo \
+ 	src/libostree/libostree_1_la-ostree-mutable-tree.lo \
+ 	src/libostree/libostree_1_la-ostree-ref.lo \
+@@ -948,31 +915,14 @@
+ 	src/libostree/libostree_1_la-ostree-repo-file.lo \
+ 	src/libostree/libostree_1_la-ostree-repo-file-enumerator.lo \
+ 	src/libostree/libostree_1_la-ostree-sepolicy.lo \
+-	src/libostree/libostree_1_la-ostree-sysroot.lo \
+-	src/libostree/libostree_1_la-ostree-sysroot-cleanup.lo \
+-	src/libostree/libostree_1_la-ostree-sysroot-deploy.lo \
+-	src/libostree/libostree_1_la-ostree-sysroot-upgrader.lo \
+-	src/libostree/libostree_1_la-ostree-soft-reboot.lo \
+-	src/libostree/libostree_1_la-ostree-impl-system-generator.lo \
+-	src/libostree/libostree_1_la-ostree-bootconfig-parser.lo \
+-	src/libostree/libostree_1_la-ostree-deployment.lo \
+-	src/libostree/libostree_1_la-ostree-bootloader.lo \
+-	src/libostree/libostree_1_la-ostree-bootloader-aboot.lo \
+-	src/libostree/libostree_1_la-ostree-bootloader-grub2.lo \
+-	src/libostree/libostree_1_la-ostree-bootloader-zipl.lo \
+-	src/libostree/libostree_1_la-ostree-bootloader-syslinux.lo \
+-	src/libostree/libostree_1_la-ostree-bootloader-uboot.lo \
+ 	src/libostree/libostree_1_la-ostree-repo-static-delta-core.lo \
+ 	src/libostree/libostree_1_la-ostree-repo-static-delta-processing.lo \
+-	src/libostree/libostree_1_la-ostree-repo-static-delta-compilation.lo \
+-	src/libostree/libostree_1_la-ostree-repo-static-delta-compilation-analysis.lo \
+ 	src/libostree/libostree_1_la-ostree-bloom.lo \
+ 	src/libostree/libostree_1_la-ostree-repo-finder.lo \
+ 	src/libostree/libostree_1_la-ostree-repo-finder-avahi.lo \
+ 	src/libostree/libostree_1_la-ostree-repo-finder-config.lo \
+ 	src/libostree/libostree_1_la-ostree-repo-finder-mount.lo \
+ 	src/libostree/libostree_1_la-ostree-repo-finder-override.lo \
+-	src/libostree/libostree_1_la-ostree-kernel-args.lo \
+ 	$(am__objects_1) $(am__objects_2) $(am__objects_3) \
+ 	$(am__objects_4) $(am__objects_5) $(am__objects_6) \
+ 	$(am__objects_7) $(am__objects_8) $(am__objects_9) \
+@@ -1010,7 +960,6 @@
+ 	$(am__DEPENDENCIES_1) $(am__DEPENDENCIES_13)
+ am_libotcore_la_OBJECTS =  \
+ 	src/libotcore/libotcore_la-otcore-ed25519-verify.lo \
+-	src/libotcore/libotcore_la-otcore-prepare-root.lo \
+ 	src/libotcore/libotcore_la-otcore-spki-verify.lo \
+ 	$(am__objects_1)
+ libotcore_la_OBJECTS = $(am_libotcore_la_OBJECTS)
+@@ -2728,8 +2677,6 @@
+ 	libglnx/glnx-macros.h \
+ 	libglnx/glnx-backport-autocleanups.h \
+ 	libglnx/glnx-backport-autoptr.h \
+-	libglnx/glnx-backport-testutils.h \
+-	libglnx/glnx-backport-testutils.c \
+ 	libglnx/glnx-backports.h \
+ 	libglnx/glnx-backports.c \
+ 	libglnx/glnx-local-alloc.h \
+@@ -2806,7 +2753,6 @@
+ libotcore_la_SOURCES = \
+ 	src/libotcore/otcore.h \
+     src/libotcore/otcore-ed25519-verify.c \
+-    src/libotcore/otcore-prepare-root.c \
+     src/libotcore/otcore-spki-verify.c \
+ 	$(NULL)
+ 
+@@ -2865,8 +2811,6 @@
+ 	$(NULL)
+ 
+ libostree_1_la_SOURCES = src/libostree/ostree-async-progress.c \
+-	src/libostree/ostree-cmd-private.h \
+-	src/libostree/ostree-cmd-private.c \
+ 	src/libostree/ostree-core-private.h \
+ 	src/libostree/ostree-core.c src/libostree/ostree-date-utils.c \
+ 	src/libostree/ostree-date-utils-private.h \
+@@ -2885,8 +2829,7 @@
+ 	src/libostree/ostree-lzma-decompressor.h \
+ 	src/libostree/ostree-rollsum.h src/libostree/ostree-rollsum.c \
+ 	src/libostree/ostree-varint.h src/libostree/ostree-varint.c \
+-	src/libostree/ostree-linuxfsutil.h \
+-	src/libostree/ostree-linuxfsutil.c src/libostree/ostree-diff.c \
++	src/libostree/ostree-diff.c \
+ 	src/libostree/ostree-mutable-tree.c src/libostree/ostree-ref.c \
+ 	src/libostree/ostree-remote.c \
+ 	src/libostree/ostree-remote-private.h \
+@@ -2908,32 +2851,8 @@
+ 	src/libostree/ostree-repo-file-enumerator.h \
+ 	src/libostree/ostree-sepolicy.c \
+ 	src/libostree/ostree-sepolicy-private.h \
+-	src/libostree/ostree-sysroot-private.h \
+-	src/libostree/ostree-sysroot.c \
+-	src/libostree/ostree-sysroot-cleanup.c \
+-	src/libostree/ostree-sysroot-deploy.c \
+-	src/libostree/ostree-sysroot-upgrader.c \
+-	src/libostree/ostree-soft-reboot.c \
+-	src/libostree/ostree-impl-system-generator.c \
+-	src/libostree/ostree-bootconfig-parser.c \
+-	src/libostree/ostree-bootconfig-parser-private.h \
+-	src/libostree/ostree-deployment.c \
+-	src/libostree/ostree-bootloader.h \
+-	src/libostree/ostree-bootloader.c \
+-	src/libostree/ostree-bootloader-aboot.h \
+-	src/libostree/ostree-bootloader-aboot.c \
+-	src/libostree/ostree-bootloader-grub2.h \
+-	src/libostree/ostree-bootloader-grub2.c \
+-	src/libostree/ostree-bootloader-zipl.h \
+-	src/libostree/ostree-bootloader-zipl.c \
+-	src/libostree/ostree-bootloader-syslinux.h \
+-	src/libostree/ostree-bootloader-syslinux.c \
+-	src/libostree/ostree-bootloader-uboot.h \
+-	src/libostree/ostree-bootloader-uboot.c \
+ 	src/libostree/ostree-repo-static-delta-core.c \
+ 	src/libostree/ostree-repo-static-delta-processing.c \
+-	src/libostree/ostree-repo-static-delta-compilation.c \
+-	src/libostree/ostree-repo-static-delta-compilation-analysis.c \
+ 	src/libostree/ostree-repo-static-delta-private.h \
+ 	src/libostree/ostree-autocleanups.h \
+ 	src/libostree/ostree-bloom.c \
+@@ -2942,10 +2861,7 @@
+ 	src/libostree/ostree-repo-finder-avahi.c \
+ 	src/libostree/ostree-repo-finder-config.c \
+ 	src/libostree/ostree-repo-finder-mount.c \
+-	src/libostree/ostree-repo-finder-override.c \
+-	src/libostree/ostree-kernel-args.h \
+-	src/libostree/ostree-kernel-args-private.h \
+-	src/libostree/ostree-kernel-args.c $(NULL) $(am__append_18) \
++	src/libostree/ostree-repo-finder-override.c $(NULL) $(am__append_18) \
+ 	$(am__append_19) $(am__append_20) $(am__append_21) \
+ 	$(am__append_22) $(am__append_30) $(am__append_31) \
+ 	$(am__append_34) $(am__append_37) src/libostree/ostree-sign.c \
+@@ -2986,7 +2902,7 @@
+ 	$(am__append_24) $(am__append_26) $(am__append_28) \
+ 	$(am__append_32) $(am__append_35) $(am__append_38) \
+ 	$(am__append_40) $(am__append_42)
+-libostree_1_la_LDFLAGS = -version-number 1:0:0 -Bsymbolic-functions $(addprefix $(wl_versionscript_arg),$(symbol_files))
++libostree_1_la_LDFLAGS = -version-number 1:0:0 -Bsymbolic-functions -Wl,--undefined-version $(addprefix $(wl_versionscript_arg),$(symbol_files))
+ # Some change between rust-1.21.0-1.fc27 and rust-1.22.1-1.fc27.x86_64
+ libostree_1_la_LIBADD = libotutil.la libotcore.la libglnx.la \
+ 	libbsdiff.la $(OT_INTERNAL_GIO_UNIX_LIBS) \
+--- a/configure
++++ b/configure
+@@ -16124,7 +16124,10 @@
+   fi
+ fi
+ 
+-ac_fn_c_check_header_compile "$LINENO" "sys/xattr.h" "ac_cv_header_sys_xattr_h" "$ac_includes_default"
++case $host_os in #(
++  freebsd*) ac_cv_header_sys_xattr_h=yes ;;
++  *) ac_fn_c_check_header_compile "$LINENO" "sys/xattr.h" "ac_cv_header_sys_xattr_h" "$ac_includes_default" ;;
++esac
+ if test "x$ac_cv_header_sys_xattr_h" = xyes
+ then :
+ 
+@@ -16157,7 +16160,8 @@
+ 
+ if test "$YACC" != "bison -y"
+ then :
+-  as_fn_error $? "bison not found but required" "$LINENO" 5
++  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: bison unavailable; ostree CLI cannot be built" >&5
++printf "%s\n" "$as_me: WARNING: bison unavailable; ostree CLI cannot be built" >&2;}
+ fi
+ 
+ 
+@@ -23861,4 +23865,3 @@
+ esac
+ fi
+ echo ""
+-
+--- a/libglnx/glnx-fdio.c
++++ b/libglnx/glnx-fdio.c
+@@ -30,7 +30,9 @@
+ #include <stdint.h>
+ #include <stdbool.h>
+ #include <sys/ioctl.h>
++#ifndef __FreeBSD__
+ #include <sys/sendfile.h>
++#endif
+ #include <errno.h>
+ 
+ #include <glnx-fdio.h>
+@@ -871,6 +873,11 @@
+        */
+       if (try_sendfile && max_bytes != (off_t) -1)
+         {
++#ifdef __FreeBSD__
++          /* FreeBSD sendfile(2) writes to sockets and has a different ABI. */
++          have_sendfile = 0;
++          try_sendfile = false;
++#else
+           n = sendfile (fdt, fdf, NULL, max_bytes);
+           if (n < 0)
+             {
+@@ -898,6 +905,7 @@
+                 /* Succcess! */
+                 goto next;
+             }
++#endif
+         }
+ 
+       /* As a fallback just copy bits by hand */
+--- a/libglnx/glnx-fdio.h
++++ b/libglnx/glnx-fdio.h
+@@ -231,9 +231,16 @@
+   if (size == 0)
+     return TRUE;
+ 
+-  if (fallocate (fd, 0, offset, size) < 0)
++#ifdef __FreeBSD__
++  int r = posix_fallocate (fd, offset, size);
++  if (r != 0)
++    errno = r;
++#else
++  int r = fallocate (fd, 0, offset, size);
++#endif
++  if (r != 0)
+     {
+-      if (G_IN_SET(errno, ENOSYS, EOPNOTSUPP))
++      if (G_IN_SET(errno, ENOSYS, EOPNOTSUPP, EINVAL, ENODEV))
+         ; /* Ignore */
+       else
+         return glnx_throw_errno_prefix (error, "fallocate");
+--- a/libglnx/glnx-missing-syscall.h
++++ b/libglnx/glnx-missing-syscall.h
+@@ -33,7 +33,7 @@
+ 
+ #include "libglnx-config.h"
+ 
+-#if !HAVE_DECL_RENAMEAT2
++#if !HAVE_DECL_RENAMEAT2 && !defined(__FreeBSD__)
+ #  ifndef __NR_renameat2
+ #    if defined __x86_64__
+ #      define __NR_renameat2 316
+@@ -141,8 +141,8 @@
+ #    endif
+ #  endif
+ 
+-static inline ssize_t missing_copy_file_range(int fd_in, loff_t *off_in,
+-                                              int fd_out, loff_t *off_out,
++static inline ssize_t missing_copy_file_range(int fd_in, off_t *off_in,
++                                              int fd_out, off_t *off_out,
+                                               size_t len,
+                                               unsigned int flags) {
+ #  ifdef __NR_copy_file_range
+--- a/src/libostree/ostree-repo-commit.c
++++ b/src/libostree/ostree-repo-commit.c
+@@ -22,7 +22,9 @@
+ 
+ #include "config.h"
+ 
++#ifndef __FreeBSD__
+ #include <ext2fs/ext2_fs.h>
++#endif
+ #include <gio/gfiledescriptorbased.h>
+ #include <gio/gunixinputstream.h>
+ #include <gio/gunixoutputstream.h>
+--- a/src/libostree/ostree-repo.c
++++ b/src/libostree/ostree-repo.c
+@@ -31,7 +31,9 @@
+ #include <gio/gunixoutputstream.h>
+ #include <glib-unix.h>
+ #include <glnx-console.h>
++#ifdef __linux__
+ #include <linux/magic.h>
++#endif
+ 
+ #include "ostree-autocleanups.h"
+ #include "ostree-core-private.h"
+@@ -48,7 +50,13 @@
+ #include <glib/gstdio.h>
+ #include <locale.h>
+ #include <sys/file.h>
++#ifdef __FreeBSD__
++#include <sys/mount.h>
++#include <sys/sysctl.h>
++#include <sys/time.h>
++#else
+ #include <sys/statfs.h>
++#endif
+ #include <sys/statvfs.h>
+ 
+ #define REPO_LOCK_DISABLED (-2)
+@@ -1533,8 +1541,15 @@
+     ot_journal_print (LOG_INFO, "Starting syncfs for system repo");
+   guint64 start_msec = g_get_monotonic_time () / 1000;
+   int repo_dfd = ostree_repo_get_dfd (self);
++#ifdef __FreeBSD__
++  /* FreeBSD has no per-filesystem syncfs(2). The global sync still provides
++   * the durability barrier required before staged objects are renamed. */
++  (void)repo_dfd;
++  sync ();
++#else
+   if (syncfs (repo_dfd) != 0)
+     return glnx_throw_errno_prefix (error, "syncfs(repo)");
++#endif
+   guint64 end_msec = g_get_monotonic_time () / 1000;
+   if (is_system)
+     ot_journal_print (LOG_INFO, "Completed syncfs() for system repo in %" G_GUINT64_FORMAT " ms",
+@@ -2925,10 +2940,8 @@
+           sysroot = sysroot_owned = g_file_new_for_path ("/");
+           break;
+         case OSTREE_REPO_SYSROOT_KIND_VIA_SYSROOT:
+-          sysroot_ref = (OstreeSysroot *)g_weak_ref_get (&self->sysroot);
+-          /* Only write to /etc/ostree/remotes.d if we are pointed at a deployment */
+-          if (sysroot_ref != NULL && !sysroot_ref->is_physical)
+-            sysroot = ostree_sysroot_get_path (sysroot_ref);
++          /* The private FreeBSD build has no system-deployment layer. */
++          sysroot_ref = NULL;
+           break;
+         }
+     }
+@@ -3480,9 +3493,21 @@
+       boot_id = g_strdup (env_bootid);
+     else
+       {
++#ifdef __FreeBSD__
++        char host_uuid[64] = { 0 };
++        size_t host_uuid_len = sizeof (host_uuid);
++        struct timeval boot_time = { 0 };
++        size_t boot_time_len = sizeof (boot_time);
++        if (sysctlbyname ("kern.hostuuid", host_uuid, &host_uuid_len, NULL, 0) < 0
++            || sysctlbyname ("kern.boottime", &boot_time, &boot_time_len, NULL, 0) < 0)
++          return glnx_throw_errno_prefix (error, "Reading FreeBSD boot identity");
++        boot_id = g_strdup_printf ("%s-%" G_GINT64_FORMAT, host_uuid,
++                                   (gint64)boot_time.tv_sec);
++#else
+         if (!g_file_get_contents ("/proc/sys/kernel/random/boot_id", &boot_id, NULL, error))
+           return FALSE;
+         g_strdelimit (boot_id, "\n", '\0');
++#endif
+       }
+ 
+     self->stagedir_prefix = g_strconcat (OSTREE_REPO_TMPDIR_STAGING, boot_id, "-", NULL);
+@@ -3519,7 +3544,11 @@
+ #ifndef FUSE_SUPER_MAGIC
+ #define FUSE_SUPER_MAGIC 0x65735546
+ #endif
++#ifdef __FreeBSD__
++    self->is_on_fuse = strcmp (fsstbuf.f_fstypename, "fusefs") == 0;
++#else
+     self->is_on_fuse = (fsstbuf.f_type == FUSE_SUPER_MAGIC);
++#endif
+     g_debug ("using fuse: %d", self->is_on_fuse);
+   }
+ 
+@@ -4206,6 +4235,16 @@
+          at least we report something consistent. */
+       stbuf.st_uid = stbuf.st_gid = 0;
+ 
++#ifdef __FreeBSD__
++      /* Linux reports 0777 for symlink permissions, which is the canonical
++       * mode encoded in OSTree content objects.  FreeBSD reports the mode
++       * used when the symlink inode was created (normally 0755); symlink
++       * permissions are not otherwise meaningful, so normalize them when
++       * reconstructing the canonical object for checksum verification. */
++      if (S_ISLNK (stbuf.st_mode))
++        stbuf.st_mode = S_IFLNK | 0777;
++#endif
++
+       if (out_xattrs)
+         {
+           GVariantBuilder builder;
+--- a/src/libotutil/ot-unix-utils.c
++++ b/src/libotutil/ot-unix-utils.c
+@@ -29,13 +29,16 @@
+ 
+ #include <errno.h>
+ #include <fcntl.h>
+-#include <linux/capability.h>
+ #include <stdlib.h>
+ #include <string.h>
+-#include <sys/prctl.h>
+ #include <sys/types.h>
+ #include <unistd.h>
+ 
++#ifdef __linux__
++#include <linux/capability.h>
++#include <sys/prctl.h>
++#endif
++
+ /* Ensure that a pathname component @name does not contain the special Unix
+  * entries `.` or `..`, and does not contain `/`.
+  */
+@@ -112,9 +115,11 @@
+   if (geteuid () != 0)
+     return FALSE;
+ 
++#ifdef __linux__
+   // https://github.com/containers/bootc/blob/c88fcfd6e145863408bde7d4706937dd323f64e2/lib/src/cli.rs#L621
+   if (prctl (PR_CAPBSET_READ, CAP_SYS_ADMIN) != 1)
+     return FALSE;
++#endif
+ 
+   return TRUE;
+ }
+--- a/libglnx/sys/xattr.h
++++ b/libglnx/sys/xattr.h
+@@ -0,0 +1,112 @@
++/* Linux xattr API compatibility for the private bare-user-only repository.
++ *
++ * Flatpak's bare-user-only mode deliberately stores canonical uid/gid/mode
++ * and no xattrs.  Its pull verification rejects content outside that model,
++ * and user-mode checkout does not restore xattrs.  Keep the unsupported API
++ * explicit rather than adding an extattr(2) translation that this build must
++ * never use.
++ */
++#pragma once
++
++#ifdef __FreeBSD__
++
++#include <errno.h>
++#include <sys/types.h>
++
++#ifndef ENODATA
++#define ENODATA ENOATTR
++#endif
++#ifndef XATTR_CREATE
++#define XATTR_CREATE 0x1
++#endif
++#ifndef XATTR_REPLACE
++#define XATTR_REPLACE 0x2
++#endif
++
++static inline ssize_t
++fgetxattr (int fd, const char *name, void *value, size_t size)
++{
++  (void)fd;
++  (void)name;
++  (void)value;
++  (void)size;
++  errno = ENOTSUP;
++  return -1;
++}
++
++static inline ssize_t
++lgetxattr (const char *path, const char *name, void *value, size_t size)
++{
++  (void)path;
++  (void)name;
++  (void)value;
++  (void)size;
++  errno = ENOTSUP;
++  return -1;
++}
++
++static inline int
++fsetxattr (int fd, const char *name, const void *value, size_t size, int flags)
++{
++  (void)fd;
++  (void)name;
++  (void)value;
++  (void)size;
++  (void)flags;
++  errno = ENOTSUP;
++  return -1;
++}
++
++static inline int
++lsetxattr (const char *path, const char *name, const void *value, size_t size, int flags)
++{
++  (void)path;
++  (void)name;
++  (void)value;
++  (void)size;
++  (void)flags;
++  errno = ENOTSUP;
++  return -1;
++}
++
++static inline int
++fremovexattr (int fd, const char *name)
++{
++  (void)fd;
++  (void)name;
++  errno = ENOTSUP;
++  return -1;
++}
++
++static inline int
++lremovexattr (const char *path, const char *name)
++{
++  (void)path;
++  (void)name;
++  errno = ENOTSUP;
++  return -1;
++}
++
++static inline ssize_t
++flistxattr (int fd, char *list, size_t size)
++{
++  (void)fd;
++  (void)list;
++  (void)size;
++  errno = ENOTSUP;
++  return -1;
++}
++
++static inline ssize_t
++llistxattr (const char *path, char *list, size_t size)
++{
++  (void)path;
++  (void)list;
++  (void)size;
++  errno = ENOTSUP;
++  return -1;
++}
++
++#else
++#include_next <sys/xattr.h>
++#endif

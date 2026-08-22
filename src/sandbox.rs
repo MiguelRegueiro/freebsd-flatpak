@@ -185,9 +185,9 @@ impl ChrootNullfsBackend {
         for mount in instance.host_fonts.mounts().to_vec() {
             instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
         }
-        instance.mount_nullfs(&desktop.xdg_runtime_dir, &format!("run/user/{uid}"), false)?;
+        instance.mount_nullfs(&desktop.xdg_runtime_dir, format!("run/user/{uid}"), false)?;
         if let Some(doc_dir) = instance.host_portal.doc_dir().map(Path::to_path_buf) {
-            instance.mount_nullfs(&doc_dir, &format!("run/user/{uid}/doc"), true)?;
+            instance.mount_nullfs(&doc_dir, format!("run/user/{uid}/doc"), true)?;
         }
         instance.mount_nullfs(Path::new("/tmp"), "tmp", false)?;
         instance.mount_special("dev", "devfs", "devfs")?;
@@ -249,6 +249,7 @@ struct OwnedMount {
 }
 
 impl ChrootInstance {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         paths: Installation,
         app_id: String,
@@ -802,7 +803,7 @@ fn expand_env_value(value: &str, env: &[(String, String)]) -> String {
         if chars.peek() == Some(&'{') {
             chars.next();
             let mut name = String::new();
-            while let Some(next) = chars.next() {
+            for next in chars.by_ref() {
                 if next == '}' {
                     break;
                 }

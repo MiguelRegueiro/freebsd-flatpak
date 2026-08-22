@@ -16,7 +16,7 @@ FreeBSD Flatpak downloads applications and runtimes from Flathub, runs their unm
 
 - FreeBSD with Linuxulator enabled and a Linux base under `/compat/linux`.
 - A Wayland session with D-Bus and a working `xdg-desktop-portal` backend.
-- Rust and C toolchains, GLib/GIO, PipeWire, `fetch`, and `curl`.
+- FreeBSD `pkg`; the installer installs missing build/runtime packages.
 - `doas` access for chroot and mount operations.
 
 ## Build
@@ -31,9 +31,12 @@ Use `sudo ./scripts/install.sh` instead if `sudo` is your preferred privilege
 elevation tool.
 
 This installs the CLI at `/usr/local/bin/flatpak` and the native/Linux helper
-binaries under `/usr/local/libexec/freebsd-flatpak`. Application launchers,
-icons, and metadata are published into the normal per-user XDG data paths; no
-`XDG_DATA_DIRS` change is needed.
+binaries under `/usr/local/libexec/freebsd-flatpak`. It also downloads a
+checksum-pinned libostree release, applies the small FreeBSD patchset, builds
+it under `target/`, and installs it privately in that directory; no system
+libostree package or manual library setup is needed. Application
+launchers, icons, and metadata are published into the normal per-user XDG data
+paths; no `XDG_DATA_DIRS` change is needed.
 
 ## Usage
 
@@ -42,16 +45,18 @@ flatpak search <query>
 flatpak install <app-id>
 flatpak list
 flatpak permissions <app-id>
+flatpak repair
+flatpak prune
 flatpak run <app-id> -- <app-arguments>
 flatpak update [app-id...]
 flatpak uninstall <app-id>
 ```
 
-User installations use `$XDG_DATA_HOME/freebsd-flatpak` for installed payloads
-and refs, `$XDG_CACHE_HOME/freebsd-flatpak` for downloads and remote metadata,
-`$XDG_RUNTIME_DIR/freebsd-flatpak` for transient run state, and
-`~/.var/app/<app-id>` for persistent application data. Standard XDG defaults
-are used when the data or cache variables are unset.
+User installations use `$XDG_DATA_HOME/freebsd-flatpak` for the private OSTree
+repository and transactional deployments, `$XDG_CACHE_HOME/freebsd-flatpak`
+for signed remote metadata, `$XDG_RUNTIME_DIR/freebsd-flatpak` for transient
+run state, and `~/.var/app/<app-id>` for persistent application data. Standard
+XDG defaults are used when the data or cache variables are unset.
 
 ## Current limitations
 
@@ -62,4 +67,6 @@ are used when the data or cache variables are unset.
 
 ## License
 
-Licensed under the [BSD 2-Clause License](LICENSE).
+FreeBSD Flatpak is licensed under the [BSD 2-Clause License](LICENSE).
+libostree is LGPL-2.0-or-later; the pinned upstream source and local patch are
+documented in `vendor/libostree`.

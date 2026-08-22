@@ -10,11 +10,25 @@ if [ "$(id -u)" -ne 0 ]; then
     fail "this installer must run as root; rerun it with 'doas ./scripts/install.sh' or 'sudo ./scripts/install.sh'"
 fi
 
+command -v pkg >/dev/null 2>&1 || fail "FreeBSD pkg is required"
+
+REQUIRED_PACKAGES="rust gmake pkgconf glib curl gpgme pipewire"
+MISSING_PACKAGES=
+for package_name in $REQUIRED_PACKAGES; do
+    if ! pkg info -e "$package_name" >/dev/null 2>&1; then
+        MISSING_PACKAGES="$MISSING_PACKAGES $package_name"
+    fi
+done
+if [ -n "$MISSING_PACKAGES" ]; then
+    printf '==> Installing build/runtime dependencies:%s\n' "$MISSING_PACKAGES"
+    pkg install -y $MISSING_PACKAGES || fail "could not install required packages"
+fi
+
 require_command() {
     command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
 }
 
-for command_name in cargo cc env id install mkdir pkg-config su; do
+for command_name in cargo cc env fetch gmake id install mkdir patch pkg-config sha256 su tar; do
     require_command "$command_name"
 done
 
@@ -30,7 +44,9 @@ BASE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) ||
     fail "could not locate the source directory"
 INSTALL_BIN=/usr/local/bin
 INSTALL_LIBEXEC=/usr/local/libexec/freebsd-flatpak
+INSTALL_LICENSES=/usr/local/share/licenses/freebsd-flatpak
 HELPER_BUILD_DIR=target/release/freebsd-flatpak-helpers
+OSTREE_PREFIX="$BASE/target/vendor-ostree/prefix"
 LINUX_CC=${LINUX_CC:-/compat/linux/usr/bin/gcc}
 LINUX_BUILD_PATH=/compat/linux/usr/bin:/compat/linux/bin:/usr/bin:/bin
 
@@ -53,8 +69,13 @@ PORTAL_FLAGS=$(pkg-config --cflags --libs gio-2.0 gio-unix-2.0 glib-2.0 libpipew
     fail "could not determine portal helper compiler flags"
 
 cd "$BASE"
+heading "Building private libostree"
+su "$BUILD_USER" -c './scripts/build-libostree.sh' ||
+    fail "private libostree build failed"
+
 heading "Building FreeBSD Flatpak"
-su "$BUILD_USER" -c 'cargo build --locked --release --bin flatpak' ||
+su "$BUILD_USER" -c \
+    "env PKG_CONFIG_PATH='$OSTREE_PREFIX/lib/pkgconfig' LIBRARY_PATH='$OSTREE_PREFIX/lib' cargo build --locked --release --bin flatpak" ||
     fail "Rust CLI build failed"
 
 su "$BUILD_USER" -c "mkdir -p '$HELPER_BUILD_DIR'" ||
@@ -75,6 +96,7 @@ su "$BUILD_USER" -c \
 
 for artifact in \
     target/release/flatpak \
+    "$OSTREE_PREFIX/lib/libostree-1.so.1.0.0" \
     "$HELPER_BUILD_DIR/portal-bridge" \
     "$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so" \
     "$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so" \
@@ -83,12 +105,21 @@ do
     [ -s "$artifact" ] || fail "expected build artifact is missing or empty: $artifact"
 done
 
-printf '\n'
-heading "Installing"
-install -d -o root -g wheel -m 755 "$INSTALL_BIN" "$INSTALL_LIBEXEC" ||
+install -d -o root -g wheel -m 755 \
+    "$INSTALL_BIN" "$INSTALL_LIBEXEC" "$INSTALL_LICENSES" ||
     fail "could not create installation directories"
 install -o root -g wheel -m 755 target/release/flatpak "$INSTALL_BIN/flatpak" ||
     fail "could not install CLI"
+install -o root -g wheel -m 755 \
+    "$OSTREE_PREFIX/lib/libostree-1.so.1.0.0" \
+    "$INSTALL_LIBEXEC/libostree-1.so.1" || fail "could not install private libostree"
+install -o root -g wheel -m 644 \
+    LICENSE \
+    "$INSTALL_LICENSES/BSD-2-Clause.txt" || fail "could not install project license"
+install -o root -g wheel -m 644 \
+    LICENSES/LGPL-2.0-or-later.txt \
+    LICENSES/MIT-ostree-rs.txt \
+    "$INSTALL_LICENSES/" || fail "could not install third-party licenses"
 install -o root -g wheel -m 755 \
     "$HELPER_BUILD_DIR/portal-bridge" \
     "$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so" \
@@ -96,7 +127,11 @@ install -o root -g wheel -m 755 \
     "$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so" \
     "$INSTALL_LIBEXEC/" || fail "could not install helper binaries"
 
+printf '\n'
+heading "Installed FreeBSD Flatpak"
 printf '    %s\n' "$INSTALL_BIN/flatpak"
+printf '    %s\n' "$INSTALL_LIBEXEC/libostree-1.so.1"
+printf '    %s\n' "$INSTALL_LICENSES/LGPL-2.0-or-later.txt"
 for helper_name in \
     portal-bridge \
     libwayland-drm-devt-shim.so \
@@ -106,5 +141,6 @@ do
     printf '    %s/%s\n' "$INSTALL_LIBEXEC" "$helper_name"
 done
 
-printf '\n'
-heading "Installation complete"
+if ldd "$INSTALL_BIN/flatpak" | grep -q 'not found'; then
+    fail "installed CLI has unresolved shared-library dependencies"
+fi

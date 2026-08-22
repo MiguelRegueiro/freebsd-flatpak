@@ -9,6 +9,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"
-glib = "0.21"
+base64 = "0.20"
+glib = "0.20"
 libc = "0.2"
 miniz_oxide = "0.8"
+ostree = { version = "0.20.5", features = ["v2025_3"] }

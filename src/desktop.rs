@@ -19,6 +19,7 @@ pub fn export_data_dir(paths: &Installation) -> PathBuf {
 }
 
 pub fn export_app(paths: &Installation, app: &AppRecord) -> Result<ExportReport> {
+    cleanup_managed_projections_for_app(paths, &app.app_id)?;
     remove_export_files(paths, &app.app_id)?;
 
     let source_share = state::absolute(paths, &app.app_dir)
@@ -32,6 +33,12 @@ pub fn export_app(paths: &Installation, app: &AppRecord) -> Result<ExportReport>
             source_share.display()
         );
         return Ok(report);
+    }
+
+    // Refuse unrelated host-file collisions before changing our private
+    // export tree. Project-owned stale links are deliberately replaceable.
+    for rel in collect_export_files(&source_share, &source_share)? {
+        preflight_projection(paths, &rel)?;
     }
 
     let export_share = export_data_dir(paths);
@@ -69,6 +76,7 @@ pub fn export_app(paths: &Installation, app: &AppRecord) -> Result<ExportReport>
 
 pub fn remove_export(paths: &Installation, app_id: &str) -> Result<()> {
     remove_export_files(paths, app_id)?;
+    cleanup_managed_projections_for_app(paths, app_id)?;
     refresh_export_caches(paths)
 }
 
@@ -146,9 +154,7 @@ fn publish_projection(paths: &Installation, rel: &Path) -> Result<()> {
     }
 
     if let Ok(metadata) = fs::symlink_metadata(&target) {
-        if !metadata.file_type().is_symlink()
-            || fs::read_link(&target).ok().as_deref() != Some(source.as_path())
-        {
+        if !metadata.file_type().is_symlink() || !is_managed_projection(paths, rel, &target) {
             bail!(
                 "refusing to replace existing XDG export {} (source would be {})",
                 target.display(),
@@ -159,6 +165,82 @@ fn publish_projection(paths: &Installation, rel: &Path) -> Result<()> {
     }
     unix_fs::symlink(&source, &target)
         .with_context(|| format!("publish XDG export {}", target.display()))
+}
+
+fn preflight_projection(paths: &Installation, rel: &Path) -> Result<()> {
+    if !is_launcher_projection(rel) {
+        return Ok(());
+    }
+    let target = paths.data_home().join(rel);
+    let Ok(metadata) = fs::symlink_metadata(&target) else {
+        return Ok(());
+    };
+    if metadata.file_type().is_symlink() && is_managed_projection(paths, rel, &target) {
+        return Ok(());
+    }
+    bail!(
+        "refusing to replace existing XDG export {}",
+        target.display()
+    )
+}
+
+fn is_managed_projection(paths: &Installation, rel: &Path, target: &Path) -> bool {
+    let Ok(link) = fs::read_link(target) else {
+        return false;
+    };
+    if link == paths.export_share().join(rel) {
+        return true;
+    }
+
+    // Older benchmark roots used an overridden data directory and could be
+    // deleted while their projections survived. Recognize only the exact
+    // project export suffix, never an arbitrary symlink containing the app id.
+    let components = link.components().collect::<Vec<_>>();
+    components.windows(2).any(|pair| {
+        matches!(pair, [Component::Normal(first), Component::Normal(second)]
+            if *first == "exports" && *second == "share")
+            && link.ends_with(rel)
+    })
+}
+
+fn cleanup_managed_projections_for_app(paths: &Installation, app_id: &str) -> Result<()> {
+    for top in ["applications", "icons", "metainfo", "appdata"] {
+        let root = paths.data_home().join(top);
+        cleanup_managed_projection_tree(paths, app_id, &root)?;
+    }
+    Ok(())
+}
+
+fn cleanup_managed_projection_tree(
+    paths: &Installation,
+    app_id: &str,
+    directory: &Path,
+) -> Result<()> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_dir() {
+            cleanup_managed_projection_tree(paths, app_id, &path)?;
+            continue;
+        }
+        if !metadata.file_type().is_symlink()
+            || !entry.file_name().to_string_lossy().contains(app_id)
+        {
+            continue;
+        }
+        let Ok(rel) = path.strip_prefix(paths.data_home()) else {
+            continue;
+        };
+        if is_managed_projection(paths, rel, &path) {
+            fs::remove_file(&path)
+                .with_context(|| format!("remove stale XDG export {}", path.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn remove_projection(paths: &Installation, rel: &Path, source: &Path) -> Result<()> {
@@ -269,6 +351,28 @@ fn copy_export_dir(
     }
 
     Ok(())
+}
+
+fn collect_export_files(source_root: &Path, directory: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(directory)
+        .with_context(|| format!("read export directory {}", directory.display()))?
+    {
+        let entry = entry?;
+        let source = entry.path();
+        let rel = source.strip_prefix(source_root)?.to_path_buf();
+        validate_relative_export_path(&rel)?;
+        if should_skip_export_path(&rel) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&source)?;
+        if metadata.file_type().is_dir() {
+            paths.extend(collect_export_files(source_root, &source)?);
+        } else if metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            paths.push(rel);
+        }
+    }
+    Ok(paths)
 }
 
 fn rewrite_desktop_file(
@@ -488,6 +592,37 @@ pub struct DesktopSession {
     pub dbus_session_bus_address: Option<String>,
 }
 
+impl DesktopSession {
+    pub fn from_env() -> Option<Self> {
+        Some(Self {
+            xdg_runtime_dir: std::env::var_os("XDG_RUNTIME_DIR")?.into(),
+            wayland_display: std::env::var("WAYLAND_DISPLAY").ok()?,
+            display: std::env::var("DISPLAY").ok(),
+            dbus_session_bus_address: std::env::var("DBUS_SESSION_BUS_ADDRESS").ok(),
+        })
+    }
+
+    pub fn wayland_socket(&self) -> PathBuf {
+        self.xdg_runtime_dir.join(&self.wayland_display)
+    }
+
+    pub fn chroot_dbus_address(&self, uid: u32) -> Option<String> {
+        let address = self.dbus_session_bus_address.as_ref()?;
+        let path = address.strip_prefix("unix:path=")?;
+        let host_path = PathBuf::from(path);
+
+        if let Ok(relative) = host_path.strip_prefix(&self.xdg_runtime_dir) {
+            return Some(format!(
+                "unix:path=/run/user/{}/{}",
+                uid,
+                relative.display()
+            ));
+        }
+
+        Some(address.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{desktop_exec, exec_tail_after_command, export_app, remove_export};
@@ -559,10 +694,17 @@ mod tests {
             command: "example".into(),
         };
 
-        export_app(&paths, &app).unwrap();
         let projected = paths
             .data_home()
             .join("applications/org.example.App.desktop");
+        fs::create_dir_all(projected.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(
+            "/tmp/deleted-benchmark/data/exports/share/applications/org.example.App.desktop",
+            &projected,
+        )
+        .unwrap();
+
+        export_app(&paths, &app).unwrap();
         assert!(fs::symlink_metadata(&projected)
             .unwrap()
             .file_type()
@@ -574,36 +716,5 @@ mod tests {
         remove_export(&paths, &app.app_id).unwrap();
         assert!(!projected.exists());
         let _ = fs::remove_dir_all(root);
-    }
-}
-
-impl DesktopSession {
-    pub fn from_env() -> Option<Self> {
-        Some(Self {
-            xdg_runtime_dir: std::env::var_os("XDG_RUNTIME_DIR")?.into(),
-            wayland_display: std::env::var("WAYLAND_DISPLAY").ok()?,
-            display: std::env::var("DISPLAY").ok(),
-            dbus_session_bus_address: std::env::var("DBUS_SESSION_BUS_ADDRESS").ok(),
-        })
-    }
-
-    pub fn wayland_socket(&self) -> PathBuf {
-        self.xdg_runtime_dir.join(&self.wayland_display)
-    }
-
-    pub fn chroot_dbus_address(&self, uid: u32) -> Option<String> {
-        let address = self.dbus_session_bus_address.as_ref()?;
-        let path = address.strip_prefix("unix:path=")?;
-        let host_path = PathBuf::from(path);
-
-        if let Ok(relative) = host_path.strip_prefix(&self.xdg_runtime_dir) {
-            return Some(format!(
-                "unix:path=/run/user/{}/{}",
-                uid,
-                relative.display()
-            ));
-        }
-
-        Some(address.clone())
     }
 }

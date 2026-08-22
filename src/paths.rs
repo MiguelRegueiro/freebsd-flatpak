@@ -62,10 +62,10 @@ impl Installation {
         for path in [
             self.apps(),
             self.runtimes(),
+            self.repo(),
             self.refs(),
             self.extensions(),
             self.exports(),
-            self.downloads(),
             self.remote_metadata(),
             self.chroots(),
             self.runs(),
@@ -102,6 +102,9 @@ impl Installation {
     pub fn runtimes(&self) -> PathBuf {
         self.data_root.join("runtimes")
     }
+    pub fn repo(&self) -> PathBuf {
+        self.data_root.join("repo")
+    }
     pub fn refs(&self) -> PathBuf {
         self.data_root.join("refs")
     }
@@ -114,14 +117,8 @@ impl Installation {
     pub fn export_share(&self) -> PathBuf {
         self.exports().join("share")
     }
-    pub fn downloads(&self) -> PathBuf {
-        self.cache_root.join("downloads")
-    }
     pub fn remote_metadata(&self) -> PathBuf {
         self.cache_root.join("remote")
-    }
-    pub fn objects(&self) -> PathBuf {
-        self.downloads().join("objects")
     }
     pub fn chroots(&self) -> PathBuf {
         self.runtime_root.join("chroots")
@@ -192,10 +189,7 @@ mod tests {
             paths.app("org.example.App"),
             root.join("xdg-data/freebsd-flatpak/apps/org.example.App")
         );
-        assert_eq!(
-            paths.downloads(),
-            root.join("xdg-cache/freebsd-flatpak/downloads")
-        );
+        assert_eq!(paths.repo(), root.join("xdg-data/freebsd-flatpak/repo"));
         assert_eq!(
             paths.chroots(),
             root.join("xdg-runtime/freebsd-flatpak/chroots")

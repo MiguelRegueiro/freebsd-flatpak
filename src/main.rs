@@ -10,6 +10,7 @@ mod portal;
 mod runtime;
 mod sandbox;
 mod state;
+mod storage;
 mod video;
 
 use anyhow::{bail, Context, Result};
@@ -17,6 +18,7 @@ use paths::Installation;
 use sandbox::SandboxBackend;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 fn main() -> Result<()> {
     let paths = Installation::from_env()?;
@@ -31,6 +33,8 @@ fn main() -> Result<()> {
         Some("install") => cmd_install(&paths, args.collect()),
         Some("list") => cmd_list(&paths, args.collect()),
         Some("permissions") => cmd_permissions(&paths, args.collect()),
+        Some("prune") => cmd_prune(&paths, args.collect()),
+        Some("repair") => cmd_repair(&paths, args.collect()),
         Some("run") => cmd_run(&paths, args.collect()),
         Some("uninstall") => cmd_uninstall(&paths, args.collect()),
         Some("update") => cmd_update(&paths, args.collect()),
@@ -77,16 +81,56 @@ fn cmd_install(paths: &Installation, args: Vec<String>) -> Result<()> {
     if args.len() != 1 {
         bail!("usage: flatpak install <app-id>");
     }
+    let total_started = Instant::now();
+    println!("==> Resolving {}", args[0]);
     let installed = runtime::install_app(paths, &args[0])?;
+    let was_installed = state::get_app(paths, &installed.app_id).is_ok();
     let record = state::record_install(paths, &installed)?;
-    let export = desktop::export_app(paths, &record)?;
-    println!("Installed {}", installed.app_id);
-    println!("  app ref: {}", installed.app_ref);
-    println!("  app commit: {}", installed.app_commit);
-    println!("  runtime: {}", installed.runtime_ref);
-    println!("  runtime commit: {}", installed.runtime_commit);
-    println!("  command: {}", installed.command);
-    print_export_report(paths, &export);
+    println!("\n==> Publishing desktop integration");
+    let export_started = Instant::now();
+    let export = match desktop::export_app(paths, &record) {
+        Ok(export) => export,
+        Err(error) => {
+            if !was_installed {
+                let _ = desktop::remove_export(paths, &record.app_id);
+                let _ = state::remove_app_record(paths, &record.app_id);
+            }
+            return Err(error).context("publish desktop integration");
+        }
+    };
+    let export_elapsed = export_started.elapsed();
+    println!("\n==> Installed {}", installed.app_id);
+    println!("    Runtime: {}", installed.runtime_ref);
+    println!("    Launch: flatpak run {}", installed.app_id);
+    if export.desktop_entries > 0 {
+        println!("    Desktop entries: {}", export.desktop_entries);
+    }
+    if !export.skipped.is_empty() {
+        let skipped = export
+            .skipped
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("    Skipped host-incompatible exports: {skipped}");
+    }
+    if std::env::var_os("FREEBSD_FLATPAK_BENCHMARK").is_some() {
+        println!("\nBenchmark timings:");
+        println!(
+            "  resolution: {:.3}s",
+            installed.timings.resolution.as_secs_f64()
+        );
+        println!(
+            "  libostree pull: {:.3}s",
+            installed.timings.pull.as_secs_f64()
+        );
+        println!(
+            "  checkout: {:.3}s",
+            installed.timings.checkout.as_secs_f64()
+        );
+        println!("  desktop export: {:.3}s", export_elapsed.as_secs_f64());
+        println!("  total: {:.3}s", total_started.elapsed().as_secs_f64());
+    }
     Ok(())
 }
 
@@ -244,14 +288,36 @@ fn cmd_uninstall(paths: &Installation, args: Vec<String>) -> Result<()> {
     state::safe_remove_dir(paths, &paths.chroots().join(app_id))?;
 
     if state::runtime_is_required(paths, &record.runtime_ref)? {
+        runtime::remove_repo_refs(paths, &[&record.app_ref])?;
         println!("Uninstalled {app_id}");
         println!("  kept shared runtime {}", record.runtime_ref);
     } else {
         state::safe_remove_dir(paths, &record.runtime_dir)?;
         state::remove_runtime_record(paths, &record.runtime_ref)?;
+        let runtime_ref = format!("runtime/{}", record.runtime_ref);
+        runtime::remove_repo_refs(paths, &[&record.app_ref, &runtime_ref])?;
         println!("Uninstalled {app_id}");
         println!("  removed unused runtime {}", record.runtime_ref);
     }
+    Ok(())
+}
+
+fn cmd_repair(paths: &Installation, args: Vec<String>) -> Result<()> {
+    if !args.is_empty() {
+        bail!("usage: flatpak repair");
+    }
+    println!("Checking OSTree object integrity...");
+    let checked = runtime::repair_repo(paths)?;
+    println!("Checked {checked} objects; no corruption found");
+    Ok(())
+}
+
+fn cmd_prune(paths: &Installation, args: Vec<String>) -> Result<()> {
+    if !args.is_empty() {
+        bail!("usage: flatpak prune");
+    }
+    let (total, pruned, bytes) = runtime::prune_repo(paths)?;
+    println!("Pruned {pruned} of {total} objects ({bytes} bytes reclaimed)");
     Ok(())
 }
 
@@ -524,6 +590,8 @@ fn print_usage() {
     eprintln!("  flatpak install <app-id>");
     eprintln!("  flatpak list");
     eprintln!("  flatpak permissions <app-id>");
+    eprintln!("  flatpak prune");
+    eprintln!("  flatpak repair");
     eprintln!("  flatpak run <app-id> [-- app-args...]");
     eprintln!("  flatpak uninstall <app-id>");
     eprintln!("  flatpak update [app-id...]");
