@@ -117,22 +117,56 @@ fn new_instance_id() -> String {
 
 struct PendingRunRecord {
     path: PathBuf,
+    deployment: state::AppRecord,
+    instance_id: String,
+    root: PathBuf,
+    extension_refs: Vec<String>,
     committed: bool,
 }
 
 impl PendingRunRecord {
-    fn new(paths: &Installation, app_id: &str, instance_id: &str, root: &Path) -> Result<Self> {
-        let path =
-            state::write_run_record(paths, app_id, instance_id, root, std::process::id(), 0)?;
+    fn new(paths: &Installation, app: &FlatpakApp, instance_id: &str, root: &Path) -> Result<Self> {
+        let deployment =
+            state::pinned_deployment_for_app(paths, &app.app_id, &app.app_dir, &app.runtime_dir)?;
+        let path = state::write_pinned_run_record(
+            paths,
+            instance_id,
+            root,
+            std::process::id(),
+            0,
+            &deployment,
+        )?;
         Ok(Self {
             path,
+            deployment,
+            instance_id: instance_id.to_string(),
+            root: root.to_path_buf(),
+            extension_refs: Vec::new(),
             committed: false,
         })
     }
 
-    fn commit(mut self) -> PathBuf {
+    fn set_extensions(&mut self, paths: &Installation, extension_refs: Vec<String>) -> Result<()> {
+        state::write_pinned_run_record_with_extensions(
+            paths,
+            &self.instance_id,
+            &self.root,
+            std::process::id(),
+            0,
+            &self.deployment,
+            &extension_refs,
+        )?;
+        self.extension_refs = extension_refs;
+        Ok(())
+    }
+
+    fn commit(mut self) -> (PathBuf, state::AppRecord, Vec<String>) {
         self.committed = true;
-        self.path.clone()
+        (
+            self.path.clone(),
+            self.deployment.clone(),
+            self.extension_refs.clone(),
+        )
     }
 }
 
@@ -167,7 +201,7 @@ impl ChrootNullfsBackend {
             .chroots()
             .join(sandbox_name(&app.app_id))
             .join(&instance_id);
-        let pending_run = PendingRunRecord::new(&self.paths, &app.app_id, &instance_id, &root)?;
+        let mut pending_run = PendingRunRecord::new(&self.paths, app, &instance_id, &root)?;
         let metadata_path = app.app_dir.join("metadata");
         let network_enabled = app_allows_network(&metadata_path)?;
         let host_filesystem = HostFilesystem::from_metadata_file_for_user(
@@ -185,6 +219,19 @@ impl ChrootNullfsBackend {
         let host_graphics = HostGraphics::prepare(&self.paths, app, &instance_id)?;
         let host_video = HostVideo::prepare(&self.paths, app)?;
         let app_extensions = runtime::ensure_app_codec_extensions(&self.paths, app)?;
+        let mut extension_refs = host_graphics
+            .extension_refs()
+            .chain(host_video.extension_refs())
+            .map(ToOwned::to_owned)
+            .chain(
+                app_extensions
+                    .iter()
+                    .map(|extension| extension.ref_name.clone()),
+            )
+            .collect::<Vec<_>>();
+        extension_refs.sort();
+        extension_refs.dedup();
+        pending_run.set_extensions(&self.paths, extension_refs)?;
 
         prepare_root(
             &root,
@@ -196,9 +243,9 @@ impl ChrootNullfsBackend {
         host_filesystem.write_xdg_user_dirs_config(&root)?;
         host_audio.prepare(&root)?;
         host_fonts.prepare(&root)?;
+        let (run_record, deployment, extension_refs) = pending_run.commit();
         let mut instance = ChrootInstance::new(
             self.paths.clone(),
-            app.app_id.clone(),
             instance_id,
             root,
             uid,
@@ -212,7 +259,9 @@ impl ChrootNullfsBackend {
             host_graphics,
             host_video,
             app_extensions,
-            pending_run.commit(),
+            run_record,
+            deployment,
+            extension_refs,
         );
 
         instance.mount_nullfs(&app.runtime_dir.join("files"), "usr", true)?;
@@ -290,7 +339,6 @@ impl SandboxBackend for ChrootNullfsBackend {
 #[derive(Debug)]
 struct ChrootInstance {
     paths: Installation,
-    app_id: String,
     instance_id: String,
     root: PathBuf,
     uid: u32,
@@ -306,6 +354,8 @@ struct ChrootInstance {
     app_extensions: Vec<runtime::AppExtension>,
     owned_mounts: Vec<OwnedMount>,
     run_record: PathBuf,
+    deployment: state::AppRecord,
+    extension_refs: Vec<String>,
     cleaned: bool,
 }
 
@@ -319,7 +369,6 @@ impl ChrootInstance {
     #[allow(clippy::too_many_arguments)]
     fn new(
         paths: Installation,
-        app_id: String,
         instance_id: String,
         root: PathBuf,
         uid: u32,
@@ -334,10 +383,11 @@ impl ChrootInstance {
         host_video: HostVideo,
         app_extensions: Vec<runtime::AppExtension>,
         run_record: PathBuf,
+        deployment: state::AppRecord,
+        extension_refs: Vec<String>,
     ) -> Self {
         Self {
             paths,
-            app_id,
             instance_id,
             root,
             uid,
@@ -353,6 +403,8 @@ impl ChrootInstance {
             app_extensions,
             owned_mounts: Vec::new(),
             run_record,
+            deployment,
+            extension_refs,
             cleaned: false,
         }
     }
@@ -567,13 +619,14 @@ impl ChrootInstance {
         LAST_SIGNAL.store(0, Ordering::SeqCst);
         let mut child = command.spawn().context("launch app through chroot")?;
         ACTIVE_CHILD_PID.store(child.id() as i32, Ordering::SeqCst);
-        state::write_run_record(
+        state::write_pinned_run_record_with_extensions(
             &self.paths,
-            &self.app_id,
             &self.instance_id,
             &self.root,
             std::process::id(),
             child.id(),
+            &self.deployment,
+            &self.extension_refs,
         )?;
         let status = child.wait().context("wait for app process")?;
         ACTIVE_CHILD_PID.store(0, Ordering::SeqCst);
@@ -611,6 +664,7 @@ impl ChrootInstance {
         if errors.is_empty() {
             remove_instance_root(&self.root)?;
             state::remove_run_record(&self.run_record)?;
+            state::cleanup_retired_deployments(&self.paths)?;
             self.cleaned = true;
             Ok(())
         } else {

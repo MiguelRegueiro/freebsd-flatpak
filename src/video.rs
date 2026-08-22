@@ -32,6 +32,10 @@ impl HostVideo {
         Ok(Self { vaapi, warnings })
     }
 
+    pub fn extension_refs(&self) -> impl Iterator<Item = &str> {
+        self.vaapi.iter().map(|vaapi| vaapi.ref_name())
+    }
+
     pub fn runtime_mounts(&self) -> Vec<VideoMount> {
         self.vaapi
             .iter()

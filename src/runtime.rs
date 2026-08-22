@@ -126,6 +126,17 @@ pub struct RemoteMetadata {
 }
 
 impl RemoteMetadata {
+    #[cfg(test)]
+    pub(crate) fn empty_for_test(root: &Path) -> Self {
+        Self {
+            arch: "x86_64".to_string(),
+            refs: Vec::new(),
+            remote_dir: root.join("remote"),
+            summary_path: root.join("summary"),
+            collection_id: None,
+        }
+    }
+
     pub fn resolve_exact_ref(&self, app_ref: &str) -> Result<RemoteApp> {
         let remote_ref = self
             .refs
@@ -227,6 +238,18 @@ impl RemoteMetadata {
     }
 }
 
+impl RuntimeGlExtension {
+    pub fn ref_name(&self) -> &str {
+        &self.ref_name
+    }
+}
+
+impl RuntimeVaapiExtension {
+    pub fn ref_name(&self) -> &str {
+        &self.ref_name
+    }
+}
+
 pub fn inspect_refs(paths: &Installation, refs: &[String]) -> Result<()> {
     let refs: Vec<String> = if refs.is_empty() {
         vec![
@@ -269,6 +292,11 @@ pub fn install_app(paths: &Installation, app_id: &str) -> Result<InstalledApp> {
 
 pub fn repair_repo(paths: &Installation) -> Result<usize> {
     Storage::open(paths)?.fsck_all()
+}
+
+pub fn recover_storage(paths: &Installation) -> Result<()> {
+    drop(Storage::open(paths)?);
+    Ok(())
 }
 
 pub fn prune_repo(paths: &Installation) -> Result<(i32, i32, u64)> {
@@ -590,10 +618,15 @@ fn checkout_remote_app(
     force_app: bool,
     force_runtime: bool,
 ) -> Result<InstalledApp> {
-    let app_dir = paths.app(&remote.app_id);
-    let runtime_dir = paths
-        .runtimes()
-        .join(runtime_checkout_dir(&remote.runtime_ref));
+    let app_dir =
+        generation_checkout_dir(&paths.app(&remote.app_id), &remote.app_commit, force_app);
+    let runtime_dir = generation_checkout_dir(
+        &paths
+            .runtimes()
+            .join(runtime_checkout_dir(&remote.runtime_ref)),
+        &remote.runtime_commit,
+        force_runtime,
+    );
     let (_, summary_path, _) = load_arch_summary(paths)?;
     let summary =
         fs::read(&summary_path).with_context(|| format!("read {}", summary_path.display()))?;
@@ -641,6 +674,22 @@ fn checkout_remote_app(
             checkout: timings.checkout,
         },
     })
+}
+
+fn generation_checkout_dir(base: &Path, commit: &str, force: bool) -> PathBuf {
+    let ordinary = base.join(commit);
+    if !force || !ordinary.exists() {
+        return ordinary;
+    }
+    // A forced repair must not replace a checkout which a sandbox may have
+    // pinned.  The app state record will atomically select this repaired copy.
+    for sequence in 0u64.. {
+        let candidate = base.join(format!("{commit}.repair-{}-{sequence}", std::process::id()));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
 }
 
 pub fn ensure_default_gl_extension(
@@ -1672,8 +1721,123 @@ pub fn runtime_checkout_dir(runtime_ref: &str) -> String {
     format!("{name}-{}", branch.replace('/', "_"))
 }
 
+pub fn required_extension_refs(
+    app_dir: &Path,
+    runtime_ref: &str,
+    runtime_dir: &Path,
+    installed_extension_refs: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let parts = split_runtime_ref(runtime_ref)?;
+    let mut refs = BTreeSet::new();
+    for metadata_path in [app_dir.join("metadata"), runtime_dir.join("metadata")] {
+        let Ok(metadata) = fs::read_to_string(&metadata_path) else {
+            continue;
+        };
+        for section in metadata_sections_with_prefix(&metadata, "Extension ") {
+            let point = ExtensionPoint::from_metadata(&metadata, &section, &parts);
+            refs.extend(
+                installed_extension_refs
+                    .iter()
+                    .filter(|ref_name| point.keeps_installed_ref(ref_name))
+                    .cloned(),
+            );
+        }
+    }
+    Ok(refs)
+}
+
+struct ExtensionPoint {
+    name: String,
+    arch: String,
+    versions: BTreeSet<String>,
+    subdirectories: bool,
+    active_gl_driver_condition: bool,
+    autoprune_unless_active_gl_driver: bool,
+}
+
+impl ExtensionPoint {
+    fn from_metadata(metadata: &str, section: &str, runtime: &RuntimeRefParts) -> Self {
+        let versions = metadata_value(metadata, section, "version")
+            .into_iter()
+            .chain(
+                metadata_value(metadata, section, "versions")
+                    .into_iter()
+                    .flat_map(|versions| {
+                        versions
+                            .split(';')
+                            .map(str::trim)
+                            .filter(|version| !version.is_empty())
+                            .map(ToOwned::to_owned)
+                            .collect::<Vec<_>>()
+                    }),
+            )
+            .collect::<BTreeSet<_>>();
+        let versions = if versions.is_empty() {
+            BTreeSet::from([runtime.branch.clone()])
+        } else {
+            versions
+        };
+        let condition_is_active_gl_driver = |key| {
+            metadata_value(metadata, section, key).is_some_and(|value| {
+                value
+                    .split(';')
+                    .map(str::trim)
+                    .any(|v| v == "active-gl-driver")
+            })
+        };
+        Self {
+            name: section.trim_start_matches("Extension ").to_string(),
+            arch: runtime.arch.clone(),
+            versions,
+            subdirectories: metadata_value(metadata, section, "subdirectories")
+                .is_some_and(|value| value == "true"),
+            active_gl_driver_condition: condition_is_active_gl_driver("download-if")
+                || condition_is_active_gl_driver("enable-if"),
+            autoprune_unless_active_gl_driver: metadata_value(
+                metadata,
+                section,
+                "autoprune-unless",
+            )
+            .is_some_and(|value| {
+                value
+                    .split(';')
+                    .map(str::trim)
+                    .any(|item| item == "active-gl-driver")
+            }),
+        }
+    }
+
+    fn keeps_installed_ref(&self, ref_name: &str) -> bool {
+        let Some(candidate) = parse_runtime_ref(ref_name) else {
+            return false;
+        };
+        let name_matches = candidate.name == self.name
+            || ((self.subdirectories || self.active_gl_driver_condition)
+                && candidate
+                    .name
+                    .strip_prefix(&self.name)
+                    .is_some_and(|suffix| suffix.starts_with('.') && suffix.len() > 1));
+        if !name_matches
+            || candidate.arch != self.arch
+            || !self.versions.contains(&candidate.branch)
+        {
+            return false;
+        }
+
+        if self.active_gl_driver_condition || self.autoprune_unless_active_gl_driver {
+            return candidate.name == format!("{}.default", self.name);
+        }
+        true
+    }
+}
+
+fn parse_runtime_ref(ref_name: &str) -> Option<RuntimeRefParts> {
+    let runtime_ref = ref_name.strip_prefix("runtime/")?;
+    split_runtime_ref(runtime_ref).ok()
+}
+
 struct RuntimeRefParts {
-    _name: String,
+    name: String,
     arch: String,
     branch: String,
 }
@@ -1684,7 +1848,7 @@ fn split_runtime_ref(runtime_ref: &str) -> Result<RuntimeRefParts> {
     let arch = parts.next().context("missing runtime arch")?;
     let branch = parts.next().context("missing runtime branch")?;
     Ok(RuntimeRefParts {
-        _name: name.to_string(),
+        name: name.to_string(),
         arch: arch.to_string(),
         branch: branch.to_string(),
     })
@@ -1782,11 +1946,76 @@ fn bytes_to_checksum(variant: &Variant) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_appstream_info, parse_appstream_replacements,
-        resolve_current_app_id_from_replacements, select_history_commit, RemoteMetadata, RemoteRef,
+        generation_checkout_dir, parse_appstream_info, parse_appstream_replacements,
+        required_extension_refs, resolve_current_app_id_from_replacements, select_history_commit,
+        RemoteMetadata, RemoteRef,
     };
     use crate::storage::CommitInfo;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::fs;
+
+    #[test]
+    fn active_gl_default_subextension_is_required_by_runtime_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "freebsd-flatpak-runtime-gl-reachability-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let app = root.join("app");
+        let runtime = root.join("runtime");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&runtime).unwrap();
+        fs::write(
+            app.join("metadata"),
+            "[Application]\nname=org.example.App\n",
+        )
+        .unwrap();
+        fs::write(
+            runtime.join("metadata"),
+            "[Runtime]\nname=org.freedesktop.Platform\n\n[Extension org.freedesktop.Platform.GL]\ndirectory=lib/x86_64-linux-gnu/GL\nversions=25.08;25.08-extra;1.4\nsubdirectories=true\ndownload-if=active-gl-driver\nenable-if=active-gl-driver\nautoprune-unless=active-gl-driver\n",
+        )
+        .unwrap();
+        let gl_default = "runtime/org.freedesktop.Platform.GL.default/x86_64/25.08".to_string();
+        let installed = BTreeSet::from([
+            gl_default.clone(),
+            "runtime/org.freedesktop.Platform.GL.default/x86_64/24.08".to_string(),
+            "runtime/org.freedesktop.Platform.GL.vendor/x86_64/25.08".to_string(),
+        ]);
+
+        let required = required_extension_refs(
+            &app,
+            "org.freedesktop.Platform/x86_64/25.08",
+            &runtime,
+            &installed,
+        )
+        .unwrap();
+        assert_eq!(required, BTreeSet::from([gl_default]));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn historical_commit_uses_an_immutable_generation_path() {
+        let root = std::env::temp_dir().join(format!(
+            "freebsd-flatpak-runtime-generation-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let base = root.join("org.example.App");
+        fs::create_dir_all(base.join("commit-b")).unwrap();
+
+        assert_eq!(
+            generation_checkout_dir(&base, "commit-a", false),
+            base.join("commit-a")
+        );
+        assert_eq!(
+            generation_checkout_dir(&base, "commit-b", false),
+            base.join("commit-b")
+        );
+        let repaired = generation_checkout_dir(&base, "commit-b", true);
+        assert_ne!(repaired, base.join("commit-b"));
+        assert!(repaired.starts_with(&base));
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn exact_app_ref_does_not_require_appstream_metadata() {

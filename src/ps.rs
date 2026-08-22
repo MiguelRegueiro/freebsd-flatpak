@@ -101,7 +101,6 @@ pub fn output(paths: &Installation, args: Vec<String>) -> Result<String> {
         if launcher_pid <= 0 || !process_alive(launcher_pid) {
             continue;
         }
-        let app_id = record.get("app_id").context("run record missing app_id")?;
         instances.push(Instance {
             id: record
                 .get("instance_id")
@@ -113,7 +112,7 @@ pub fn output(paths: &Installation, args: Vec<String>) -> Result<String> {
                 .and_then(|value| value.parse::<u32>().ok())
                 .unwrap_or(0)
                 .to_string(),
-            app: state::get_app(paths, app_id)?,
+            app: state::app_from_run_record(paths, &record)?,
         });
     }
     instances.sort_by(|left, right| left.id.cmp(&right.id));
@@ -275,6 +274,33 @@ mod tests {
         .unwrap();
 
         assert_eq!(output(&paths, Vec::new()).unwrap(), "");
+    }
+
+    #[test]
+    fn pinned_columns_do_not_follow_a_later_current_generation() {
+        let paths = test_paths("pinned-generation");
+        write_app(&paths);
+        let old = state::get_app(&paths, "app.zen_browser.zen").unwrap();
+        state::write_pinned_run_record(
+            &paths,
+            "pinned",
+            &paths.chroots().join("pinned"),
+            std::process::id(),
+            0,
+            &old,
+        )
+        .unwrap();
+        fs::write(
+            paths.refs().join("apps/app.zen_browser.zen.ini"),
+            "app_id=app.zen_browser.zen\napp_ref=app/app.zen_browser.zen/x86_64/stable\napp_commit=app-new\napp_dir=apps/app.zen_browser.zen/app-new\narch=x86_64\nbranch=stable\nruntime_ref=org.freedesktop.Platform/x86_64/25.08\nruntime_commit=runtime-new\nruntime_dir=runtimes/org.freedesktop.Platform-25.08/runtime-new\ncommand=zen\n",
+        )
+        .unwrap();
+
+        let output = output(&paths, vec!["--columns=commit,runtime-commit".to_string()]).unwrap();
+        assert!(output.contains("app-commit"));
+        assert!(output.contains("runtime-commit"));
+        assert!(!output.contains("app-new"));
+        assert!(!output.contains("runtime-new"));
     }
 
     #[test]
