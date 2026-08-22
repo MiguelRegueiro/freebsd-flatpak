@@ -44,6 +44,7 @@ paths; no `XDG_DATA_DIRS` change is needed.
 flatpak search <query>
 flatpak install <app-id>
 flatpak list
+flatpak ps [--columns=instance,application,pid,child-pid]
 flatpak permissions <app-id>
 flatpak repair
 flatpak prune
@@ -51,6 +52,10 @@ flatpak run <app-id> -- <app-arguments>
 flatpak update [app-id...]
 flatpak uninstall <app-id>
 ```
+
+`flatpak ps` lists active application instances, including their instance ID,
+wrapper PID, application, and runtime. Use `--columns` to select debugging
+fields such as `child-pid`.
 
 User installations use `$XDG_DATA_HOME/freebsd-flatpak` for the private OSTree
 repository and transactional deployments, `$XDG_CACHE_HOME/freebsd-flatpak`

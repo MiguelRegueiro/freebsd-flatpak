@@ -10,6 +10,7 @@ Commands:
   list          List installed applications
   search        Search Flathub
   run           Run an application
+  ps            List running applications
   permissions   Show application permissions
   repair        Verify and repair the installation
   prune         Remove unused stored data

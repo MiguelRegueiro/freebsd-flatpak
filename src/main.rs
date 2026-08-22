@@ -7,6 +7,7 @@ mod graphics;
 mod linuxulator;
 mod paths;
 mod portal;
+mod ps;
 mod runtime;
 mod sandbox;
 mod state;
@@ -30,6 +31,7 @@ Commands:
   list          List installed applications
   search        Search Flathub
   run           Run an application
+  ps            List running applications
   permissions   Show application permissions
   repair        Verify and repair the installation
   prune         Remove unused stored data
@@ -57,6 +59,7 @@ fn main() -> Result<()> {
         Some("install") => cmd_install(&paths, args.collect()),
         Some("list") => cmd_list(&paths, args.collect()),
         Some("permissions") => cmd_permissions(&paths, args.collect()),
+        Some("ps") => cmd_ps(&paths, args.collect()),
         Some("prune") => cmd_prune(&paths, args.collect()),
         Some("repair") => cmd_repair(&paths, args.collect()),
         Some("run") => cmd_run(&paths, args.collect()),
@@ -177,6 +180,11 @@ fn cmd_list(paths: &Installation, args: Vec<String>) -> Result<()> {
             app.app_id, app.arch, app.branch, app.runtime_ref, app.command
         );
     }
+    Ok(())
+}
+
+fn cmd_ps(paths: &Installation, args: Vec<String>) -> Result<()> {
+    print!("{}", ps::output(paths, args)?);
     Ok(())
 }
 
@@ -614,6 +622,7 @@ fn print_usage() {
     eprintln!("  flatpak install <app-id>");
     eprintln!("  flatpak list");
     eprintln!("  flatpak permissions <app-id>");
+    eprintln!("  flatpak ps [--columns=FIELD,...]");
     eprintln!("  flatpak prune");
     eprintln!("  flatpak repair");
     eprintln!("  flatpak run <app-id> [-- app-args...]");
