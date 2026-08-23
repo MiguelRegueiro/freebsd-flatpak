@@ -1,6 +1,5 @@
 mod audio;
 mod cli;
-mod commands;
 mod cursor;
 mod desktop;
 mod filesystem;
@@ -9,7 +8,6 @@ mod graphics;
 mod linuxulator;
 mod paths;
 mod portal;
-mod ps;
 mod remote;
 mod runtime;
 mod sandbox;

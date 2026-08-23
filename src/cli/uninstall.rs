@@ -1,4 +1,4 @@
-use crate::cli::transaction::{
+use super::confirmation::{
     present_and_confirm, TransactionEntry, TransactionOperation, TransactionOptions,
 };
 use crate::{desktop, paths::Installation, runtime, sandbox, state};

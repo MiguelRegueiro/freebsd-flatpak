@@ -101,5 +101,5 @@ pub(crate) fn present_and_confirm_with(
 }
 
 #[cfg(test)]
-#[path = "tests/transaction.rs"]
+#[path = "tests/confirmation.rs"]
 mod tests;

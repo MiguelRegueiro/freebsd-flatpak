@@ -1,5 +1,5 @@
 use super::*;
-use crate::commands::test_support::remote_app;
+use crate::cli::test_support::remote_app;
 use crate::{remote, storage};
 
 #[test]

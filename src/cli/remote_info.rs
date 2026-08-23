@@ -1,4 +1,3 @@
-use super::value_after_equals;
 use crate::{paths::Installation, remote, storage};
 use anyhow::{bail, Context, Result};
 use std::fmt::Write as _;
@@ -274,6 +273,10 @@ pub(super) fn parse_remote_info_args(args: Vec<String>) -> Result<RemoteInfoOpti
         commit,
         app_id: operands.remove(1),
     })
+}
+
+fn value_after_equals(arg: &str) -> &str {
+    arg.split_once('=').map(|(_, value)| value).unwrap_or("")
 }
 
 #[cfg(test)]

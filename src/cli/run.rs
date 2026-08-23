@@ -1,4 +1,3 @@
-use super::value_after_equals;
 use crate::{desktop, paths::Installation, runtime, sandbox, state};
 use anyhow::{Context, Result};
 use sandbox::SandboxBackend;
@@ -64,4 +63,8 @@ fn next_path(args: &mut impl Iterator<Item = String>, option: &str) -> Result<Pa
             .with_context(|| format!("missing value for {option}"))?,
     )
     .into())
+}
+
+fn value_after_equals(arg: &str) -> &str {
+    arg.split_once('=').map(|(_, value)| value).unwrap_or("")
 }

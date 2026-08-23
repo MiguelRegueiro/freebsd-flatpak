@@ -1,6 +1,6 @@
 use super::*;
-use crate::cli::transaction::TransactionOptions;
-use crate::commands::test_support::*;
+use crate::cli::confirmation::TransactionOptions;
+use crate::cli::test_support::*;
 use crate::{paths::Installation, remote, state};
 use std::path::PathBuf;
 

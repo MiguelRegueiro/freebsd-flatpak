@@ -1,5 +1,4 @@
-use super::value_after_equals;
-use crate::cli::transaction::{
+use super::confirmation::{
     present_and_confirm, TransactionEntry, TransactionOperation, TransactionOptions,
 };
 use crate::{desktop, paths::Installation, remote, runtime, state};
@@ -320,6 +319,10 @@ fn print_export_report(paths: &Installation, export: &desktop::ExportReport) {
             .join(", ");
         println!("  skipped host-incompatible exports: {skipped}");
     }
+}
+
+fn value_after_equals(arg: &str) -> &str {
+    arg.split_once('=').map(|(_, value)| value).unwrap_or("")
 }
 
 #[cfg(test)]

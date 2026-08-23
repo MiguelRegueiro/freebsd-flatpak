@@ -1,7 +1,7 @@
-use super::update::update_resolved;
-use crate::cli::transaction::{
+use super::confirmation::{
     present_and_confirm, TransactionEntry, TransactionOperation, TransactionOptions,
 };
+use super::update::update_resolved;
 use crate::{desktop, paths::Installation, remote, runtime, state};
 use anyhow::{bail, Context, Result};
 use std::time::Instant;

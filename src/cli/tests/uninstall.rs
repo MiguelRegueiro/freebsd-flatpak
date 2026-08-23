@@ -1,5 +1,5 @@
 use super::*;
-use crate::commands::test_support::*;
+use crate::cli::test_support::*;
 use crate::{paths::Installation, runtime, state};
 use std::collections::BTreeSet;
 use std::fs;

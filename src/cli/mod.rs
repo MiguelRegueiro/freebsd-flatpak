@@ -1,8 +1,20 @@
+mod confirmation;
 mod help;
-pub(crate) mod transaction;
+mod install;
+mod list;
+mod permissions;
+mod prune;
+mod ps;
+mod remote_info;
+mod repair;
+mod run;
+mod search;
+mod uninstall;
+mod update;
 
-use crate::{commands, startup};
-use anyhow::{bail, Result};
+use crate::{remote, startup};
+use anyhow::{bail, Context, Result};
+use std::path::PathBuf;
 
 pub(crate) fn run() -> Result<()> {
     let all_args = std::env::args().skip(1).collect::<Vec<_>>();
@@ -30,19 +42,26 @@ pub(crate) fn run() -> Result<()> {
 
     let paths = startup::initialize()?;
     match command.as_deref() {
-        Some("search") => commands::cmd_search(&paths, args.collect()),
-        Some("install") => commands::cmd_install(&paths, args.collect()),
-        Some("list") => commands::cmd_list(&paths, args.collect()),
-        Some("permissions") => commands::cmd_permissions(&paths, args.collect()),
-        Some("ps") => commands::cmd_ps(&paths, args.collect()),
-        Some("prune") => commands::cmd_prune(&paths, args.collect()),
-        Some("repair") => commands::cmd_repair(&paths, args.collect()),
-        Some("run") => commands::cmd_run(&paths, args.collect()),
-        Some("remote-info") => commands::cmd_remote_info(&paths, args.collect()),
-        Some("uninstall" | "remove") => commands::cmd_uninstall(&paths, args.collect()),
-        Some("update" | "upgrade") => commands::cmd_update(&paths, args.collect()),
-        Some("checkout") => commands::internal::checkout(&paths, args),
-        Some("inspect") => commands::internal::inspect(&paths, args.collect()),
+        Some("search") => search::cmd_search(&paths, args.collect()),
+        Some("install") => install::cmd_install(&paths, args.collect()),
+        Some("list") => list::cmd_list(&paths, args.collect()),
+        Some("permissions") => permissions::cmd_permissions(&paths, args.collect()),
+        Some("ps") => ps::cmd_ps(&paths, args.collect()),
+        Some("prune") => prune::cmd_prune(&paths, args.collect()),
+        Some("repair") => repair::cmd_repair(&paths, args.collect()),
+        Some("run") => run::cmd_run(&paths, args.collect()),
+        Some("remote-info") => remote_info::cmd_remote_info(&paths, args.collect()),
+        Some("uninstall" | "remove") => uninstall::cmd_uninstall(&paths, args.collect()),
+        Some("update" | "upgrade") => update::cmd_update(&paths, args.collect()),
+        Some("checkout") => {
+            let ref_name = args.next().context("missing ref")?;
+            let dest = args.next().context("missing destination")?;
+            remote::checkout_ref(&paths, &ref_name, PathBuf::from(dest))
+        }
+        Some("inspect") => {
+            let refs = args.collect::<Vec<_>>();
+            remote::inspect_refs(&paths, &refs)
+        }
         Some(cmd) => bail!("unknown command: {cmd}"),
         None => {
             help::print_usage();
@@ -50,3 +69,7 @@ pub(crate) fn run() -> Result<()> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/support.rs"]
+mod test_support;
