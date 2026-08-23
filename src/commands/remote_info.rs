@@ -1,12 +1,12 @@
 use super::value_after_equals;
-use crate::{paths::Installation, runtime, storage};
+use crate::{paths::Installation, remote, storage};
 use anyhow::{bail, Context, Result};
 use std::fmt::Write as _;
 use std::io::IsTerminal;
 
 pub(crate) fn cmd_remote_info(paths: &Installation, args: Vec<String>) -> Result<()> {
     let options = parse_remote_info_args(args)?;
-    let metadata = runtime::load_remote_metadata(paths)?;
+    let metadata = remote::load_remote_metadata(paths)?;
     let remote = metadata.resolve_app(&options.app_id, true)?;
     let appstream = match metadata.appstream_info(&remote.app_id) {
         Ok(info) => info,
@@ -61,9 +61,9 @@ pub(crate) fn cmd_remote_info(paths: &Installation, args: Vec<String>) -> Result
 }
 
 pub(super) fn remote_log_output(
-    remote: &runtime::RemoteApp,
+    remote: &remote::RemoteApp,
     history: &[storage::CommitInfo],
-    appstream: Option<&runtime::AppstreamInfo>,
+    appstream: Option<&remote::AppstreamInfo>,
     remote_collection: Option<&str>,
     styled: bool,
 ) -> String {
@@ -97,9 +97,9 @@ pub(super) fn remote_log_output(
 }
 
 pub(super) fn remote_info_output(
-    remote: &runtime::RemoteApp,
+    remote: &remote::RemoteApp,
     commit: Option<&storage::CommitInfo>,
-    appstream: Option<&runtime::AppstreamInfo>,
+    appstream: Option<&remote::AppstreamInfo>,
     remote_collection: Option<&str>,
     historical: bool,
     styled: bool,
@@ -129,8 +129,8 @@ pub(super) fn remote_info_output(
 }
 
 fn remote_metadata_output(
-    remote: &runtime::RemoteApp,
-    appstream: Option<&runtime::AppstreamInfo>,
+    remote: &remote::RemoteApp,
+    appstream: Option<&remote::AppstreamInfo>,
     version: Option<&str>,
     license: Option<&str>,
     collection: Option<&str>,

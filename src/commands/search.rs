@@ -1,11 +1,11 @@
-use crate::{paths::Installation, runtime};
+use crate::{paths::Installation, remote};
 use anyhow::{bail, Result};
 
 pub(crate) fn cmd_search(paths: &Installation, args: Vec<String>) -> Result<()> {
     if args.len() != 1 {
         bail!("usage: flatpak search <query>");
     }
-    let results = runtime::search_apps(paths, &args[0])?;
+    let results = remote::search_apps(paths, &args[0])?;
     if results.is_empty() {
         println!("No matches");
         return Ok(());

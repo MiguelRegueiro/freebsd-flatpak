@@ -2,7 +2,7 @@ use super::update::update_resolved;
 use crate::cli::transaction::{
     present_and_confirm, TransactionEntry, TransactionOperation, TransactionOptions,
 };
-use crate::{desktop, paths::Installation, runtime, state};
+use crate::{desktop, paths::Installation, remote, runtime, state};
 use anyhow::{bail, Context, Result};
 use std::time::Instant;
 
@@ -43,7 +43,7 @@ pub(crate) fn cmd_install(paths: &Installation, args: Vec<String>) -> Result<()>
         println!("==> Resolving {}", options.app_id);
     }
     let resolution_started = Instant::now();
-    let remote = runtime::resolve_remote_app(paths, &options.app_id)?;
+    let remote = remote::resolve_remote_app(paths, &options.app_id)?;
     let resolution = resolution_started.elapsed();
     if let Ok(record) =
         state::get_app(paths, &options.app_id).or_else(|_| state::get_app(paths, &remote.app_id))

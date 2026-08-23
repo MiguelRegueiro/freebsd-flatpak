@@ -1,7 +1,7 @@
 use super::*;
 use crate::cli::transaction::TransactionOptions;
 use crate::commands::test_support::*;
-use crate::{paths::Installation, runtime, state};
+use crate::{paths::Installation, remote, state};
 use std::path::PathBuf;
 
 #[test]
@@ -77,7 +77,7 @@ fn active_run_does_not_block_noop_status_or_unrelated_target_selection() {
         "app/org.example.Other/x86_64/stable",
         "other-1",
     );
-    let metadata = runtime::RemoteMetadata::empty_for_test(&root);
+    let metadata = remote::RemoteMetadata::empty_for_test(&root);
     let selected = update_targets(
         vec![record, other.clone()],
         vec![other.app_id.clone()],

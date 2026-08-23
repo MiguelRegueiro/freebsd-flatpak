@@ -10,6 +10,7 @@ mod linuxulator;
 mod paths;
 mod portal;
 mod ps;
+mod remote;
 mod runtime;
 mod sandbox;
 mod startup;

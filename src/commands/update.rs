@@ -2,7 +2,7 @@ use super::value_after_equals;
 use crate::cli::transaction::{
     present_and_confirm, TransactionEntry, TransactionOperation, TransactionOptions,
 };
-use crate::{desktop, paths::Installation, runtime, state};
+use crate::{desktop, paths::Installation, remote, runtime, state};
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -17,7 +17,7 @@ pub(crate) fn cmd_update(paths: &Installation, args: Vec<String>) -> Result<()> 
         println!("No installed apps");
         return Ok(());
     }
-    let metadata = runtime::load_remote_metadata(paths)?;
+    let metadata = remote::load_remote_metadata(paths)?;
     let targets = update_targets(installed, options.app_ids, &metadata)?;
     let mut resolved = Vec::new();
     for target in targets {
@@ -39,13 +39,13 @@ pub(crate) fn cmd_update(paths: &Installation, args: Vec<String>) -> Result<()> 
 #[derive(Debug)]
 struct ResolvedUpdate {
     record: state::AppRecord,
-    remote: runtime::RemoteApp,
+    remote: remote::RemoteApp,
     status: UpdateStatus,
 }
 
 pub(super) fn update_resolved(
     paths: &Installation,
-    resolved: Vec<(state::AppRecord, runtime::RemoteApp)>,
+    resolved: Vec<(state::AppRecord, remote::RemoteApp)>,
     options: TransactionOptions,
 ) -> Result<()> {
     let mut plans = Vec::new();
@@ -187,7 +187,7 @@ pub(super) fn parse_update_args(args: Vec<String>) -> Result<UpdateOptions> {
 #[derive(Debug)]
 pub(super) struct UpdateTarget {
     pub(super) record: state::AppRecord,
-    pub(super) remote: Option<runtime::RemoteApp>,
+    pub(super) remote: Option<remote::RemoteApp>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -202,7 +202,7 @@ pub(super) struct UpdateStatus {
 pub(super) fn update_targets(
     installed: Vec<state::AppRecord>,
     args: Vec<String>,
-    metadata: &runtime::RemoteMetadata,
+    metadata: &remote::RemoteMetadata,
 ) -> Result<Vec<UpdateTarget>> {
     if args.is_empty() {
         return Ok(installed
@@ -253,7 +253,7 @@ pub(super) fn update_targets(
 pub(super) fn update_status(
     paths: &Installation,
     record: &state::AppRecord,
-    remote: &runtime::RemoteApp,
+    remote: &remote::RemoteApp,
 ) -> Result<UpdateStatus> {
     let app_dir = state::absolute(paths, &record.app_dir);
     let app_checkout_present = checkout_present(&app_dir);

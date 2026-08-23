@@ -1,4 +1,4 @@
-use crate::{paths::Installation, runtime, state};
+use crate::{paths::Installation, remote, state};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -41,8 +41,8 @@ pub(super) fn app_record(app_id: &str, app_ref: &str, app_commit: &str) -> state
     }
 }
 
-pub(super) fn remote_app(app_id: &str, app_ref: &str, app_commit: &str) -> runtime::RemoteApp {
-    runtime::RemoteApp {
+pub(super) fn remote_app(app_id: &str, app_ref: &str, app_commit: &str) -> remote::RemoteApp {
+    remote::RemoteApp {
         app_id: app_id.to_string(),
         app_ref: app_ref.to_string(),
         app_commit: app_commit.to_string(),

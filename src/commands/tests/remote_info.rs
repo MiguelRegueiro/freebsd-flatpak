@@ -1,6 +1,6 @@
 use super::*;
 use crate::commands::test_support::remote_app;
-use crate::{runtime, storage};
+use crate::{remote, storage};
 
 #[test]
 fn remote_info_parses_log_and_historical_commit_modes() {
@@ -65,7 +65,7 @@ fn remote_log_matches_flatpak_metadata_and_history_structure() {
         history_commit("tip", Some("old"), "Current build"),
         history_commit("old", Some("unavailable"), "Older build"),
     ];
-    let appstream = runtime::AppstreamInfo {
+    let appstream = remote::AppstreamInfo {
         name: Some("Example".to_string()),
         summary: Some("Do useful things".to_string()),
         version: Some("50.0".to_string()),
@@ -149,7 +149,7 @@ fn historical_remote_info_uses_commit_version_and_collection_only() {
         "app/org.example.App/x86_64/stable",
         "old",
     );
-    let appstream = runtime::AppstreamInfo {
+    let appstream = remote::AppstreamInfo {
         name: Some("Example".to_string()),
         summary: Some("Do useful things".to_string()),
         version: Some("current-version".to_string()),
