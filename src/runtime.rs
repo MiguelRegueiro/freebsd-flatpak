@@ -281,15 +281,6 @@ pub fn inspect_refs(paths: &Installation, refs: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub fn install_app(paths: &Installation, app_id: &str) -> Result<InstalledApp> {
-    let started = Instant::now();
-    let remote = resolve_remote_app(paths, app_id)?;
-    let resolution = started.elapsed();
-    let mut installed = checkout_remote_app(paths, &remote, false, false)?;
-    installed.timings.resolution = resolution;
-    Ok(installed)
-}
-
 pub fn repair_repo(paths: &Installation) -> Result<usize> {
     Storage::open(paths)?.fsck_all()
 }

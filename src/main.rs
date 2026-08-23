@@ -20,7 +20,7 @@ use sandbox::SandboxBackend;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::io::IsTerminal;
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -48,8 +48,31 @@ const UNINSTALL_HELP: &str = r#"Usage:
   flatpak uninstall [OPTION] [APP-ID]
 
 Options:
-  --unused      Remove unused runtime and extension refs
-  -h, --help    Show help
+  --unused             Remove unused runtime and extension refs
+  --delete-data        Delete app data
+  -y, --assumeyes      Automatically answer yes for all questions
+  --noninteractive     Produce minimal output and don't ask questions
+  -h, --help           Show help
+"#;
+
+const INSTALL_HELP: &str = r#"Usage:
+  flatpak install [OPTION] APP-ID
+
+Options:
+  --or-update          Update install if already installed
+  -y, --assumeyes      Automatically answer yes for all questions
+  --noninteractive     Produce minimal output and don't ask questions
+  -h, --help           Show help
+"#;
+
+const UPDATE_HELP: &str = r#"Usage:
+  flatpak update [OPTION] [APP-ID...]
+
+Options:
+  --commit=COMMIT      Update to this commit
+  -y, --assumeyes      Automatically answer yes for all questions
+  --noninteractive     Produce minimal output and don't ask questions
+  -h, --help           Show help
 "#;
 
 fn main() -> Result<()> {
@@ -60,10 +83,18 @@ fn main() -> Result<()> {
         print_help();
         return Ok(());
     }
-    if command.as_deref() == Some("uninstall") {
-        let uninstall_args = all_args[1..].to_vec();
-        if uninstall_args == ["-h"] || uninstall_args == ["--help"] {
-            print_uninstall_help();
+    let command_args = all_args.get(1..).unwrap_or_default();
+    if command_args == ["-h"] || command_args == ["--help"] {
+        match command.as_deref() {
+            Some("install") => print_install_help(),
+            Some("update" | "upgrade") => print_update_help(),
+            Some("uninstall" | "remove") => print_uninstall_help(),
+            _ => {}
+        }
+        if matches!(
+            command.as_deref(),
+            Some("install" | "update" | "upgrade" | "uninstall" | "remove")
+        ) {
             return Ok(());
         }
     }
@@ -87,8 +118,8 @@ fn main() -> Result<()> {
         Some("repair") => cmd_repair(&paths, args.collect()),
         Some("run") => cmd_run(&paths, args.collect()),
         Some("remote-info") => cmd_remote_info(&paths, args.collect()),
-        Some("uninstall") => cmd_uninstall(&paths, args.collect()),
-        Some("update") => cmd_update(&paths, args.collect()),
+        Some("uninstall" | "remove") => cmd_uninstall(&paths, args.collect()),
+        Some("update" | "upgrade") => cmd_update(&paths, args.collect()),
         Some("checkout") => {
             let ref_name = args.next().context("missing ref")?;
             let dest = args.next().context("missing destination")?;
@@ -400,42 +431,219 @@ fn parse_remote_info_args(args: Vec<String>) -> Result<RemoteInfoOptions> {
     })
 }
 
-fn cmd_install(paths: &Installation, args: Vec<String>) -> Result<()> {
-    if args.len() != 1 {
-        bail!("usage: flatpak install <app-id>");
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct TransactionOptions {
+    assumeyes: bool,
+    noninteractive: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransactionOperation {
+    Install,
+    Update,
+    Uninstall,
+}
+
+impl TransactionOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Update => "update",
+            Self::Uninstall => "uninstall",
+        }
     }
+
+    fn active_label(self) -> &'static str {
+        match self {
+            Self::Install => "Installing",
+            Self::Update => "Updating",
+            Self::Uninstall => "Uninstalling",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransactionEntry {
+    operation: TransactionOperation,
+    kind: &'static str,
+    ref_name: String,
+}
+
+fn present_and_confirm(entries: &[TransactionEntry], options: TransactionOptions) -> Result<bool> {
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    present_and_confirm_with(entries, options, &mut stdin.lock(), &mut stdout.lock())
+}
+
+fn present_and_confirm_with(
+    entries: &[TransactionEntry],
+    options: TransactionOptions,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<bool> {
+    if options.noninteractive {
+        for entry in entries {
+            writeln!(
+                output,
+                "{} {}",
+                entry.operation.active_label(),
+                entry.ref_name
+            )?;
+        }
+        return Ok(true);
+    }
+
+    writeln!(output, "\nChanges:")?;
+    writeln!(output, "  {:<11} {:<10} Ref", "Operation", "Type")?;
+    for entry in entries {
+        writeln!(
+            output,
+            "  {:<11} {:<10} {}",
+            entry.operation.label(),
+            entry.kind,
+            entry.ref_name
+        )?;
+    }
+    if options.assumeyes {
+        return Ok(true);
+    }
+
+    loop {
+        write!(output, "\nProceed with these changes? [Y/n]: ")?;
+        output.flush()?;
+        let mut answer = String::new();
+        if input.read_line(&mut answer)? == 0 {
+            writeln!(output, "Cancelled.")?;
+            return Ok(false);
+        }
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "" | "y" | "yes" => return Ok(true),
+            "n" | "no" => {
+                writeln!(output, "Cancelled.")?;
+                return Ok(false);
+            }
+            _ => writeln!(output, "Please answer y or n.")?,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct InstallOptions {
+    transaction: TransactionOptions,
+    or_update: bool,
+    app_id: String,
+}
+
+fn parse_install_args(args: Vec<String>) -> Result<InstallOptions> {
+    let mut transaction = TransactionOptions::default();
+    let mut or_update = false;
+    let mut operands = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-y" | "--assumeyes" => transaction.assumeyes = true,
+            "--noninteractive" => transaction.noninteractive = true,
+            "--or-update" => or_update = true,
+            _ if arg.starts_with('-') => bail!("unknown install option: {arg}"),
+            _ => operands.push(arg),
+        }
+    }
+    if operands.len() != 1 {
+        bail!("usage: flatpak install [OPTION] <app-id>");
+    }
+    Ok(InstallOptions {
+        transaction,
+        or_update,
+        app_id: operands.remove(0),
+    })
+}
+
+fn cmd_install(paths: &Installation, args: Vec<String>) -> Result<()> {
+    let options = parse_install_args(args)?;
     let total_started = Instant::now();
-    println!("==> Resolving {}", args[0]);
-    let installed = runtime::install_app(paths, &args[0])?;
-    let was_installed = state::get_app(paths, &installed.app_id).is_ok();
+    if !options.transaction.noninteractive {
+        println!("==> Resolving {}", options.app_id);
+    }
+    let resolution_started = Instant::now();
+    let remote = runtime::resolve_remote_app(paths, &options.app_id)?;
+    let resolution = resolution_started.elapsed();
+    if let Ok(record) =
+        state::get_app(paths, &options.app_id).or_else(|_| state::get_app(paths, &remote.app_id))
+    {
+        if !options.or_update {
+            println!("{} is already installed", remote.app_id);
+            return Ok(());
+        }
+        return update_resolved(paths, vec![(record, remote)], options.transaction);
+    }
+
+    let runtime_record = state::get_runtime(paths, &remote.runtime_ref)?;
+    let runtime_dir = runtime_record
+        .as_ref()
+        .map(|record| state::absolute(paths, &record.runtime_dir))
+        .unwrap_or_else(|| {
+            paths
+                .runtimes()
+                .join(runtime::runtime_checkout_dir(&remote.runtime_ref))
+        });
+    let runtime_changed = runtime_record
+        .as_ref()
+        .map(|record| record.runtime_commit.as_str())
+        != Some(remote.runtime_commit.as_str())
+        || !checkout_present(&runtime_dir);
+    let mut entries = vec![TransactionEntry {
+        operation: TransactionOperation::Install,
+        kind: "application",
+        ref_name: remote.app_ref.clone(),
+    }];
+    if runtime_changed {
+        entries.push(TransactionEntry {
+            operation: if runtime_record.is_some() {
+                TransactionOperation::Update
+            } else {
+                TransactionOperation::Install
+            },
+            kind: "runtime",
+            ref_name: format!("runtime/{}", remote.runtime_ref),
+        });
+    }
+    if !present_and_confirm(&entries, options.transaction)? {
+        return Ok(());
+    }
+
+    let mut installed = runtime::update_app(paths, &remote, true, runtime_changed)?;
+    installed.timings.resolution = resolution;
     let record = state::record_install(paths, &installed)?;
-    println!("\n==> Publishing desktop integration");
+    if !options.transaction.noninteractive {
+        println!("\n==> Publishing desktop integration");
+    }
     let export_started = Instant::now();
     let export = match desktop::export_app(paths, &record) {
         Ok(export) => export,
         Err(error) => {
-            if !was_installed {
-                let _ = desktop::remove_export(paths, &record.app_id);
-                let _ = state::remove_app_record(paths, &record.app_id);
-            }
+            let _ = desktop::remove_export(paths, &record.app_id);
+            let _ = state::remove_app_record(paths, &record.app_id);
             return Err(error).context("publish desktop integration");
         }
     };
     let export_elapsed = export_started.elapsed();
-    println!("\n==> Installed {}", installed.app_id);
-    println!("    Runtime: {}", installed.runtime_ref);
-    println!("    Launch: flatpak run {}", installed.app_id);
-    if export.desktop_entries > 0 {
-        println!("    Desktop entries: {}", export.desktop_entries);
+    if !options.transaction.noninteractive {
+        println!("\n==> Installed {}", installed.app_id);
+        println!("    Runtime: {}", installed.runtime_ref);
+        println!("    Launch: flatpak run {}", installed.app_id);
     }
-    if !export.skipped.is_empty() {
-        let skipped = export
-            .skipped
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!("    Skipped host-incompatible exports: {skipped}");
+    if !options.transaction.noninteractive {
+        if export.desktop_entries > 0 {
+            println!("    Desktop entries: {}", export.desktop_entries);
+        }
+        if !export.skipped.is_empty() {
+            let skipped = export
+                .skipped
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("    Skipped host-incompatible exports: {skipped}");
+        }
     }
     if std::env::var_os("FREEBSD_FLATPAK_BENCHMARK").is_some() {
         println!("\nBenchmark timings:");
@@ -590,25 +798,68 @@ fn cmd_run(paths: &Installation, args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct UninstallOptions {
+    transaction: TransactionOptions,
+    unused: bool,
+    delete_data: bool,
+    app_id: Option<String>,
+}
+
+fn parse_uninstall_args(args: Vec<String>) -> Result<UninstallOptions> {
+    let mut transaction = TransactionOptions::default();
+    let mut unused = false;
+    let mut delete_data = false;
+    let mut operands = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "-y" | "--assumeyes" => transaction.assumeyes = true,
+            "--noninteractive" => transaction.noninteractive = true,
+            "--unused" => unused = true,
+            "--delete-data" => delete_data = true,
+            _ if arg.starts_with('-') => bail!("unknown uninstall option: {arg}"),
+            _ => operands.push(arg),
+        }
+    }
+    if operands.len() > 1
+        || (unused && !operands.is_empty())
+        || (!unused && operands.is_empty())
+        || (unused && delete_data)
+    {
+        bail!("usage: flatpak uninstall [OPTION] [--unused | <app-id>]");
+    }
+    Ok(UninstallOptions {
+        transaction,
+        unused,
+        delete_data,
+        app_id: operands.pop(),
+    })
+}
+
 fn cmd_uninstall(paths: &Installation, args: Vec<String>) -> Result<()> {
-    if args == ["--unused"] {
-        return uninstall_unused(paths);
+    let options = parse_uninstall_args(args)?;
+    if options.unused {
+        return uninstall_unused(paths, options.transaction);
     }
-    if args.len() != 1 || args[0].starts_with('-') {
-        bail!("usage: flatpak uninstall [--unused | <app-id>]");
-    }
-    let app_id = &args[0];
-    if sandbox::app_has_mounts(paths, app_id)? {
-        bail!("{app_id} still has active sandbox mounts; stop it before uninstalling");
-    }
+    let app_id = options.app_id.as_deref().context("missing app id")?;
     let record = match state::get_app(paths, app_id) {
         Ok(record) => record,
         Err(_) => {
-            desktop::remove_export(paths, app_id)?;
             println!("{app_id} is not installed");
             return Ok(());
         }
     };
+    if sandbox::app_has_mounts(paths, app_id)? {
+        bail!("{app_id} still has active sandbox mounts; stop it before uninstalling");
+    }
+    let entries = [TransactionEntry {
+        operation: TransactionOperation::Uninstall,
+        kind: "application",
+        ref_name: record.app_ref.clone(),
+    }];
+    if !present_and_confirm(&entries, options.transaction)? {
+        return Ok(());
+    }
     desktop::remove_export(paths, app_id)?;
     if state::remove_app_record(paths, app_id)?.is_none() {
         println!("{app_id} is not installed");
@@ -620,21 +871,57 @@ fn cmd_uninstall(paths: &Installation, args: Vec<String>) -> Result<()> {
 
     runtime::remove_repo_refs(paths, &[&record.app_ref])?;
     state::cleanup_retired_deployments(paths)?;
-    println!("Uninstalled {app_id}");
-    println!(
-        "  kept runtime {} (remove with --unused)",
-        record.runtime_ref
-    );
+    if options.delete_data {
+        remove_app_data(paths, app_id)?;
+    }
+    if !options.transaction.noninteractive {
+        println!("Uninstalled {app_id}");
+        println!(
+            "  kept runtime {} (remove with --unused)",
+            record.runtime_ref
+        );
+        if options.delete_data {
+            println!("  deleted app data");
+        }
+    }
     Ok(())
 }
 
-fn uninstall_unused(paths: &Installation) -> Result<()> {
-    let removed = remove_unused_deployment_checkouts(paths)?;
-    if removed.is_empty() {
-        println!("Nothing unused to uninstall");
+fn remove_app_data(paths: &Installation, app_id: &str) -> Result<()> {
+    let path = paths.app_data(app_id)?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
+    };
+    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(&path).with_context(|| format!("delete app data {}", path.display()))
     } else {
-        let refs = removed.iter().map(String::as_str).collect::<Vec<_>>();
-        runtime::remove_repo_refs(paths, &refs)?;
+        fs::remove_file(&path).with_context(|| format!("delete app data {}", path.display()))
+    }
+}
+
+fn uninstall_unused(paths: &Installation, options: TransactionOptions) -> Result<()> {
+    let plan = plan_unused_deployment_checkouts(paths)?;
+    if plan.is_empty() {
+        println!("Nothing unused to uninstall");
+        return Ok(());
+    }
+    let entries = plan
+        .iter()
+        .map(|item| TransactionEntry {
+            operation: TransactionOperation::Uninstall,
+            kind: item.kind,
+            ref_name: item.ref_name.clone(),
+        })
+        .collect::<Vec<_>>();
+    if !present_and_confirm(&entries, options)? {
+        return Ok(());
+    }
+    let removed = apply_unused_deployment_plan(paths, plan)?;
+    let refs = removed.iter().map(String::as_str).collect::<Vec<_>>();
+    runtime::remove_repo_refs(paths, &refs)?;
+    if !options.noninteractive {
         for ref_name in removed {
             println!("Uninstalled {ref_name}");
         }
@@ -642,7 +929,15 @@ fn uninstall_unused(paths: &Installation) -> Result<()> {
     Ok(())
 }
 
-fn remove_unused_deployment_checkouts(paths: &Installation) -> Result<Vec<String>> {
+#[derive(Debug)]
+struct UnusedRemoval {
+    ref_name: String,
+    kind: &'static str,
+    deployment_paths: BTreeSet<PathBuf>,
+    runtime_ref: Option<String>,
+}
+
+fn plan_unused_deployment_checkouts(paths: &Installation) -> Result<Vec<UnusedRemoval>> {
     let apps = state::list_apps(paths)?;
     let runs = state::read_run_records(paths)?;
     let mut runtime_roots = apps
@@ -711,28 +1006,56 @@ fn remove_unused_deployment_checkouts(paths: &Installation) -> Result<Vec<String
             .insert(state::absolute(paths, &runtime.runtime_dir));
     }
 
-    let mut removed = Vec::new();
+    let mut plan = Vec::new();
     for (runtime_ref, deployment_paths) in runtime_candidates {
         if runtime_roots.contains(&runtime_ref) {
             continue;
         }
-        for deployment_path in deployment_paths {
-            state::safe_remove_dir(paths, &deployment_path)?;
-        }
-        state::remove_runtime_record(paths, &runtime_ref)?;
-        removed.push(format!("runtime/{runtime_ref}"));
+        plan.push(UnusedRemoval {
+            ref_name: format!("runtime/{runtime_ref}"),
+            kind: "runtime",
+            deployment_paths,
+            runtime_ref: Some(runtime_ref),
+        });
     }
 
     for (path, ref_name) in installed_extensions {
         if required_extensions.contains(&ref_name) {
             continue;
         }
-        state::safe_remove_dir(paths, &path)?;
-        removed.push(ref_name);
+        plan.push(UnusedRemoval {
+            ref_name,
+            kind: "extension",
+            deployment_paths: BTreeSet::from([path]),
+            runtime_ref: None,
+        });
     }
 
+    Ok(plan)
+}
+
+fn apply_unused_deployment_plan(
+    paths: &Installation,
+    plan: Vec<UnusedRemoval>,
+) -> Result<Vec<String>> {
+    let mut removed = Vec::new();
+    for item in plan {
+        for deployment_path in item.deployment_paths {
+            state::safe_remove_dir(paths, &deployment_path)?;
+        }
+        if let Some(runtime_ref) = item.runtime_ref {
+            state::remove_runtime_record(paths, &runtime_ref)?;
+        }
+        removed.push(item.ref_name);
+    }
     state::cleanup_retired_deployments(paths)?;
     Ok(removed)
+}
+
+#[cfg(test)]
+fn remove_unused_deployment_checkouts(paths: &Installation) -> Result<Vec<String>> {
+    let plan = plan_unused_deployment_checkouts(paths)?;
+    apply_unused_deployment_plan(paths, plan)
 }
 
 fn cmd_repair(paths: &Installation, args: Vec<String>) -> Result<()> {
@@ -766,27 +1089,85 @@ fn cmd_update(paths: &Installation, args: Vec<String>) -> Result<()> {
     }
     let metadata = runtime::load_remote_metadata(paths)?;
     let targets = update_targets(installed, options.app_ids, &metadata)?;
-
-    let mut touched_runtimes = BTreeSet::new();
+    let mut resolved = Vec::new();
     for target in targets {
-        let record = target.record;
         let remote = if let Some(commit) = options.commit.as_deref() {
-            metadata.resolve_app_commit(paths, &record.app_ref, commit)?
+            metadata.resolve_app_commit(paths, &target.record.app_ref, commit)?
         } else {
             match target.remote {
                 Some(remote) => remote,
                 None => metadata
-                    .resolve_exact_ref(&record.app_ref)
-                    .or_else(|_| metadata.resolve_app(&record.app_id, true))?,
+                    .resolve_exact_ref(&target.record.app_ref)
+                    .or_else(|_| metadata.resolve_app(&target.record.app_id, true))?,
             }
         };
-        let status = update_status(paths, &record, &remote)?;
+        resolved.push((target.record, remote));
+    }
+    update_resolved(paths, resolved, options.transaction)
+}
 
+#[derive(Debug)]
+struct ResolvedUpdate {
+    record: state::AppRecord,
+    remote: runtime::RemoteApp,
+    status: UpdateStatus,
+}
+
+fn update_resolved(
+    paths: &Installation,
+    resolved: Vec<(state::AppRecord, runtime::RemoteApp)>,
+    options: TransactionOptions,
+) -> Result<()> {
+    let mut plans = Vec::new();
+    for (record, remote) in resolved {
+        let status = update_status(paths, &record, &remote)?;
         if !status.app_changed && !status.runtime_changed {
-            println!("{} is up to date", record.app_id);
+            if !options.noninteractive {
+                println!("{} is up to date", record.app_id);
+            }
             continue;
         }
+        plans.push(ResolvedUpdate {
+            record,
+            remote,
+            status,
+        });
+    }
+    if plans.is_empty() {
+        return Ok(());
+    }
 
+    let mut entries = Vec::new();
+    let mut runtime_entries = BTreeSet::new();
+    for plan in &plans {
+        if plan.status.app_changed {
+            entries.push(TransactionEntry {
+                operation: TransactionOperation::Update,
+                kind: "application",
+                ref_name: plan.remote.app_ref.clone(),
+            });
+        }
+        if plan.status.runtime_changed && runtime_entries.insert(plan.remote.runtime_ref.clone()) {
+            entries.push(TransactionEntry {
+                operation: if state::get_runtime(paths, &plan.remote.runtime_ref)?.is_some() {
+                    TransactionOperation::Update
+                } else {
+                    TransactionOperation::Install
+                },
+                kind: "runtime",
+                ref_name: format!("runtime/{}", plan.remote.runtime_ref),
+            });
+        }
+    }
+    if !present_and_confirm(&entries, options)? {
+        return Ok(());
+    }
+
+    let mut touched_runtimes = BTreeSet::new();
+    for plan in plans {
+        let record = plan.record;
+        let remote = plan.remote;
+        let status = plan.status;
         let force_runtime =
             status.runtime_checkout_stale && touched_runtimes.insert(remote.runtime_ref.clone());
         let installed =
@@ -799,24 +1180,26 @@ fn cmd_update(paths: &Installation, args: Vec<String>) -> Result<()> {
             state::safe_remove_dir(paths, &record.app_dir)?;
         }
         let export = desktop::export_app(paths, &installed_record)?;
-        println!("Updated {}", installed.app_id);
-        if record.app_id != installed.app_id {
-            println!("  app id: {} -> {}", record.app_id, installed.app_id);
+        if !options.noninteractive {
+            println!("Updated {}", installed.app_id);
+            if record.app_id != installed.app_id {
+                println!("  app id: {} -> {}", record.app_id, installed.app_id);
+            }
+            if status.app_changed {
+                println!(
+                    "  app commit: {} -> {}",
+                    record.app_commit, installed.app_commit
+                );
+            }
+            if status.runtime_changed {
+                println!(
+                    "  runtime commit: {} -> {}",
+                    status.current_runtime_commit.as_deref().unwrap_or("<none>"),
+                    installed.runtime_commit
+                );
+            }
+            print_export_report(paths, &export);
         }
-        if status.app_changed {
-            println!(
-                "  app commit: {} -> {}",
-                record.app_commit, installed.app_commit
-            );
-        }
-        if status.runtime_changed {
-            println!(
-                "  runtime commit: {} -> {}",
-                status.current_runtime_commit.as_deref().unwrap_or("<none>"),
-                installed.runtime_commit
-            );
-        }
-        print_export_report(paths, &export);
 
         if record.runtime_ref != installed.runtime_ref
             && !state::runtime_is_required(paths, &record.runtime_ref)?
@@ -831,16 +1214,20 @@ fn cmd_update(paths: &Installation, args: Vec<String>) -> Result<()> {
 
 #[derive(Debug, PartialEq, Eq)]
 struct UpdateOptions {
+    transaction: TransactionOptions,
     commit: Option<String>,
     app_ids: Vec<String>,
 }
 
 fn parse_update_args(args: Vec<String>) -> Result<UpdateOptions> {
+    let mut transaction = TransactionOptions::default();
     let mut commit = None;
     let mut app_ids = Vec::new();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "-y" | "--assumeyes" => transaction.assumeyes = true,
+            "--noninteractive" => transaction.noninteractive = true,
             "--commit" => {
                 if commit.is_some() {
                     bail!("--commit may only be specified once");
@@ -860,7 +1247,11 @@ fn parse_update_args(args: Vec<String>) -> Result<UpdateOptions> {
     if commit.is_some() && app_ids.len() != 1 {
         bail!("usage: flatpak update --commit=COMMIT <app-id>");
     }
-    Ok(UpdateOptions { commit, app_ids })
+    Ok(UpdateOptions {
+        transaction,
+        commit,
+        app_ids,
+    })
 }
 
 #[derive(Debug)]
@@ -1064,7 +1455,7 @@ fn numeric_id(program: &str, arg: &str) -> Result<u32> {
 fn print_usage() {
     eprintln!("usage:");
     eprintln!("  flatpak search <query>");
-    eprintln!("  flatpak install <app-id>");
+    eprintln!("  flatpak install [OPTION] <app-id>");
     eprintln!("  flatpak remote-info [--log | --commit=COMMIT] flathub <app-id>");
     eprintln!("  flatpak list");
     eprintln!("  flatpak permissions <app-id>");
@@ -1072,8 +1463,8 @@ fn print_usage() {
     eprintln!("  flatpak prune");
     eprintln!("  flatpak repair");
     eprintln!("  flatpak run <app-id> [-- app-args...]");
-    eprintln!("  flatpak uninstall [--unused | <app-id>]");
-    eprintln!("  flatpak update [--commit=COMMIT] [app-id...]");
+    eprintln!("  flatpak uninstall [OPTION] [--unused | <app-id>]");
+    eprintln!("  flatpak update [OPTION] [app-id...]");
 }
 
 fn print_help() {
@@ -1082,6 +1473,14 @@ fn print_help() {
 
 fn print_uninstall_help() {
     print!("{UNINSTALL_HELP}");
+}
+
+fn print_install_help() {
+    print!("{INSTALL_HELP}");
+}
+
+fn print_update_help() {
+    print!("{UPDATE_HELP}");
 }
 
 #[cfg(test)]
@@ -1159,6 +1558,134 @@ mod tests {
             format!("{ref_name}\n{commit}\n"),
         )
         .unwrap();
+    }
+
+    fn transaction_entry() -> TransactionEntry {
+        TransactionEntry {
+            operation: TransactionOperation::Install,
+            kind: "application",
+            ref_name: "app/org.example.App/x86_64/stable".to_string(),
+        }
+    }
+
+    #[test]
+    fn transaction_confirmation_accepts_enter_and_explicit_yes() {
+        for answer in ["\n", "y\n", "Y\n"] {
+            let mut input = std::io::Cursor::new(answer.as_bytes());
+            let mut output = Vec::new();
+            assert!(present_and_confirm_with(
+                &[transaction_entry()],
+                TransactionOptions::default(),
+                &mut input,
+                &mut output,
+            )
+            .unwrap());
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains("Changes:"));
+            assert!(output.contains("Proceed with these changes? [Y/n]:"));
+        }
+    }
+
+    #[test]
+    fn transaction_confirmation_no_and_eof_cancel_cleanly() {
+        for answer in ["n\n", "N\n", ""] {
+            let mut input = std::io::Cursor::new(answer.as_bytes());
+            let mut output = Vec::new();
+            assert!(!present_and_confirm_with(
+                &[transaction_entry()],
+                TransactionOptions::default(),
+                &mut input,
+                &mut output,
+            )
+            .unwrap());
+            assert!(String::from_utf8(output).unwrap().contains("Cancelled."));
+        }
+    }
+
+    #[test]
+    fn assumeyes_keeps_preview_while_noninteractive_is_quiet() {
+        let mut empty = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        assert!(present_and_confirm_with(
+            &[transaction_entry()],
+            TransactionOptions {
+                assumeyes: true,
+                noninteractive: false,
+            },
+            &mut empty,
+            &mut output,
+        )
+        .unwrap());
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Changes:"));
+        assert!(!output.contains("Proceed with"));
+
+        let mut empty = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+        assert!(present_and_confirm_with(
+            &[transaction_entry()],
+            TransactionOptions {
+                assumeyes: false,
+                noninteractive: true,
+            },
+            &mut empty,
+            &mut output,
+        )
+        .unwrap());
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "Installing app/org.example.App/x86_64/stable\n"
+        );
+    }
+
+    #[test]
+    fn transaction_flags_and_special_options_parse_together() {
+        let install = parse_install_args(vec![
+            "--or-update".to_string(),
+            "-y".to_string(),
+            "org.example.App".to_string(),
+        ])
+        .unwrap();
+        assert!(install.or_update);
+        assert!(install.transaction.assumeyes);
+
+        let update = parse_update_args(vec![
+            "--noninteractive".to_string(),
+            "org.example.App".to_string(),
+        ])
+        .unwrap();
+        assert!(update.transaction.noninteractive);
+
+        let uninstall = parse_uninstall_args(vec![
+            "--delete-data".to_string(),
+            "--assumeyes".to_string(),
+            "org.example.App".to_string(),
+        ])
+        .unwrap();
+        assert!(uninstall.delete_data);
+        assert!(uninstall.transaction.assumeyes);
+        assert!(
+            parse_uninstall_args(vec!["--unused".to_string(), "--delete-data".to_string(),])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn delete_data_removes_only_the_requested_apps_persistent_directory() {
+        let root = test_dir("delete-data");
+        let paths = Installation::for_test(&root);
+        state::ensure_layout(&paths).unwrap();
+        let requested = paths.app_data("org.example.App").unwrap();
+        let other = paths.app_data("org.example.Other").unwrap();
+        fs::create_dir_all(&requested).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        fs::write(requested.join("settings"), "app").unwrap();
+        fs::write(other.join("settings"), "other").unwrap();
+
+        remove_app_data(&paths, "org.example.App").unwrap();
+
+        assert!(!requested.exists());
+        assert_eq!(fs::read_to_string(other.join("settings")).unwrap(), "other");
     }
 
     #[test]
@@ -1364,7 +1891,17 @@ mod tests {
             );
         }
 
-        let removed = remove_unused_deployment_checkouts(&paths).unwrap();
+        let plan = plan_unused_deployment_checkouts(&paths).unwrap();
+        let planned_refs = plan
+            .iter()
+            .map(|item| item.ref_name.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(planned_refs.contains(&format!("runtime/{runtime_three}")));
+        assert!(planned_refs.contains("runtime/org.example.Unused/x86_64/one"));
+        assert!(runtime_three_dir.exists());
+        assert!(paths.extensions().join("unused").exists());
+
+        let removed = apply_unused_deployment_plan(&paths, plan).unwrap();
         assert!(removed.contains(&format!("runtime/{runtime_three}")));
         assert!(removed.contains(&"runtime/org.example.Unused/x86_64/one".to_string()));
         assert!(runtime_one_dir.exists());
@@ -1575,6 +2112,7 @@ mod tests {
             ])
             .unwrap(),
             UpdateOptions {
+                transaction: TransactionOptions::default(),
                 commit: Some("abc123".to_string()),
                 app_ids: vec!["org.example.App".to_string()],
             }
