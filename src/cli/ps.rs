@@ -1,5 +1,5 @@
-use crate::paths::Installation;
-use crate::state;
+use crate::installation as state;
+use crate::installation::installation_paths::Installation;
 use anyhow::{bail, Context, Result};
 
 const DEFAULT_COLUMNS: &[Column] = &[

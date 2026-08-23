@@ -1,7 +1,9 @@
 use super::confirmation::{
     present_and_confirm, TransactionEntry, TransactionOperation, TransactionOptions,
 };
-use crate::{desktop, paths::Installation, runtime, sandbox, state};
+use crate::installation as state;
+use crate::installation::{self as runtime, installation_paths::Installation};
+use crate::{desktop_integration, sandbox};
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -69,7 +71,7 @@ pub(crate) fn cmd_uninstall(paths: &Installation, args: Vec<String>) -> Result<(
     if !present_and_confirm(&entries, options.transaction)? {
         return Ok(());
     }
-    desktop::remove_export(paths, app_id)?;
+    desktop_integration::remove_export(paths, app_id)?;
     if state::remove_app_record(paths, app_id)?.is_none() {
         println!("{app_id} is not installed");
         return Ok(());

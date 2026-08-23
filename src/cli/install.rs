@@ -2,7 +2,9 @@ use super::confirmation::{
     present_and_confirm, TransactionEntry, TransactionOperation, TransactionOptions,
 };
 use super::update::update_resolved;
-use crate::{desktop, paths::Installation, remote, runtime, state};
+use crate::installation as state;
+use crate::installation::{self as runtime, installation_paths::Installation};
+use crate::{desktop_integration, remotes};
 use anyhow::{bail, Context, Result};
 use std::time::Instant;
 
@@ -43,7 +45,7 @@ pub(crate) fn cmd_install(paths: &Installation, args: Vec<String>) -> Result<()>
         println!("==> Resolving {}", options.app_id);
     }
     let resolution_started = Instant::now();
-    let remote = remote::resolve_remote_app(paths, &options.app_id)?;
+    let remote = remotes::resolve_remote_app(paths, &options.app_id)?;
     let resolution = resolution_started.elapsed();
     if let Ok(record) =
         state::get_app(paths, &options.app_id).or_else(|_| state::get_app(paths, &remote.app_id))
@@ -96,10 +98,10 @@ pub(crate) fn cmd_install(paths: &Installation, args: Vec<String>) -> Result<()>
         println!("\n==> Publishing desktop integration");
     }
     let export_started = Instant::now();
-    let export = match desktop::export_app(paths, &record) {
+    let export = match desktop_integration::export_app(paths, &record) {
         Ok(export) => export,
         Err(error) => {
-            let _ = desktop::remove_export(paths, &record.app_id);
+            let _ = desktop_integration::remove_export(paths, &record.app_id);
             let _ = state::remove_app_record(paths, &record.app_id);
             return Err(error).context("publish desktop integration");
         }

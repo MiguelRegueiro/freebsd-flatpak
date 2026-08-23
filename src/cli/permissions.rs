@@ -1,4 +1,6 @@
-use crate::{audio, filesystem, paths::Installation, state};
+use crate::host_resources::audio;
+use crate::installation::{self as state, installation_paths::Installation};
+use crate::sandbox::filesystem_grants as filesystem;
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 

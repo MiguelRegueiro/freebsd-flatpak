@@ -1,4 +1,4 @@
-use crate::{paths::Installation, state};
+use crate::installation::{self as state, installation_paths::Installation};
 use anyhow::{bail, Result};
 
 pub(crate) fn cmd_list(paths: &Installation, args: Vec<String>) -> Result<()> {

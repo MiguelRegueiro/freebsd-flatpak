@@ -1,6 +1,7 @@
 use super::*;
 use crate::cli::test_support::*;
-use crate::{paths::Installation, runtime, state};
+use crate::installation as state;
+use crate::installation::{self as runtime, installation_paths::Installation};
 use std::collections::BTreeSet;
 use std::fs;
 

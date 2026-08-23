@@ -12,7 +12,8 @@ mod search;
 mod uninstall;
 mod update;
 
-use crate::{remote, startup};
+use crate::installation::startup_recovery as startup;
+use crate::remotes;
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
@@ -56,11 +57,11 @@ pub(crate) fn run() -> Result<()> {
         Some("checkout") => {
             let ref_name = args.next().context("missing ref")?;
             let dest = args.next().context("missing destination")?;
-            remote::checkout_ref(&paths, &ref_name, PathBuf::from(dest))
+            remotes::checkout_ref(&paths, &ref_name, PathBuf::from(dest))
         }
         Some("inspect") => {
             let refs = args.collect::<Vec<_>>();
-            remote::inspect_refs(&paths, &refs)
+            remotes::inspect_refs(&paths, &refs)
         }
         Some(cmd) => bail!("unknown command: {cmd}"),
         None => {

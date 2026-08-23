@@ -1,7 +1,9 @@
 use super::confirmation::{
     present_and_confirm, TransactionEntry, TransactionOperation, TransactionOptions,
 };
-use crate::{desktop, paths::Installation, remote, runtime, state};
+use crate::installation as state;
+use crate::installation::{self as runtime, installation_paths::Installation};
+use crate::{desktop_integration, remotes};
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -16,7 +18,7 @@ pub(crate) fn cmd_update(paths: &Installation, args: Vec<String>) -> Result<()> 
         println!("No installed apps");
         return Ok(());
     }
-    let metadata = remote::load_remote_metadata(paths)?;
+    let metadata = remotes::load_remote_metadata(paths)?;
     let targets = update_targets(installed, options.app_ids, &metadata)?;
     let mut resolved = Vec::new();
     for target in targets {
@@ -38,13 +40,13 @@ pub(crate) fn cmd_update(paths: &Installation, args: Vec<String>) -> Result<()> 
 #[derive(Debug)]
 struct ResolvedUpdate {
     record: state::AppRecord,
-    remote: remote::RemoteApp,
+    remote: remotes::RemoteApp,
     status: UpdateStatus,
 }
 
 pub(super) fn update_resolved(
     paths: &Installation,
-    resolved: Vec<(state::AppRecord, remote::RemoteApp)>,
+    resolved: Vec<(state::AppRecord, remotes::RemoteApp)>,
     options: TransactionOptions,
 ) -> Result<()> {
     let mut plans = Vec::new();
@@ -104,11 +106,11 @@ pub(super) fn update_resolved(
         let installed_record = state::record_install(paths, &installed)?;
         state::reconcile_runtime_bindings(paths)?;
         if record.app_id != installed.app_id {
-            desktop::remove_export(paths, &record.app_id)?;
+            desktop_integration::remove_export(paths, &record.app_id)?;
             state::remove_app_record(paths, &record.app_id)?;
             state::safe_remove_dir(paths, &record.app_dir)?;
         }
-        let export = desktop::export_app(paths, &installed_record)?;
+        let export = desktop_integration::export_app(paths, &installed_record)?;
         if !options.noninteractive {
             println!("Updated {}", installed.app_id);
             if record.app_id != installed.app_id {
@@ -186,7 +188,7 @@ pub(super) fn parse_update_args(args: Vec<String>) -> Result<UpdateOptions> {
 #[derive(Debug)]
 pub(super) struct UpdateTarget {
     pub(super) record: state::AppRecord,
-    pub(super) remote: Option<remote::RemoteApp>,
+    pub(super) remote: Option<remotes::RemoteApp>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -201,7 +203,7 @@ pub(super) struct UpdateStatus {
 pub(super) fn update_targets(
     installed: Vec<state::AppRecord>,
     args: Vec<String>,
-    metadata: &remote::RemoteMetadata,
+    metadata: &remotes::RemoteMetadata,
 ) -> Result<Vec<UpdateTarget>> {
     if args.is_empty() {
         return Ok(installed
@@ -252,7 +254,7 @@ pub(super) fn update_targets(
 pub(super) fn update_status(
     paths: &Installation,
     record: &state::AppRecord,
-    remote: &remote::RemoteApp,
+    remote: &remotes::RemoteApp,
 ) -> Result<UpdateStatus> {
     let app_dir = state::absolute(paths, &record.app_dir);
     let app_checkout_present = checkout_present(&app_dir);
@@ -303,12 +305,12 @@ pub(super) fn checkout_present(dir: &Path) -> bool {
     dir.join("metadata").is_file() && dir.join("files").is_dir()
 }
 
-fn print_export_report(paths: &Installation, export: &desktop::ExportReport) {
+fn print_export_report(paths: &Installation, export: &desktop_integration::ExportReport) {
     println!("  exported files: {}", export.files);
     println!("  desktop entries: {}", export.desktop_entries);
     println!(
         "  export data dir: {}",
-        desktop::export_data_dir(paths).display()
+        desktop_integration::export_data_dir(paths).display()
     );
     if !export.skipped.is_empty() {
         let skipped = export

@@ -1,0 +1,168 @@
+use super::application_records::{list_apps, write_app};
+use super::generation_cleanup::deployment_marker;
+use super::installation_paths::Installation;
+use super::record_storage::{
+    ensure_layout, read_kv_file, required, runtimes_dir, safe_name_lossy, write_atomic,
+};
+use super::RuntimeRecord;
+use anyhow::{Context, Result};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+pub fn get_runtime(paths: &Installation, runtime_ref: &str) -> Result<Option<RuntimeRecord>> {
+    let path = runtime_record_path(paths, runtime_ref);
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(read_runtime_path(&path)?))
+}
+
+pub fn list_runtimes(paths: &Installation) -> Result<Vec<RuntimeRecord>> {
+    ensure_layout(paths)?;
+    let mut runtimes = Vec::new();
+    for entry in fs::read_dir(runtimes_dir(paths)).context("read runtime state directory")? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            runtimes.push(read_runtime_path(&entry.path())?);
+        }
+    }
+    runtimes.sort_by(|left, right| left.runtime_ref.cmp(&right.runtime_ref));
+    Ok(runtimes)
+}
+
+pub fn list_runtime_deployments(paths: &Installation) -> Result<Vec<RuntimeRecord>> {
+    ensure_layout(paths)?;
+    let mut deployments = Vec::new();
+    let root = paths.runtimes();
+    if !root.is_dir() {
+        return Ok(deployments);
+    }
+    for family in fs::read_dir(&root).with_context(|| format!("read {}", root.display()))? {
+        let family = family?;
+        if !family.file_type()?.is_dir() {
+            continue;
+        }
+        if let Some(runtime) = runtime_deployment_from_path(paths, &family.path())? {
+            deployments.push(runtime);
+        }
+        for generation in fs::read_dir(family.path())? {
+            let generation = generation?;
+            if !generation.file_type()?.is_dir() {
+                continue;
+            }
+            if let Some(runtime) = runtime_deployment_from_path(paths, &generation.path())? {
+                deployments.push(runtime);
+            }
+        }
+    }
+    deployments.sort_by(|left, right| {
+        left.runtime_ref
+            .cmp(&right.runtime_ref)
+            .then_with(|| left.runtime_dir.cmp(&right.runtime_dir))
+    });
+    deployments.dedup_by(|left, right| left.runtime_dir == right.runtime_dir);
+    Ok(deployments)
+}
+
+fn runtime_deployment_from_path(
+    paths: &Installation,
+    path: &Path,
+) -> Result<Option<RuntimeRecord>> {
+    let Some((ref_name, runtime_commit)) = deployment_marker(path)? else {
+        return Ok(None);
+    };
+    let Some(runtime_ref) = ref_name.strip_prefix("runtime/") else {
+        return Ok(None);
+    };
+    Ok(Some(RuntimeRecord {
+        runtime_ref: runtime_ref.to_string(),
+        runtime_commit,
+        runtime_dir: paths.relative_data_path(path)?,
+    }))
+}
+
+/// Point every installed application at the current deployment of its runtime.
+/// Each app record changes atomically, so concurrent launches observe a complete
+/// old or new app/runtime pair.
+pub fn reconcile_runtime_bindings(paths: &Installation) -> Result<()> {
+    for mut app in list_apps(paths)? {
+        let Some(runtime) = get_runtime(paths, &app.runtime_ref)? else {
+            continue;
+        };
+        if app.runtime_commit == runtime.runtime_commit && app.runtime_dir == runtime.runtime_dir {
+            continue;
+        }
+        app.runtime_commit = runtime.runtime_commit;
+        app.runtime_dir = runtime.runtime_dir;
+        write_app(paths, &app)?;
+    }
+    Ok(())
+}
+
+pub fn write_runtime(paths: &Installation, runtime: &RuntimeRecord) -> Result<()> {
+    ensure_layout(paths)?;
+    let path = runtime_record_path(paths, &runtime.runtime_ref);
+    let data = format!(
+        "runtime_ref={}\nruntime_commit={}\nruntime_dir={}\n",
+        runtime.runtime_ref,
+        runtime.runtime_commit,
+        runtime.runtime_dir.display()
+    );
+    write_atomic(&path, data.as_bytes())
+}
+
+pub fn remove_runtime_record(paths: &Installation, runtime_ref: &str) -> Result<()> {
+    let path = runtime_record_path(paths, runtime_ref);
+    if path.exists() {
+        fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    }
+    Ok(())
+}
+
+pub fn runtime_is_required(paths: &Installation, runtime_ref: &str) -> Result<bool> {
+    for app in list_apps(paths)? {
+        if app.runtime_ref == runtime_ref {
+            return Ok(true);
+        }
+    }
+
+    let app_root = paths.apps();
+    if !app_root.is_dir() {
+        return Ok(false);
+    }
+
+    for entry in fs::read_dir(&app_root).with_context(|| format!("read {}", app_root.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let metadata_path = entry.path().join("metadata");
+        let Ok(metadata) = fs::read_to_string(&metadata_path) else {
+            continue;
+        };
+        if crate::installation::metadata_value(&metadata, "Application", "runtime").as_deref()
+            == Some(runtime_ref)
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn read_runtime_path(path: &Path) -> Result<RuntimeRecord> {
+    let values = read_kv_file(path)?;
+    Ok(RuntimeRecord {
+        runtime_ref: required(&values, "runtime_ref")?,
+        runtime_commit: required(&values, "runtime_commit")?,
+        runtime_dir: PathBuf::from(required(&values, "runtime_dir")?),
+    })
+}
+
+fn runtime_record_path(paths: &Installation, runtime_ref: &str) -> PathBuf {
+    runtimes_dir(paths).join(format!("{}.ini", safe_name_lossy(runtime_ref)))
+}
+
+#[cfg(test)]
+#[path = "tests/runtime_records.rs"]
+mod tests;

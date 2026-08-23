@@ -1,4 +1,6 @@
-use crate::{desktop, paths::Installation, runtime, sandbox, state};
+use crate::installation as state;
+use crate::installation::{self as runtime, installation_paths::Installation};
+use crate::{desktop_integration, sandbox};
 use anyhow::{Context, Result};
 use sandbox::SandboxBackend;
 use std::path::{Path, PathBuf};
@@ -13,7 +15,7 @@ pub(crate) fn cmd_run(paths: &Installation, args: Vec<String>) -> Result<()> {
     }
 
     let app = runtime::resolve_app(paths, &app_id, options)?;
-    let desktop = desktop::DesktopSession::from_env()
+    let desktop = desktop_integration::DesktopSession::from_env()
         .context("XDG_RUNTIME_DIR and WAYLAND_DISPLAY must be set")?;
     let backend = sandbox::ChrootNullfsBackend::new(paths.clone());
     let status = backend.run(&app, &desktop)?;

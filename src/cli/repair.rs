@@ -1,4 +1,4 @@
-use crate::{paths::Installation, runtime};
+use crate::installation::{self as runtime, installation_paths::Installation};
 use anyhow::{bail, Result};
 
 pub(crate) fn cmd_repair(paths: &Installation, args: Vec<String>) -> Result<()> {
