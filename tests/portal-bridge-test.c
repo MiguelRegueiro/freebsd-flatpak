@@ -1,5 +1,5 @@
 #define main portal_bridge_program_main
-#include "../scripts/portal-bridge.c"
+#include "../compatibility_helpers/portal-bridge.c"
 #undef main
 
 static void test_introspection(void)

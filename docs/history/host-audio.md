@@ -84,7 +84,7 @@ PulseAudio config or cookie files left inside the Decibels chroot.
 
 Decibels does not declare filesystem permissions, so opening arbitrary music
 from `~/Downloads` required a later portal layer. That follow-up is documented
-in `logs/host-filechooser-portal.md`.
+in `docs/history/host-filechooser-portal.md`.
 
 Audio support has only been proven for PulseAudio. GPU, camera, boxrun,
 Discord, and broader compatibility remain out of scope.

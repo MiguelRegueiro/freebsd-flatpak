@@ -81,17 +81,17 @@ su "$BUILD_USER" -c \
 su "$BUILD_USER" -c "mkdir -p '$HELPER_BUILD_DIR'" ||
     fail "could not create the helper build directory"
 su "$BUILD_USER" -c \
-    "cc scripts/portal-bridge.c -o '$HELPER_BUILD_DIR/portal-bridge' $PORTAL_FLAGS" ||
+    "cc compatibility_helpers/portal-bridge.c -o '$HELPER_BUILD_DIR/portal-bridge' $PORTAL_FLAGS" ||
     fail "portal helper build failed"
 
 su "$BUILD_USER" -c \
-    "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra scripts/wayland-drm-devt-shim.c -o '$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so' -ldl" ||
+    "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/wayland-drm-devt-shim.c -o '$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so' -ldl" ||
     fail "Wayland DRM helper build failed"
 su "$BUILD_USER" -c \
-    "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra scripts/drm-syncobj-errno-shim.c -o '$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so' -ldl -pthread" ||
+    "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/drm-syncobj-errno-shim.c -o '$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so' -ldl -pthread" ||
     fail "DRM syncobj helper build failed"
 su "$BUILD_USER" -c \
-    "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra scripts/chromium-zygote-drm-preload.c -o '$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so' -ldl -pthread" ||
+    "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/chromium-zygote-drm-preload.c -o '$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so' -ldl -pthread" ||
     fail "Chromium zygote helper build failed"
 
 for artifact in \

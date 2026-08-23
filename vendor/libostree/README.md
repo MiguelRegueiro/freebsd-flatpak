@@ -13,5 +13,5 @@ generated library source list to the repository, pull, verification, checkout,
 fsck, and pruning APIs used by this project. The archive, patched source, build
 tree, and private prefix all live below `target/vendor-ostree`; none are tracked.
 
-The library is LGPL-2.0-or-later. Its upstream `COPYING` file is installed next
-to the private shared library as `COPYING.libostree`.
+The library is LGPL-2.0-or-later. The project installs
+`LICENSES/LGPL-2.0-or-later.txt` with its third-party license notices.

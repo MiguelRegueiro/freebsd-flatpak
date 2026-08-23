@@ -27,5 +27,5 @@ Re-run the measurement with:
 
 ```sh
 LD_LIBRARY_PATH="$PWD/target/vendor-ostree/prefix/lib" \
-  ./scripts/benchmark-text-editor.sh cold-ethernet target/release/flatpak
+  ./benchmarks/benchmark-text-editor.sh cold-ethernet target/release/flatpak
 ```

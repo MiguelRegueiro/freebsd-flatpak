@@ -44,7 +44,7 @@ Each app run now starts a project-controlled portal path:
 
 - a private per-run `dbus-daemon` socket under
   `/var/run/xdg/regueiro/freebsd-flatpak-poc/<app>-<pid>/bus`;
-- `scripts/portal-bridge.c`, connected to that private bus and to the real host
+- `compatibility_helpers/portal-bridge.c`, connected to that private bus and to the real host
   session bus;
 - a project-local document source directory under
   `runtime/portal/doc/<app>-<pid>`;
