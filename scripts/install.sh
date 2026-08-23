@@ -65,8 +65,6 @@ heading() {
 [ -x "$LINUX_CC" ] || fail "Linux compiler not found or not executable: $LINUX_CC"
 pkg-config --exists gio-2.0 gio-unix-2.0 glib-2.0 libpipewire-0.3 ||
     fail "missing development packages for GLib/GIO or PipeWire"
-PORTAL_FLAGS=$(pkg-config --cflags --libs gio-2.0 gio-unix-2.0 glib-2.0 libpipewire-0.3) ||
-    fail "could not determine portal helper compiler flags"
 
 cd "$BASE"
 heading "Building private libostree"
@@ -81,8 +79,8 @@ su "$BUILD_USER" -c \
 su "$BUILD_USER" -c "mkdir -p '$HELPER_BUILD_DIR'" ||
     fail "could not create the helper build directory"
 su "$BUILD_USER" -c \
-    "cc compatibility_helpers/portal-bridge.c -o '$HELPER_BUILD_DIR/portal-bridge' $PORTAL_FLAGS" ||
-    fail "portal helper build failed"
+    "/bin/sh ./scripts/build-compatibility-bridges.sh '$HELPER_BUILD_DIR'" ||
+    fail "compatibility bridge build failed"
 
 su "$BUILD_USER" -c \
     "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/wayland-drm-devt-shim.c -o '$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so' -ldl" ||
@@ -98,6 +96,7 @@ for artifact in \
     target/release/flatpak \
     "$OSTREE_PREFIX/lib/libostree-1.so.1.0.0" \
     "$HELPER_BUILD_DIR/portal-bridge" \
+    "$HELPER_BUILD_DIR/status-notifier-bridge" \
     "$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so" \
     "$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so" \
     "$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so"
@@ -122,6 +121,7 @@ install -o root -g wheel -m 644 \
     "$INSTALL_LICENSES/" || fail "could not install third-party licenses"
 install -o root -g wheel -m 755 \
     "$HELPER_BUILD_DIR/portal-bridge" \
+    "$HELPER_BUILD_DIR/status-notifier-bridge" \
     "$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so" \
     "$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so" \
     "$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so" \
@@ -134,6 +134,7 @@ printf '    %s\n' "$INSTALL_LIBEXEC/libostree-1.so.1"
 printf '    %s\n' "$INSTALL_LICENSES/LGPL-2.0-or-later.txt"
 for helper_name in \
     portal-bridge \
+    status-notifier-bridge \
     libwayland-drm-devt-shim.so \
     libdrm-syncobj-errno-shim.so \
     libchromium-zygote-drm-preload.so

@@ -68,7 +68,12 @@ pub(super) fn lock_portal_scope(path: &Path) -> Result<fs::File> {
 }
 
 pub(super) fn stop_shared_portal(shared_dir: &Path) -> Result<()> {
-    for name in ["bridge.pid", "bus.pid"] {
+    for name in [
+        "portal-bridge.pid",
+        "status-notifier-bridge.pid",
+        "bridge.pid",
+        "bus.pid",
+    ] {
         let path = shared_dir.join(name);
         if let Ok(pid) = fs::read_to_string(&path) {
             if let Ok(pid) = pid.trim().parse::<i32>() {
@@ -127,12 +132,18 @@ pub(super) fn app_has_active_run(
     Ok(false)
 }
 
-pub(super) fn ensure_bridge_helper(paths: &Installation) -> Result<PathBuf> {
-    let output = paths.libexec_root().join("portal-bridge");
-    if !output.is_file() {
-        bail!("installed portal helper is missing: {}", output.display());
+pub(super) fn ensure_bridge_helpers(paths: &Installation) -> Result<(PathBuf, PathBuf)> {
+    let portal = paths.libexec_root().join("portal-bridge");
+    let status_notifier = paths.libexec_root().join("status-notifier-bridge");
+    for output in [&portal, &status_notifier] {
+        if !output.is_file() {
+            bail!(
+                "installed compatibility helper is missing: {}",
+                output.display()
+            );
+        }
     }
-    Ok(output)
+    Ok((portal, status_notifier))
 }
 
 #[cfg(test)]

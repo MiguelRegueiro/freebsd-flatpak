@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 #[test]
-fn portal_bridge_screencast_contract() {
+fn compatibility_bridge_contract() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let output = std::env::temp_dir().join(format!(
         "freebsd-flatpak-portal-bridge-test-{}",
@@ -25,7 +25,22 @@ fn portal_bridge_screencast_contract() {
     let mut compiler = Command::new("cc");
     compiler
         .current_dir(&root)
-        .arg("tests/portal-bridge-test.c")
+        .args([
+            "tests/portal-bridge-test.c",
+            "compatibility_helpers/portal_bridge/basic_desktop_portals.c",
+            "compatibility_helpers/portal_bridge/document_grant_store.c",
+            "compatibility_helpers/portal_bridge/document_mounts.c",
+            "compatibility_helpers/portal_bridge/document_portal.c",
+            "compatibility_helpers/portal_bridge/file_chooser_portal.c",
+            "compatibility_helpers/portal_bridge/pipewire_screencast_linker.c",
+            "compatibility_helpers/portal_bridge/portal_bridge_process.c",
+            "compatibility_helpers/portal_bridge/portal_request.c",
+            "compatibility_helpers/portal_bridge/sandbox_document_registration.c",
+            "compatibility_helpers/portal_bridge/screencast_portal.c",
+            "compatibility_helpers/status_notifier_bridge/dbusmenu_proxy.c",
+            "compatibility_helpers/status_notifier_bridge/status_notifier_item_proxy.c",
+            "compatibility_helpers/status_notifier_bridge/status_notifier_watcher.c",
+        ])
         .arg("-o")
         .arg(&output)
         .args(flags.split_whitespace());

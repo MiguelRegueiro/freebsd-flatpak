@@ -1,5 +1,5 @@
 use super::portal_scope::{
-    app_scope_name, ensure_bridge_helper, lock_portal_scope, other_active_app_instances,
+    app_scope_name, ensure_bridge_helpers, lock_portal_scope, other_active_app_instances,
     portal_control, shared_portal_dir, stop_shared_portal,
 };
 use super::private_session_bus::{
@@ -57,7 +57,7 @@ impl HostPortal {
             });
         };
 
-        let helper = ensure_bridge_helper(paths)?;
+        let (portal_helper, status_notifier_helper) = ensure_bridge_helpers(paths)?;
         let app_scope = app_scope_name(app_id);
         let shared_dir = shared_portal_dir(paths, app_id);
         let doc_dir = shared_dir.join("doc");
@@ -97,7 +97,7 @@ impl HostPortal {
             fs::write(shared_dir.join("bus.pid"), bus_child.id().to_string())
                 .context("write private bus pid")?;
             let app_sandbox_root = paths.chroots().join(app_scope_name(app_id));
-            let mut bridge_command = Command::new(&helper);
+            let mut bridge_command = Command::new(&portal_helper);
             bridge_command
                 .arg("--app-id")
                 .arg(app_id)
@@ -115,13 +115,43 @@ impl HostPortal {
             detach_shared_process(&mut bridge_command);
             let mut bridge_child = bridge_command
                 .spawn()
-                .with_context(|| format!("start {}", helper.display()))?;
-            fs::write(shared_dir.join("bridge.pid"), bridge_child.id().to_string())
-                .context("write portal bridge pid")?;
+                .with_context(|| format!("start {}", portal_helper.display()))?;
+            fs::write(
+                shared_dir.join("portal-bridge.pid"),
+                bridge_child.id().to_string(),
+            )
+            .context("write portal bridge pid")?;
+            let mut status_command = Command::new(&status_notifier_helper);
+            status_command
+                .arg("--app-id")
+                .arg(app_id)
+                .arg("--shared-dir")
+                .arg(&shared_dir)
+                .env("DBUS_SESSION_BUS_ADDRESS", &address)
+                .env("HOST_DBUS_SESSION_BUS_ADDRESS", bus_address)
+                .stdin(Stdio::null())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit());
+            detach_shared_process(&mut status_command);
+            let mut status_child = match status_command.spawn() {
+                Ok(child) => child,
+                Err(error) => {
+                    terminate_child(&mut bridge_child);
+                    terminate_child(&mut bus_child);
+                    return Err(error)
+                        .with_context(|| format!("start {}", status_notifier_helper.display()));
+                }
+            };
+            fs::write(
+                shared_dir.join("status-notifier-bridge.pid"),
+                status_child.id().to_string(),
+            )
+            .context("write status notifier bridge pid")?;
             if let Err(error) = wait_for_portal_proxy(&address, &mountpoint) {
+                terminate_child(&mut status_child);
                 terminate_child(&mut bridge_child);
                 terminate_child(&mut bus_child);
-                return Err(error).context("wait for shared document portal bridge");
+                return Err(error).context("wait for shared compatibility bridges");
             }
         }
         drop(lock);
