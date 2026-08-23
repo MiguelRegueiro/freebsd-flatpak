@@ -5,6 +5,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader};
 use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -94,7 +95,8 @@ impl HostPortal {
             fs::write(shared_dir.join("bus.pid"), bus_child.id().to_string())
                 .context("write private bus pid")?;
             let app_sandbox_root = paths.chroots().join(app_scope_name(app_id));
-            let mut bridge_child = Command::new(&helper)
+            let mut bridge_command = Command::new(&helper);
+            bridge_command
                 .arg("--app-id")
                 .arg(app_id)
                 .arg("--doc-dir")
@@ -107,7 +109,9 @@ impl HostPortal {
                 .env("HOST_DBUS_SESSION_BUS_ADDRESS", bus_address)
                 .stdin(Stdio::null())
                 .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
+                .stderr(Stdio::inherit());
+            detach_shared_process(&mut bridge_command);
+            let mut bridge_child = bridge_command
                 .spawn()
                 .with_context(|| format!("start {}", helper.display()))?;
             fs::write(shared_dir.join("bridge.pid"), bridge_child.id().to_string())
@@ -408,13 +412,16 @@ fn ensure_bridge_helper(paths: &Installation) -> Result<PathBuf> {
 }
 
 fn start_private_bus(config: &Path) -> Result<(Child, String)> {
-    let mut child = Command::new("dbus-daemon")
+    let mut command = Command::new("dbus-daemon");
+    command
         .arg("--nofork")
         .arg("--print-address=1")
         .arg(format!("--config-file={}", config.display()))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    detach_shared_process(&mut command);
+    let mut child = command
         .spawn()
         .context("start private portal dbus-daemon")?;
 
@@ -433,6 +440,21 @@ fn start_private_bus(config: &Path) -> Result<(Child, String)> {
         bail!("private dbus-daemon did not print a unix:path address: {address}");
     }
     Ok((child, address))
+}
+
+fn detach_shared_process(command: &mut Command) {
+    // The bus and bridge serve every live sandbox for an app. A new session
+    // keeps terminal signals sent to whichever `flatpak run` created them
+    // from killing app-scoped infrastructure used by the other runners.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
 }
 
 fn private_bus_config(socket: &Path) -> String {
@@ -572,22 +594,32 @@ fn terminate_child(child: &mut Child) {
 }
 
 fn unmount_under(root: &Path) -> Result<()> {
-    if !root.exists() {
-        return Ok(());
-    }
-
     let mut mountpoints = mount_points_under(root)?;
     mountpoints.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
     for mountpoint in mountpoints {
+        if !mount_is_present(&mountpoint)? {
+            continue;
+        }
         if let Err(error) = unmount_one(&mountpoint, false) {
+            if !mount_is_present(&mountpoint)? {
+                continue;
+            }
             eprintln!(
                 "warning: portal umount failed for {}: {error:#}",
                 mountpoint.display()
             );
-            unmount_one(&mountpoint, true)?;
+            if mount_is_present(&mountpoint)? {
+                unmount_one(&mountpoint, true)?;
+            }
         }
     }
     Ok(())
+}
+
+fn mount_is_present(path: &Path) -> Result<bool> {
+    Ok(mount_points_under(path)?
+        .into_iter()
+        .any(|mountpoint| mountpoint == path))
 }
 
 fn mount_points_under(root: &Path) -> Result<Vec<PathBuf>> {
@@ -749,15 +781,25 @@ mod tests {
     }
 
     #[test]
-    fn shared_portal_lifetime_excludes_only_the_cleaning_instance() {
+    fn shared_portal_survives_either_non_final_instance_and_stops_after_last() {
         let paths = test_paths("shared-lifetime");
         let first_root = paths.chroots().join("org.example.App/first");
         let second_root = paths.chroots().join("org.example.App/second");
-        crate::state::write_run_record(
+        let other_root = paths.chroots().join("org.example.Other/only");
+        let first_record = crate::state::write_run_record(
             &paths,
             "org.example.App",
             "first",
             &first_root,
+            std::process::id(),
+            0,
+        )
+        .unwrap();
+        crate::state::write_run_record(
+            &paths,
+            "org.example.Other",
+            "only",
+            &other_root,
             std::process::id(),
             0,
         )
@@ -773,8 +815,34 @@ mod tests {
         .unwrap();
 
         assert!(other_active_app_instances(&paths, "org.example.App", "first").unwrap());
+        assert!(other_active_app_instances(&paths, "org.example.App", "second").unwrap());
+
+        crate::state::remove_run_record(&first_record).unwrap();
+        assert!(!other_active_app_instances(&paths, "org.example.App", "second").unwrap());
+        crate::state::write_run_record(
+            &paths,
+            "org.example.App",
+            "first",
+            &first_root,
+            std::process::id(),
+            0,
+        )
+        .unwrap();
         crate::state::remove_run_record(&second_record).unwrap();
         assert!(!other_active_app_instances(&paths, "org.example.App", "first").unwrap());
+    }
+
+    #[test]
+    fn shared_portal_process_is_detached_from_the_creating_runner_session() {
+        let mut command = Command::new("sleep");
+        command.arg("30").stdin(Stdio::null());
+        detach_shared_process(&mut command);
+        let mut child = command.spawn().unwrap();
+        let child_pid = child.id() as i32;
+
+        assert_eq!(unsafe { libc::getsid(child_pid) }, child_pid);
+
+        terminate_child(&mut child);
     }
 
     #[test]

@@ -1347,7 +1347,7 @@ fn update_status(
                 .runtimes()
                 .join(runtime::runtime_checkout_dir(&remote.runtime_ref))
         });
-    let current_runtime_commit = runtime_record
+    let available_runtime_commit = runtime_record
         .map(|runtime| runtime.runtime_commit)
         .or_else(|| {
             if record.runtime_ref == remote.runtime_ref {
@@ -1357,7 +1357,7 @@ fn update_status(
             }
         });
     let runtime_checkout_stale = !checkout_present(&runtime_dir)
-        || current_runtime_commit.as_deref() != Some(remote.runtime_commit.as_str());
+        || available_runtime_commit.as_deref() != Some(remote.runtime_commit.as_str());
     let runtime_state_changed =
         record.runtime_ref != remote.runtime_ref || record.runtime_commit != remote.runtime_commit;
 
@@ -1366,7 +1366,7 @@ fn update_status(
         app_checkout_stale,
         runtime_changed: runtime_state_changed || runtime_checkout_stale,
         runtime_checkout_stale,
-        current_runtime_commit,
+        current_runtime_commit: Some(record.runtime_commit.clone()),
     })
 }
 
@@ -2048,6 +2048,46 @@ mod tests {
         assert!(status.runtime_changed);
         assert!(status.runtime_checkout_stale);
         assert_eq!(status.current_runtime_commit.as_deref(), Some("runtime-1"));
+    }
+
+    #[test]
+    fn runtime_branch_change_reports_the_apps_previous_runtime_commit() {
+        let root = test_dir("runtime-branch-reporting");
+        let paths = Installation::for_test(&root);
+        state::ensure_layout(&paths).unwrap();
+        create_checkout(
+            paths.data_root(),
+            &PathBuf::from("apps").join("org.example.App"),
+        );
+        let runtime_50_dir = paths.runtimes().join("platform-50");
+        create_checkout(paths.data_root(), &PathBuf::from("runtimes/platform-50"));
+        state::write_runtime(
+            &paths,
+            &state::RuntimeRecord {
+                runtime_ref: "org.example.Platform/x86_64/50".to_string(),
+                runtime_commit: "runtime-50".to_string(),
+                runtime_dir: paths.relative_data_path(&runtime_50_dir).unwrap(),
+            },
+        )
+        .unwrap();
+
+        let mut record = app_record(
+            "org.example.App",
+            "app/org.example.App/x86_64/stable",
+            "app-1",
+        );
+        record.command = "new-command".to_string();
+        record.runtime_ref = "org.example.Platform/x86_64/49".to_string();
+        record.runtime_commit = "runtime-49".to_string();
+        let mut remote = remote_app(&record.app_id, &record.app_ref, &record.app_commit);
+        remote.runtime_ref = "org.example.Platform/x86_64/50".to_string();
+        remote.runtime_commit = "runtime-50".to_string();
+
+        let status = update_status(&paths, &record, &remote).unwrap();
+
+        assert!(status.runtime_changed);
+        assert!(!status.runtime_checkout_stale);
+        assert_eq!(status.current_runtime_commit.as_deref(), Some("runtime-49"));
     }
 
     #[test]

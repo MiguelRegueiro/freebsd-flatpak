@@ -66,6 +66,29 @@ static void test_shared_sandbox_scope_validation(void)
         "/runtime/chroots/org.example.App/../org.example.Other/doc"));
 }
 
+static void test_remove_sandbox_is_per_instance_and_idempotent(void)
+{
+    BridgeState state = { 0 };
+    state.grants = g_ptr_array_new();
+    state.sandbox_doc_dirs = g_ptr_array_new_with_free_func(g_free);
+    const char *first = "/runtime/chroots/org.example.App/first/run/user/1001/doc";
+    const char *second = "/runtime/chroots/org.example.App/second/run/user/1001/doc";
+    g_ptr_array_add(state.sandbox_doc_dirs, g_strdup(first));
+    g_ptr_array_add(state.sandbox_doc_dirs, g_strdup(second));
+
+    remove_sandbox(&state, first);
+    g_assert_cmpuint(state.sandbox_doc_dirs->len, ==, 1);
+    g_assert_cmpstr(g_ptr_array_index(state.sandbox_doc_dirs, 0), ==, second);
+
+    remove_sandbox(&state, first);
+    g_assert_cmpuint(state.sandbox_doc_dirs->len, ==, 1);
+    remove_sandbox(&state, second);
+    g_assert_cmpuint(state.sandbox_doc_dirs->len, ==, 0);
+
+    g_ptr_array_free(state.sandbox_doc_dirs, TRUE);
+    g_ptr_array_free(state.grants, TRUE);
+}
+
 static void test_path_and_option_translation(void)
 {
     char *path = portal_path("request", ":1.42", "chromium.request-7");
@@ -244,6 +267,7 @@ int main(void)
 {
     test_introspection();
     test_shared_sandbox_scope_validation();
+    test_remove_sandbox_is_per_instance_and_idempotent();
     test_path_and_option_translation();
     test_unix_fd_copy();
     test_screencast_source_tracking();

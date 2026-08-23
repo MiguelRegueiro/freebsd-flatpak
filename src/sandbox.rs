@@ -69,7 +69,7 @@ pub fn recover_stale_mounts(paths: &Installation) -> Result<()> {
     let chroot_root = paths.chroots();
     let mut stale_mounts = mount_points_under(&chroot_root)?;
     let active_roots = active_run_roots(paths)?;
-    stale_mounts.retain(|mountpoint| !active_roots.iter().any(|root| mountpoint.starts_with(root)));
+    stale_mounts.retain(|mountpoint| !belongs_to_any_root(mountpoint, &active_roots));
     let mut stale_roots = BTreeSet::new();
     for mountpoint in &stale_mounts {
         if let Some(root) = chroot_root_for_mount(&chroot_root, mountpoint) {
@@ -81,7 +81,7 @@ pub fn recover_stale_mounts(paths: &Installation) -> Result<()> {
         terminate_chroot_mount_holders(&root)?;
     }
     let mut stale_mounts = mount_points_under(&chroot_root)?;
-    stale_mounts.retain(|mountpoint| !active_roots.iter().any(|root| mountpoint.starts_with(root)));
+    stale_mounts.retain(|mountpoint| !belongs_to_any_root(mountpoint, &active_roots));
     unmount_mountpoints(stale_mounts)?;
     Ok(())
 }
@@ -102,6 +102,10 @@ fn active_run_roots(paths: &Installation) -> Result<Vec<PathBuf>> {
         })
         .filter_map(|record| record.get("root").map(PathBuf::from))
         .collect())
+}
+
+fn belongs_to_any_root(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
 }
 
 fn new_instance_id() -> String {
@@ -359,7 +363,7 @@ struct ChrootInstance {
     cleaned: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct OwnedMount {
     path: PathBuf,
     read_only: bool,
@@ -647,15 +651,32 @@ impl ChrootInstance {
         if let Err(error) = self.host_portal.cleanup() {
             errors.push(format!("{error:#}"));
         }
-        for mount in self.owned_mounts.iter().rev() {
-            if let Err(error) =
-                unmount_mountpoint(&mount.path, mount.read_only, "umount owned mount")
-            {
+        let mut remaining_mounts = Vec::new();
+        let owned_mounts = std::mem::take(&mut self.owned_mounts);
+        match owned_mount_teardown_order(&self.root, owned_mounts.clone()) {
+            Ok(mounts) => {
+                for mount in mounts {
+                    if let Err(error) =
+                        unmount_mountpoint(&mount.path, mount.read_only, "umount owned mount")
+                    {
+                        errors.push(format!("{error:#}"));
+                        remaining_mounts.push(mount);
+                    }
+                }
+            }
+            Err(error) => {
                 errors.push(format!("{error:#}"));
+                remaining_mounts = owned_mounts;
             }
         }
-        if let Err(error) = self.host_graphics.cleanup() {
-            errors.push(format!("{error:#}"));
+        self.owned_mounts = remaining_mounts;
+        // The generated graphics trees are nullfs sources. Keep them until
+        // every owned target has detached, so a busy mount remains recoverable
+        // on a later cleanup pass.
+        if self.owned_mounts.is_empty() {
+            if let Err(error) = self.host_graphics.cleanup() {
+                errors.push(format!("{error:#}"));
+            }
         }
         if let Err(error) = self.host_audio.cleanup(&self.root) {
             errors.push(format!("{error:#}"));
@@ -671,6 +692,25 @@ impl ChrootInstance {
             bail!("cleanup failed:\n{}", errors.join("\n"));
         }
     }
+}
+
+fn owned_mount_teardown_order(root: &Path, mut mounts: Vec<OwnedMount>) -> Result<Vec<OwnedMount>> {
+    if let Some(mount) = mounts.iter().find(|mount| !mount.path.starts_with(root)) {
+        bail!(
+            "refusing to clean mount outside sandbox root {}: {}",
+            root.display(),
+            mount.path.display()
+        );
+    }
+    mounts.sort_by(|left, right| {
+        right
+            .path
+            .components()
+            .count()
+            .cmp(&left.path.components().count())
+            .then_with(|| right.path.cmp(&left.path))
+    });
+    Ok(mounts)
 }
 
 impl Drop for ChrootInstance {
@@ -1448,27 +1488,63 @@ fn mountpoint_is_read_only(mountpoint: &Path) -> Result<bool> {
 }
 
 fn unmount_mountpoint(mountpoint: &Path, allow_force: bool, action: &str) -> Result<()> {
+    unmount_mountpoint_with(
+        mountpoint,
+        allow_force,
+        action,
+        is_mounted,
+        |path, force| {
+            let mut command = Command::new("doas");
+            command.arg("umount");
+            if force {
+                command.arg("-f");
+            }
+            command.arg(path);
+            let force_label = if force { " -f" } else { "" };
+            run_command(
+                command,
+                &format!("{action}{force_label} {}", path.display()),
+            )
+        },
+        || thread::sleep(Duration::from_millis(250)),
+    )
+}
+
+fn unmount_mountpoint_with(
+    mountpoint: &Path,
+    allow_force: bool,
+    action: &str,
+    mut mounted: impl FnMut(&Path) -> Result<bool>,
+    mut unmount: impl FnMut(&Path, bool) -> Result<()>,
+    mut retry_pause: impl FnMut(),
+) -> Result<()> {
     let mut last_error = None;
     for _ in 0..8 {
-        let mut command = Command::new("doas");
-        command.arg("umount").arg(mountpoint);
-        match run_command(command, &format!("{action} {}", mountpoint.display())) {
+        if !mounted(mountpoint)? {
+            return Ok(());
+        }
+        match unmount(mountpoint, false) {
             Ok(()) => return Ok(()),
             Err(error) => {
                 last_error = Some(error);
-                thread::sleep(Duration::from_millis(250));
+                if !mounted(mountpoint)? {
+                    return Ok(());
+                }
+                retry_pause();
             }
         }
     }
 
-    if allow_force {
+    if allow_force && mounted(mountpoint)? {
         eprintln!(
             "warning: normal unmount stayed busy for read-only mount {}; trying umount -f",
             mountpoint.display()
         );
-        let mut command = Command::new("doas");
-        command.arg("umount").arg("-f").arg(mountpoint);
-        run_command(command, &format!("{action} -f {}", mountpoint.display()))?;
+        unmount(mountpoint, true)?;
+        return Ok(());
+    }
+
+    if !mounted(mountpoint)? {
         return Ok(());
     }
 
@@ -1558,6 +1634,7 @@ fn terminate_process(pid: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static TEST_ID: AtomicUsize = AtomicUsize::new(0);
@@ -1612,6 +1689,122 @@ mod tests {
         remove_instance_root(&first_root).unwrap();
         assert!(!first_root.exists());
         assert!(second_root.join(".flatpak-info").is_file());
+    }
+
+    #[test]
+    fn owned_mount_cleanup_is_child_first_and_root_scoped() {
+        let root = PathBuf::from("/sandbox/first");
+        let mounts = vec![
+            OwnedMount {
+                path: root.join("sys"),
+                read_only: false,
+            },
+            OwnedMount {
+                path: root.join("sys/class/drm"),
+                read_only: true,
+            },
+            OwnedMount {
+                path: root.join("dev"),
+                read_only: false,
+            },
+            OwnedMount {
+                path: root.join("dev/shm"),
+                read_only: false,
+            },
+        ];
+
+        let ordered = owned_mount_teardown_order(&root, mounts).unwrap();
+        let positions = ordered
+            .iter()
+            .enumerate()
+            .map(|(index, mount)| (mount.path.clone(), index))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert!(positions[&root.join("sys/class/drm")] < positions[&root.join("sys")]);
+        assert!(positions[&root.join("dev/shm")] < positions[&root.join("dev")]);
+
+        let other_instance_mount = OwnedMount {
+            path: PathBuf::from("/sandbox/second/usr"),
+            read_only: true,
+        };
+        assert!(owned_mount_teardown_order(&root, vec![other_instance_mount]).is_err());
+    }
+
+    #[test]
+    fn already_gone_mount_cleanup_is_idempotent() {
+        let attempts = Cell::new(0);
+        for _ in 0..2 {
+            unmount_mountpoint_with(
+                Path::new("/sandbox/usr"),
+                true,
+                "test umount",
+                |_| Ok(false),
+                |_, _| {
+                    attempts.set(attempts.get() + 1);
+                    Ok(())
+                },
+                || {},
+            )
+            .unwrap();
+        }
+        assert_eq!(attempts.get(), 0);
+    }
+
+    #[test]
+    fn mount_disappearing_after_failed_unmount_is_not_retried_or_forced() {
+        let mounted = Cell::new(true);
+        let attempts = RefCell::new(Vec::new());
+        unmount_mountpoint_with(
+            Path::new("/sandbox/usr"),
+            true,
+            "test umount",
+            |_| Ok(mounted.get()),
+            |_, force| {
+                attempts.borrow_mut().push(force);
+                mounted.set(false);
+                bail!("simulated race with another cleanup path")
+            },
+            || {},
+        )
+        .unwrap();
+        assert_eq!(*attempts.borrow(), vec![false]);
+    }
+
+    #[test]
+    fn force_unmount_requires_a_still_mounted_owned_path() {
+        let mounted = Cell::new(true);
+        let attempts = RefCell::new(Vec::new());
+        unmount_mountpoint_with(
+            Path::new("/sandbox/usr"),
+            true,
+            "test umount",
+            |_| Ok(mounted.get()),
+            |_, force| {
+                attempts.borrow_mut().push(force);
+                if force {
+                    mounted.set(false);
+                    Ok(())
+                } else {
+                    bail!("busy")
+                }
+            },
+            || {},
+        )
+        .unwrap();
+        let attempts = attempts.into_inner();
+        assert_eq!(attempts.iter().filter(|force| !**force).count(), 8);
+        assert_eq!(attempts.iter().filter(|force| **force).count(), 1);
+    }
+
+    #[test]
+    fn active_instance_roots_exclude_only_their_own_mounts_from_recovery() {
+        let first = PathBuf::from("/chroots/org.example.App/first");
+        let second = PathBuf::from("/chroots/org.example.App/second");
+        let other = PathBuf::from("/chroots/org.example.Other/only");
+        let active = vec![first.clone(), second.clone()];
+
+        assert!(belongs_to_any_root(&first.join("usr"), &active));
+        assert!(belongs_to_any_root(&second.join("proc"), &active));
+        assert!(!belongs_to_any_root(&other.join("app"), &active));
     }
 
     #[test]

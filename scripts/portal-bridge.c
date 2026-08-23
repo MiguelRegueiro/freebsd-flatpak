@@ -3291,6 +3291,17 @@ static gint find_sandbox_doc_dir(BridgeState *state, const char *path)
     return -1;
 }
 
+static void remove_sandbox(BridgeState *state, const char *sandbox_doc_dir)
+{
+    gint index = find_sandbox_doc_dir(state, sandbox_doc_dir);
+    if (index < 0) {
+        return;
+    }
+    remove_sandbox_grants(state, sandbox_doc_dir);
+    g_ptr_array_remove_index(state->sandbox_doc_dirs, (guint)index);
+    log_line("detached sandbox document root %s", sandbox_doc_dir);
+}
+
 static void handle_control_method(GDBusConnection *connection, const gchar *sender,
                                   const gchar *object_path, const gchar *interface_name,
                                   const gchar *method_name, GVariant *parameters,
@@ -3332,11 +3343,7 @@ static void handle_control_method(GDBusConnection *connection, const gchar *send
         return;
     }
     if (g_strcmp0(method_name, "RemoveSandbox") == 0) {
-        if (index >= 0) {
-            remove_sandbox_grants(state, sandbox_doc_dir);
-            g_ptr_array_remove_index(state->sandbox_doc_dirs, (guint)index);
-            log_line("detached sandbox document root %s", sandbox_doc_dir);
-        }
+        remove_sandbox(state, sandbox_doc_dir);
         g_dbus_method_invocation_return_value(invocation, NULL);
         return;
     }
