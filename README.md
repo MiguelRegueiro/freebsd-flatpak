@@ -30,13 +30,17 @@ doas ./scripts/install.sh
 Use `sudo ./scripts/install.sh` instead if `sudo` is your preferred privilege
 elevation tool.
 
-This installs the CLI at `/usr/local/bin/flatpak` and the native/Linux helper
-binaries under `/usr/local/libexec/freebsd-flatpak`. It also downloads a
-checksum-pinned libostree release, applies the small FreeBSD patchset, builds
-it under `target/`, and installs it privately in that directory; no system
-libostree package or manual library setup is needed. Application
-launchers, icons, and metadata are published into the normal per-user XDG data
-paths; no `XDG_DATA_DIRS` change is needed.
+Use `--verbose` to show the full build output, `--dry-run` to preview the
+installation without making system changes, and `--help` to see all options.
+The full build output is also saved to `/tmp/freebsd-flatpak-install.log.XXXXXX`.
+
+This installs the CLI at `/usr/local/bin/flatpak` and the compatibility helpers
+under `/usr/local/libexec/freebsd-flatpak`. It also downloads a checksum-pinned
+libostree release, applies the small FreeBSD patchset, builds it under `target/`,
+and installs it privately under `/usr/local/libexec/freebsd-flatpak`; no system
+libostree package or manual library setup is needed. Application launchers,
+icons, and metadata are published into the normal per-user XDG data paths; no
+`XDG_DATA_DIRS` change is needed.
 
 ## Usage
 

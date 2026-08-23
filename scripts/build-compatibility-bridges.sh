@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+BASE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$BASE/scripts/install-ui.sh"
+
 if [ "$#" -ne 1 ]; then
     printf 'usage: %s OUTPUT_DIR\n' "$0" >&2
     exit 64
@@ -12,6 +15,7 @@ PORTAL_RESPONSE=$OUTPUT_DIR/portal-bridge.pkg-config.rsp
 STATUS_NOTIFIER_RESPONSE=$OUTPUT_DIR/status-notifier-bridge.pkg-config.rsp
 trap 'rm -f "$PORTAL_RESPONSE" "$STATUS_NOTIFIER_RESPONSE"' EXIT HUP INT TERM
 
+ui_progress "Portal bridge"
 pkg-config --cflags --libs gio-2.0 gio-unix-2.0 glib-2.0 libpipewire-0.3 \
     >"$PORTAL_RESPONSE"
 cc -O2 -Wall -Wextra \
@@ -29,6 +33,7 @@ cc -O2 -Wall -Wextra \
     -o "$OUTPUT_DIR/portal-bridge" \
     @"$PORTAL_RESPONSE"
 
+ui_progress "Status notifier bridge"
 pkg-config --cflags --libs gio-2.0 gio-unix-2.0 glib-2.0 \
     >"$STATUS_NOTIFIER_RESPONSE"
 cc -O2 -Wall -Wextra \
