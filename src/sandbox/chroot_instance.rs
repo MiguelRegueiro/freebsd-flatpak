@@ -165,10 +165,10 @@ impl ChrootInstance {
             eprintln!("  audio warning: {warning}");
         }
         for line in self.host_cursor.describe() {
-            eprintln!("  cursor: {line}");
+            eprintln!("  desktop theme: {line}");
         }
         for warning in self.host_cursor.warnings() {
-            eprintln!("  cursor warning: {warning}");
+            eprintln!("  desktop theme warning: {warning}");
         }
         for line in self.host_fonts.describe() {
             eprintln!("  fonts: {line}");

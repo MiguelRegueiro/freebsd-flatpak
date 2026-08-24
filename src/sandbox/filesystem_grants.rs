@@ -8,6 +8,8 @@ use super::filesystem_permissions::{
 };
 use anyhow::{bail, Context, Result};
 use std::env;
+#[cfg(target_os = "freebsd")]
+use std::ffi::CStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 #[derive(Debug, Clone)]
@@ -119,12 +121,31 @@ impl HostFilesystem {
         project_root: &Path,
         sandbox_root: &Path,
     ) -> Result<Self> {
+        Self::from_metadata_with_mount_points(
+            metadata,
+            user,
+            home,
+            project_root,
+            sandbox_root,
+            host_mount_points(),
+        )
+    }
+
+    fn from_metadata_with_mount_points(
+        metadata: &str,
+        user: &str,
+        home: &Path,
+        project_root: &Path,
+        sandbox_root: &Path,
+        mount_points: Vec<PathBuf>,
+    ) -> Result<Self> {
         let permissions = parse_filesystem_permissions(metadata)?;
         let xdg_dirs = XdgUserDirs::load(home);
         let sandbox_home = PathBuf::from("/home").join(user);
         let mut builder = GrantBuilder {
             grants: Vec::new(),
             warnings: Vec::new(),
+            mount_points,
             home: home.to_path_buf(),
             sandbox_home,
             project_root: fs::canonicalize(project_root)
@@ -311,6 +332,7 @@ XDG_VIDEOS_DIR=\"{videos}\"
 struct GrantBuilder {
     grants: Vec<HostPathGrant>,
     warnings: Vec<String>,
+    mount_points: Vec<PathBuf>,
     home: PathBuf,
     sandbox_home: PathBuf,
     project_root: PathBuf,
@@ -369,14 +391,15 @@ impl GrantBuilder {
     }
 
     fn add_host_grants(&mut self, permission: &FilesystemPermission) -> Result<()> {
-        for path in [
+        let roots = [
             PathBuf::from("/home"),
             PathBuf::from("/media"),
             PathBuf::from("/mnt"),
             PathBuf::from("/opt"),
             PathBuf::from("/run/media"),
             PathBuf::from("/srv"),
-        ] {
+        ];
+        for path in roots {
             if path.is_dir() {
                 self.add_grant_or_expand(
                     permission,
@@ -400,6 +423,32 @@ impl GrantBuilder {
         create: bool,
         depth: usize,
     ) -> Result<()> {
+        if depth == 0 {
+            for granted_path in
+                authorized_grant_paths(std::slice::from_ref(&host_path), &self.mount_points)
+            {
+                let suffix = granted_path
+                    .strip_prefix(&host_path)
+                    .with_context(|| {
+                        format!(
+                            "map subordinate mount {} below grant {}",
+                            granted_path.display(),
+                            host_path.display()
+                        )
+                    })?
+                    .to_path_buf();
+                self.add_grant_or_expand(
+                    permission,
+                    label,
+                    granted_path,
+                    sandbox_path.join(&suffix),
+                    create && suffix.as_os_str().is_empty(),
+                    1,
+                )?;
+            }
+            return Ok(());
+        }
+
         if create && !host_path.exists() {
             fs::create_dir_all(&host_path)
                 .with_context(|| format!("create host directory {}", host_path.display()))?;
@@ -543,6 +592,63 @@ impl GrantBuilder {
                 .then_with(|| left.host_path.cmp(&right.host_path))
         });
     }
+}
+
+fn authorized_grant_paths(roots: &[PathBuf], mount_points: &[PathBuf]) -> Vec<PathBuf> {
+    // A FreeBSD nullfs mount of a parent does not expose filesystems mounted
+    // below it. Mount each nested filesystem at the corresponding sandbox
+    // path so every authorized Flatpak grant has the same view as the host
+    // process without widening the grant root.
+    let mut paths = roots.to_vec();
+    paths.extend(
+        mount_points
+            .iter()
+            .filter(|mount| clean_absolute_path(mount))
+            .filter(|mount| {
+                roots
+                    .iter()
+                    .any(|root| *mount != root && mount.starts_with(root))
+            })
+            .cloned(),
+    );
+    paths.sort_by(|left, right| {
+        left.components()
+            .count()
+            .cmp(&right.components().count())
+            .then_with(|| left.cmp(right))
+    });
+    paths.dedup();
+    paths
+}
+
+fn clean_absolute_path(path: &Path) -> bool {
+    path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+}
+
+#[cfg(target_os = "freebsd")]
+fn host_mount_points() -> Vec<PathBuf> {
+    let mut entries: *mut libc::statfs = std::ptr::null_mut();
+    let count = unsafe { libc::getmntinfo(&mut entries, libc::MNT_NOWAIT) };
+    if count <= 0 || entries.is_null() {
+        return Vec::new();
+    }
+
+    let mounts = unsafe { std::slice::from_raw_parts(entries, count as usize) };
+    mounts
+        .iter()
+        .filter_map(|mount| {
+            let path = unsafe { CStr::from_ptr(mount.f_mntonname.as_ptr()) };
+            path.to_str().ok().map(PathBuf::from)
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "freebsd"))]
+fn host_mount_points() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 #[derive(Debug, Clone)]
