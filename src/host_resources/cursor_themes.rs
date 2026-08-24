@@ -1,3 +1,4 @@
+use crate::desktop_integration::DesktopSession;
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
@@ -8,6 +9,7 @@ const SANDBOX_ICON_ROOT: &str = "/run/host/share/icons";
 
 #[derive(Debug, Clone)]
 pub struct HostCursorTheme {
+    icon_theme: Option<String>,
     xcursor_theme: Option<String>,
     xcursor_size: Option<String>,
     hyprcursor_theme: Option<String>,
@@ -24,8 +26,9 @@ pub struct CursorThemeMount {
 }
 
 impl HostCursorTheme {
-    pub fn from_host() -> Self {
+    pub fn from_host(desktop: &DesktopSession) -> Self {
         let desktop_env = desktop_environment();
+        let icon_theme = host_icon_theme(desktop.dbus_session_bus_address.as_deref());
         let xcursor_theme = host_var("XCURSOR_THEME", &desktop_env);
         let xcursor_size = host_var("XCURSOR_SIZE", &desktop_env);
         let hyprcursor_theme = host_var("HYPRCURSOR_THEME", &desktop_env);
@@ -33,7 +36,10 @@ impl HostCursorTheme {
 
         let mut warnings = Vec::new();
         let mut themes = BTreeSet::new();
-        for theme in [&xcursor_theme, &hyprcursor_theme].into_iter().flatten() {
+        for theme in [&icon_theme, &xcursor_theme, &hyprcursor_theme]
+            .into_iter()
+            .flatten()
+        {
             if valid_theme_name(theme) {
                 themes.insert(theme.clone());
             } else {
@@ -45,6 +51,7 @@ impl HostCursorTheme {
         let mounts = theme_mounts(&themes, &search_dirs, &mut warnings);
 
         Self {
+            icon_theme,
             xcursor_theme,
             xcursor_size,
             hyprcursor_theme,
@@ -64,6 +71,9 @@ impl HostCursorTheme {
 
     pub fn describe(&self) -> Vec<String> {
         let mut lines = Vec::new();
+        if let Some(theme) = &self.icon_theme {
+            lines.push(format!("icons: {theme}"));
+        }
         if let Some(theme) = &self.xcursor_theme {
             let size = self.xcursor_size.as_deref().unwrap_or("default");
             lines.push(format!("xcursor: {theme} size {size}"));
@@ -97,6 +107,71 @@ impl HostCursorTheme {
         }
         env
     }
+}
+
+fn host_icon_theme(bus_address: Option<&str>) -> Option<String> {
+    // GTK reads this exact setting through the sandbox's proxied Settings
+    // portal, so use the host portal as the source of truth for what to mount.
+    if let Some(theme) = bus_address.and_then(portal_icon_theme) {
+        return Some(theme);
+    }
+
+    if let Ok(theme) = std::env::var("GTK_ICON_THEME") {
+        if !theme.is_empty() {
+            return Some(theme);
+        }
+    }
+
+    let output = Command::new("gsettings")
+        .arg("get")
+        .arg("org.gnome.desktop.interface")
+        .arg("icon-theme")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_gsettings_string(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn portal_icon_theme(bus_address: &str) -> Option<String> {
+    let output = Command::new("gdbus")
+        .arg("call")
+        .arg("--address")
+        .arg(bus_address)
+        .arg("--dest")
+        .arg("org.freedesktop.portal.Desktop")
+        .arg("--object-path")
+        .arg("/org/freedesktop/portal/desktop")
+        .arg("--method")
+        .arg("org.freedesktop.portal.Settings.Read")
+        .arg("org.gnome.desktop.interface")
+        .arg("icon-theme")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_quoted_variant_string(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_gsettings_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    let value = value
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+        .or_else(|| {
+            value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+        })?;
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn parse_quoted_variant_string(value: &str) -> Option<String> {
+    let start = value.find('\'')? + 1;
+    let end = value.rfind('\'')?;
+    (end > start).then(|| value[start..end].to_string())
 }
 
 impl CursorThemeMount {
@@ -212,9 +287,12 @@ fn theme_mounts(
         if !seen.insert(theme.clone()) {
             continue;
         }
+        if is_runtime_icon_theme(&theme) {
+            continue;
+        }
         let Some(host_path) = find_theme_dir(&theme, search_dirs) else {
             if themes.contains(&theme) {
-                warnings.push(format!("cursor theme {theme} was not found on the host"));
+                warnings.push(format!("desktop theme {theme} was not found on the host"));
             }
             continue;
         };
@@ -239,7 +317,11 @@ fn find_theme_dir(theme: &str, search_dirs: &[PathBuf]) -> Option<PathBuf> {
     search_dirs
         .iter()
         .map(|dir| dir.join(theme))
-        .find(|path| path.join("cursors").is_dir())
+        .find(|path| path.join("index.theme").is_file() || path.join("cursors").is_dir())
+}
+
+fn is_runtime_icon_theme(theme: &str) -> bool {
+    matches!(theme, "Adwaita" | "AdwaitaLegacy" | "hicolor")
 }
 
 fn inherited_themes(theme_dir: &Path) -> Vec<String> {

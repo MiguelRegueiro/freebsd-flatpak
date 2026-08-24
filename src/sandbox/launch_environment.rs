@@ -32,7 +32,7 @@ pub(super) fn launch_env(
         ("XDG_CONFIG_DIRS".to_string(), "/app/etc/xdg:/etc/xdg".to_string()),
         (
             "XDG_DATA_DIRS".to_string(),
-            "/app/share:/usr/share:/usr/share/runtime/share".to_string(),
+            "/app/share:/usr/share:/usr/share/runtime/share:/run/host/share".to_string(),
         ),
         (
             "GI_TYPELIB_PATH".to_string(),
