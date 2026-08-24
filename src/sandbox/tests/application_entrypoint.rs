@@ -1,7 +1,9 @@
 use super::*;
 use crate::sandbox::launch_application::FlatpakApp;
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static TEST_ID: AtomicUsize = AtomicUsize::new(0);
@@ -57,4 +59,29 @@ fn non_electron_app_gets_no_ozone_arg() {
     );
 
     assert!(compatibility_args(&app, &[]).unwrap().is_empty());
+}
+
+#[test]
+fn linux_elf_entry_is_executed_directly() {
+    let app = app_with_metadata("[Application]\n");
+    fs::create_dir_all(app.app_dir.join("files/bin")).unwrap();
+    fs::write(
+        app.app_dir.join("files/app"),
+        b"\x7fELF\x02\x01\x01\x00 test executable",
+    )
+    .unwrap();
+    symlink("/app/app", app.app_dir.join("files/bin/app")).unwrap();
+
+    let entry = resolve_entry(&app).unwrap();
+    let mut command = Command::new("chroot");
+    entry.append_command_args(&mut command, &["--example".into()]);
+
+    assert_eq!(entry.display(&[]), "/app/bin/app");
+    assert_eq!(
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+        vec!["/app/bin/app", "--example"]
+    );
 }

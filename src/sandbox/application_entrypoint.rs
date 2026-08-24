@@ -49,23 +49,11 @@ fn has_ozone_platform_arg(args: &[String]) -> bool {
 #[derive(Debug, Clone)]
 pub(super) struct EntryLaunch {
     chroot_path: String,
-    mode: EntryLaunchMode,
-}
-
-#[derive(Debug, Clone)]
-enum EntryLaunchMode {
-    LinuxElf,
-    Direct,
 }
 
 impl EntryLaunch {
     pub(super) fn display(&self, args: &[String]) -> String {
-        let mut display = match self.mode {
-            EntryLaunchMode::LinuxElf => {
-                format!("/lib64/ld-linux-x86-64.so.2 {}", self.chroot_path)
-            }
-            EntryLaunchMode::Direct => self.chroot_path.clone(),
-        };
+        let mut display = self.chroot_path.clone();
         for arg in args {
             display.push(' ');
             display.push_str(arg);
@@ -74,16 +62,11 @@ impl EntryLaunch {
     }
 
     pub(super) fn append_command_args(&self, command: &mut Command, args: &[String]) {
-        match self.mode {
-            EntryLaunchMode::LinuxElf => {
-                command
-                    .arg("/lib64/ld-linux-x86-64.so.2")
-                    .arg(&self.chroot_path);
-            }
-            EntryLaunchMode::Direct => {
-                command.arg(&self.chroot_path);
-            }
-        }
+        // Let execve(2) select an ELF executable's PT_INTERP after chroot(2).
+        // Invoking ld-linux as the executable changes /proc/self/exe to the
+        // loader. Frameworks such as Flutter use that link to find files next
+        // to their application executable.
+        command.arg(&self.chroot_path);
         command.args(args);
     }
 }
@@ -95,14 +78,7 @@ pub(super) fn resolve_entry(app: &FlatpakApp) -> Result<EntryLaunch> {
     if fs::symlink_metadata(&host_entry).is_err() {
         bail!("entry executable does not exist: {}", host_entry.display());
     }
-    let probe_entry =
-        resolve_app_symlink_for_probe(&app_files, &host_entry).unwrap_or(host_entry.clone());
-    let mode = if is_linux_elf(&probe_entry) {
-        EntryLaunchMode::LinuxElf
-    } else {
-        EntryLaunchMode::Direct
-    };
-    Ok(EntryLaunch { chroot_path, mode })
+    Ok(EntryLaunch { chroot_path })
 }
 
 fn host_app_path(app_files: &Path, chroot_path: &str) -> Result<PathBuf> {
@@ -113,33 +89,6 @@ fn host_app_path(app_files: &Path, chroot_path: &str) -> Result<PathBuf> {
         bail!("entry path must be inside /app for this POC: {chroot_path}");
     }
     Ok(app_files.join("bin").join(chroot_path))
-}
-
-fn resolve_app_symlink_for_probe(app_files: &Path, path: &Path) -> Result<PathBuf> {
-    let mut current = path.to_path_buf();
-    for _ in 0..8 {
-        let metadata = fs::symlink_metadata(&current)
-            .with_context(|| format!("read metadata for {}", current.display()))?;
-        if !metadata.file_type().is_symlink() {
-            return Ok(current);
-        }
-
-        let target = fs::read_link(&current)
-            .with_context(|| format!("read symlink {}", current.display()))?;
-        current = if target.is_absolute() {
-            let target = target
-                .to_str()
-                .context("absolute symlink target is not UTF-8")?;
-            host_app_path(app_files, target)?
-        } else {
-            current
-                .parent()
-                .context("symlink has no parent")?
-                .join(target)
-        };
-    }
-
-    bail!("too many symlink hops resolving {}", path.display());
 }
 
 fn chroot_entry_path(command: &str) -> String {
@@ -200,13 +149,6 @@ pub(super) fn join_numeric_ids(ids: &[u32]) -> String {
 
 pub(super) fn host_user(uid: u32) -> String {
     std::env::var("USER").unwrap_or_else(|_| uid.to_string())
-}
-
-fn is_linux_elf(path: &Path) -> bool {
-    let Ok(bytes) = fs::read(path) else {
-        return false;
-    };
-    bytes.len() >= 20 && &bytes[0..4] == b"\x7fELF" && bytes.get(7).copied() == Some(0)
 }
 
 #[cfg(test)]
