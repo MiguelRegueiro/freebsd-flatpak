@@ -1,4 +1,4 @@
-use super::{authorized_grant_paths, AccessMode, HostFilesystem};
+use super::{authorized_grant_paths, AccessMode, HostFilesystem, XdgUserDirs};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13,7 +13,7 @@ impl TestTree {
     fn new(name: &str) -> Self {
         let id = TEST_ID.fetch_add(1, Ordering::SeqCst);
         let root = std::env::temp_dir().join(format!(
-            "freebsd-flatpak-poc-{name}-{}-{id}",
+            "freebsd-flatpak-{name}-{}-{id}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
@@ -82,12 +82,121 @@ fn xdg_documents_ro_resolves_read_only() {
     assert_eq!(fs.grants()[0].access(), AccessMode::ReadOnly);
 }
 
+fn filesystem_with_user_dirs(
+    tree: &TestTree,
+    filesystems: &str,
+    user_dirs: Option<&str>,
+) -> HostFilesystem {
+    let home = tree.path("home/user");
+    let config_home = tree.path("host-config");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&config_home).unwrap();
+    if let Some(user_dirs) = user_dirs {
+        fs::write(config_home.join("user-dirs.dirs"), user_dirs).unwrap();
+    }
+    HostFilesystem::from_metadata_with_xdg_dirs(
+        &metadata(filesystems),
+        "user",
+        &home,
+        &tree.path("project"),
+        &tree.path("project/runtime/chroots/org.example.App"),
+        Vec::new(),
+        XdgUserDirs::load_from_config_home(&home, &config_home),
+    )
+    .unwrap()
+}
+
+fn generated_user_dirs(tree: &TestTree, filesystem: &HostFilesystem) -> String {
+    let config_home = tree.path("sandbox-config");
+    filesystem.write_xdg_user_dirs_config(&config_home).unwrap();
+    fs::read_to_string(config_home.join("user-dirs.dirs")).unwrap()
+}
+
+#[test]
+fn all_xdg_user_directory_permissions_are_published_consistently() {
+    let tree = TestTree::new("all-xdg-user-dirs");
+    let names = [
+        ("DESKTOP", "Desk"),
+        ("DOCUMENTS", "Docs"),
+        ("DOWNLOAD", "Incoming"),
+        ("MUSIC", "Audio"),
+        ("PICTURES", "Images"),
+        ("PUBLICSHARE", "Shared"),
+        ("TEMPLATES", "Patterns"),
+        ("VIDEOS", "Movies"),
+    ];
+    let mut config = String::new();
+    for (key, directory) in names {
+        fs::create_dir_all(tree.path(&format!("home/user/{directory}"))).unwrap();
+        config.push_str(&format!("XDG_{key}_DIR=\"$HOME/{directory}\"\n"));
+    }
+    let filesystem = filesystem_with_user_dirs(
+        &tree,
+        "xdg-desktop;xdg-documents;xdg-download;xdg-music;xdg-pictures;xdg-public-share;xdg-templates;xdg-videos;",
+        Some(&config),
+    );
+    let generated = generated_user_dirs(&tree, &filesystem);
+
+    assert_eq!(filesystem.grants().len(), 8);
+    assert_eq!(filesystem.user_dir_env().len(), 8);
+    for (key, directory) in names {
+        assert!(generated.contains(&format!(
+            "XDG_{key}_DIR=\"{}\"",
+            tree.path(&format!("home/user/{directory}")).display()
+        )));
+    }
+}
+
+#[test]
+fn missing_user_dirs_config_uses_xdg_default_download_path() {
+    let tree = TestTree::new("missing-user-dirs");
+    let download = tree.path("home/user/Downloads");
+    fs::create_dir_all(&download).unwrap();
+    let filesystem = filesystem_with_user_dirs(&tree, "xdg-download;", None);
+
+    assert_eq!(filesystem.grants()[0].host_path(), download);
+    assert!(generated_user_dirs(&tree, &filesystem)
+        .contains(&format!("XDG_DOWNLOAD_DIR=\"{}\"", download.display())));
+}
+
+#[test]
+fn ungranted_xdg_directory_is_not_published_or_exposed() {
+    let tree = TestTree::new("ungranted-xdg-download");
+    let download = tree.path("home/user/Private Downloads");
+    fs::create_dir_all(&download).unwrap();
+    let filesystem = filesystem_with_user_dirs(
+        &tree,
+        "",
+        Some("XDG_DOWNLOAD_DIR=\"$HOME/Private Downloads\"\n"),
+    );
+    let generated = generated_user_dirs(&tree, &filesystem);
+
+    assert!(filesystem.grants().is_empty());
+    assert!(filesystem.user_dir_env().is_empty());
+    assert!(!generated.contains("XDG_DOWNLOAD_DIR="));
+    assert!(!generated.contains(&download.display().to_string()));
+}
+
+#[test]
+fn xdg_directory_configured_as_home_is_disabled() {
+    let tree = TestTree::new("disabled-xdg-download");
+    let filesystem =
+        filesystem_with_user_dirs(&tree, "xdg-download;", Some("XDG_DOWNLOAD_DIR=\"$HOME\"\n"));
+
+    assert!(filesystem.grants().is_empty());
+    assert!(filesystem
+        .warnings()
+        .iter()
+        .any(|warning| warning == "disabled XDG filesystem permission: xdg-download"));
+    assert!(!generated_user_dirs(&tree, &filesystem).contains("XDG_DOWNLOAD_DIR="));
+}
+
 #[test]
 fn home_expands_to_children_when_project_lives_under_home() {
     let tree = TestTree::new("home-expands");
     let home = tree.path("home/user");
     let docs = home.join("Documents");
-    let project = home.join("freebsd-flatpak-poc");
+    let project = home.join("freebsd-flatpak");
     fs::create_dir_all(&docs).unwrap();
     fs::create_dir_all(project.join("runtime/chroots/org.example.App")).unwrap();
     let fs = HostFilesystem::from_metadata(

@@ -30,8 +30,10 @@ launcher does not widen filesystem access automatically.
 
 ## Runtime Behavior
 
-For every run, the sandbox also writes `var/config/user-dirs.dirs` inside the
-project-local chroot so GTK file UI can discover the granted user directories.
+For every run, the sandbox also writes `user-dirs.dirs` into the app config
+directory that is mounted at `/var/config`, so GLib, `xdg-user-dir`, and GTK
+file UI can discover the granted user directories. Only granted directories
+are published in that file; ungranted host paths remain undisclosed.
 
 The mounts are owned by the existing run instance and are cleaned up by the same
 normal-exit, signal, and stale-mount recovery paths as the app/runtime/Wayland
@@ -101,6 +103,7 @@ Supported filesystem names:
 - `xdg-music`
 - `xdg-pictures`
 - `xdg-public-share`
+- `xdg-templates`
 - `xdg-videos`
 
 The resolver parses `:ro`, `:rw`, and `:create`. Read-only permissions become

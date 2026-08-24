@@ -1,5 +1,6 @@
 #include "basic_desktop_portals.h"
 #include "document_grant_store.h"
+#include "document_grant_persistence.h"
 #include "document_portal.h"
 #include "pipewire_screencast_linker.h"
 #include "portal_bridge_process.h"
@@ -28,13 +29,15 @@ int main(int argc, char **argv) {
   const char *doc_dir = arg_value(argc, argv, "--doc-dir");
   const char *sandbox_root = arg_value(argc, argv, "--sandbox-root");
   const char *mountpoint = arg_value(argc, argv, "--mountpoint");
+  const char *grant_store = arg_value(argc, argv, "--grant-store");
   const char *host_bus_address = getenv("HOST_DBUS_SESSION_BUS_ADDRESS");
   if (app_id == NULL || doc_dir == NULL || sandbox_root == NULL ||
-      mountpoint == NULL || host_bus_address == NULL ||
+      mountpoint == NULL || grant_store == NULL || host_bus_address == NULL ||
       *host_bus_address == '\0') {
     fprintf(stderr,
             "usage: %s --app-id APP_ID --doc-dir HOST_DOC_DIR --sandbox-root "
-            "APP_CHROOT_ROOT --mountpoint SANDBOX_MOUNTPOINT\n",
+            "APP_CHROOT_ROOT --mountpoint SANDBOX_MOUNTPOINT --grant-store "
+            "PERSISTENT_GRANT_FILE\n",
             argv[0]);
     fprintf(
         stderr,
@@ -55,10 +58,10 @@ int main(int argc, char **argv) {
               .doc_dir = g_strdup(doc_dir),
               .sandbox_root = g_strdup(sandbox_root),
               .mountpoint = g_strdup(mountpoint),
+              .persistent_store = g_strdup(grant_store),
               .sandbox_doc_dirs = g_ptr_array_new_with_free_func(g_free),
               .grants =
                   g_ptr_array_new_with_free_func((GDestroyNotify)free_grant),
-              .counter = 0,
           },
       .request_store =
           {
@@ -84,6 +87,12 @@ int main(int argc, char **argv) {
   };
   if (state.host_bus == NULL || state.desktop_node == NULL) {
     fprintf(stderr, "portal bridge setup failed: %s\n", error->message);
+    g_error_free(error);
+    return 1;
+  }
+  if (!load_persistent_document_grants(&state, &error)) {
+    fprintf(stderr, "load persistent document grants failed: %s\n",
+            error->message);
     g_error_free(error);
     return 1;
   }
@@ -168,5 +177,6 @@ int main(int argc, char **argv) {
   g_free(state.documents.doc_dir);
   g_free(state.documents.sandbox_root);
   g_free(state.documents.mountpoint);
+  g_free(state.documents.persistent_store);
   return 0;
 }

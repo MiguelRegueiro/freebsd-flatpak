@@ -1,55 +1,7 @@
 #include "document_mounts.h"
+#include "document_mount_backend.h"
 #include "document_grant_store.h"
 #include "portal_bridge_process.h"
-bool run_argv(char **argv, GError **error) {
-  gint status = 0;
-  gchar *stderr_text = NULL;
-  if (!g_spawn_sync(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL,
-                    &stderr_text, &status, error)) {
-    g_free(stderr_text);
-    return false;
-  }
-  if (!g_spawn_check_wait_status(status, error)) {
-    if (stderr_text != NULL && *stderr_text != '\0') {
-      log_line("%s", stderr_text);
-    }
-    g_free(stderr_text);
-    return false;
-  }
-  g_free(stderr_text);
-  return true;
-}
-
-bool mount_file_read_only(const char *source, const char *target,
-                          GError **error) {
-  char *argv[] = {"doas",         "mount_nullfs", "-o", "ro",
-                  (char *)source, (char *)target, NULL};
-  return run_argv(argv, error);
-}
-
-bool unmount_path(const char *target) {
-  GError *error = NULL;
-  char *argv[] = {"doas", "umount", (char *)target, NULL};
-  if (run_argv(argv, &error)) {
-    return true;
-  }
-  if (error != NULL) {
-    log_line("umount failed for %s: %s", target, error->message);
-    g_error_free(error);
-  }
-
-  error = NULL;
-  char *force_argv[] = {"doas", "umount", "-f", (char *)target, NULL};
-  if (run_argv(force_argv, &error)) {
-    return true;
-  }
-  if (error != NULL) {
-    log_line("forced umount failed for %s: %s", target, error->message);
-    g_error_free(error);
-  }
-  return false;
-}
-
 void cleanup_grant(DocumentGrant *grant) {
   if (grant == NULL) {
     return;
@@ -64,14 +16,17 @@ void cleanup_grant(DocumentGrant *grant) {
   if (placeholder == NULL) {
     return;
   }
-  if (g_remove(placeholder) != 0 && errno != ENOENT) {
-    log_line("remove %s failed: %s", placeholder, g_strerror(errno));
+  char *document_dir = g_path_get_dirname(placeholder);
+  int remove_result = grant->is_directory ? g_rmdir(placeholder)
+                                          : g_remove(placeholder);
+  if (remove_result != 0 && errno != ENOENT) {
+    log_line("remove placeholder %s failed: %s", placeholder,
+             g_strerror(errno));
   }
-  char *dir = g_path_get_dirname(placeholder);
-  if (g_rmdir(dir) != 0 && errno != ENOENT) {
-    log_line("remove %s failed: %s", dir, g_strerror(errno));
+  if (g_rmdir(document_dir) != 0 && errno != ENOENT) {
+    log_line("remove %s failed: %s", document_dir, g_strerror(errno));
   }
-  g_free(dir);
+  g_free(document_dir);
 }
 
 bool sandbox_doc_dir_allowed(BridgeState *state, const char *path) {
@@ -94,7 +49,9 @@ bool mount_grant_in_sandbox(DocumentGrant *grant, const char *sandbox_doc_dir,
   g_free(base);
   g_free(target_dir);
 
-  if (!mount_file_read_only(grant->host_path, target, error)) {
+  bool read_only = !g_strv_contains((const char *const *)grant->permissions,
+                                   "write");
+  if (!mount_grant_path(grant->host_path, target, read_only, error)) {
     g_free(target);
     return false;
   }

@@ -1,6 +1,7 @@
 #include "portal_bridge_process.h"
 #include "basic_desktop_portals.h"
 #include "document_grant_store.h"
+#include "document_mounts.h"
 #include "document_portal.h"
 #include "pipewire_screencast_linker.h"
 #include "portal_request.h"

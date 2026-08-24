@@ -12,7 +12,7 @@ fn encodes_linux_drm_dev_t_values() {
 #[test]
 fn writes_pci_driver_links_for_drm_sysfs() {
     let root = std::env::temp_dir().join(format!(
-        "freebsd-flatpak-poc-graphics-test-{}",
+        "freebsd-flatpak-graphics-test-{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&root);

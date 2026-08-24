@@ -5,11 +5,11 @@ use std::path::Path;
 fn rewrites_simple_exec() {
     assert_eq!(
         desktop_exec(
-            Path::new("/poc/bin/flatpak"),
+            Path::new("/project/bin/flatpak"),
             "org.example.App",
             "app-binary"
         ),
-        "/poc/bin/flatpak run org.example.App"
+        "/project/bin/flatpak run org.example.App"
     );
 }
 
@@ -17,11 +17,11 @@ fn rewrites_simple_exec() {
 fn preserves_desktop_exec_arguments() {
     assert_eq!(
         desktop_exec(
-            Path::new("/poc/bin/flatpak"),
+            Path::new("/project/bin/flatpak"),
             "org.example.App",
             "app-binary --new-window %U"
         ),
-        "/poc/bin/flatpak run org.example.App -- --new-window %U"
+        "/project/bin/flatpak run org.example.App -- --new-window %U"
     );
 }
 

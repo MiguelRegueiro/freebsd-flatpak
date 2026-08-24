@@ -114,7 +114,7 @@ void on_forward_call(GObject *source_object, GAsyncResult *result,
 }
 char *fresh_request_path(BridgeState *state, const char *label) {
   return g_strdup_printf("/org/freedesktop/portal/desktop/request/"
-                         "freebsd_flatpak_poc/%s_%" G_GUINT64_FORMAT,
+                         "freebsd_flatpak/%s_%" G_GUINT64_FORMAT,
                          label, ++state->request_store.request_counter);
 }
 

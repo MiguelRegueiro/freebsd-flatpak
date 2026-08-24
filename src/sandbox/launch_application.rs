@@ -63,7 +63,7 @@ pub fn resolve_app(
             )
         })?;
     if command.split_whitespace().count() != 1 {
-        bail!("entry command must be a single executable for this POC: {command:?}");
+        bail!("entry command must be a single executable: {command:?}");
     }
 
     let runtime_dir = options

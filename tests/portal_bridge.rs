@@ -29,6 +29,8 @@ fn compatibility_bridge_contract() {
             "tests/portal-bridge-test.c",
             "compatibility_helpers/portal_bridge/basic_desktop_portals.c",
             "compatibility_helpers/portal_bridge/document_grant_store.c",
+            "compatibility_helpers/portal_bridge/document_grant_persistence.c",
+            "compatibility_helpers/portal_bridge/document_id.c",
             "compatibility_helpers/portal_bridge/document_mounts.c",
             "compatibility_helpers/portal_bridge/document_portal.c",
             "compatibility_helpers/portal_bridge/file_chooser_portal.c",

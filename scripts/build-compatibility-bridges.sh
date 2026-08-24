@@ -21,6 +21,9 @@ pkg-config --cflags --libs gio-2.0 gio-unix-2.0 glib-2.0 libpipewire-0.3 \
 cc -O2 -Wall -Wextra \
     compatibility_helpers/portal_bridge/basic_desktop_portals.c \
     compatibility_helpers/portal_bridge/document_grant_store.c \
+    compatibility_helpers/portal_bridge/document_grant_persistence.c \
+    compatibility_helpers/portal_bridge/document_id.c \
+    compatibility_helpers/portal_bridge/document_mount_backend.c \
     compatibility_helpers/portal_bridge/document_mounts.c \
     compatibility_helpers/portal_bridge/document_portal.c \
     compatibility_helpers/portal_bridge/file_chooser_portal.c \

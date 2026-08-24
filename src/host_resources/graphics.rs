@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 pub(super) const DRM_MAJOR: u32 = 226;
 pub(super) const DRM_SYNCOBJ_ERRNO_SHIM_LIB: &str = "libdrm-syncobj-errno-shim.so";
 pub(super) const CHROMIUM_ZYGOTE_DRM_PRELOAD_LIB: &str = "libchromium-zygote-drm-preload.so";
-pub(super) const GRAPHICS_SHIM_SANDBOX_DIR: &str = "/run/host/freebsd-flatpak-poc";
+pub(super) const GRAPHICS_SHIM_SANDBOX_DIR: &str = "/run/host/freebsd-flatpak";
 pub(super) const WAYLAND_DRM_DEVT_SHIM_LIB: &str = "libwayland-drm-devt-shim.so";
 
 #[derive(Debug, Clone)]

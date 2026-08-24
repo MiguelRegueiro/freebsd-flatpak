@@ -68,6 +68,7 @@ impl Installation {
             self.exports(),
             self.remote_configs(),
             self.remote_metadata_root(),
+            self.portal_documents(),
             self.chroots(),
             self.runs(),
             self.portal(),
@@ -126,6 +127,9 @@ impl Installation {
     }
     pub fn remote_metadata(&self, remote: &str) -> PathBuf {
         self.remote_metadata_root().join(remote)
+    }
+    pub fn portal_documents(&self) -> PathBuf {
+        self.data_root.join("portal-documents")
     }
     pub fn chroots(&self) -> PathBuf {
         self.runtime_root.join("chroots")

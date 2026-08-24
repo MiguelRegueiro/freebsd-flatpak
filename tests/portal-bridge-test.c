@@ -1,11 +1,45 @@
 #include "../compatibility_helpers/portal_bridge/basic_desktop_portals.h"
 #include "../compatibility_helpers/portal_bridge/document_grant_store.h"
+#include "../compatibility_helpers/portal_bridge/document_grant_persistence.h"
+#include "../compatibility_helpers/portal_bridge/document_mounts.h"
+#include "../compatibility_helpers/portal_bridge/document_id.h"
 #include "../compatibility_helpers/portal_bridge/document_portal.h"
+#include "../compatibility_helpers/portal_bridge/file_chooser_portal.h"
 #include "../compatibility_helpers/portal_bridge/pipewire_screencast_linker.h"
 #include "../compatibility_helpers/portal_bridge/portal_request.h"
 #include "../compatibility_helpers/portal_bridge/sandbox_document_registration.h"
 #include "../compatibility_helpers/portal_bridge/screencast_portal.h"
 #include "../compatibility_helpers/status_notifier_bridge/status_notifier_watcher.h"
+
+typedef struct {
+  char *source;
+  char *target;
+  bool read_only;
+} TestMountCall;
+
+static GPtrArray *test_mount_calls;
+
+static void free_test_mount_call(TestMountCall *call) {
+  g_free(call->source);
+  g_free(call->target);
+  g_free(call);
+}
+
+bool mount_grant_path(const char *source, const char *target, bool read_only,
+                      GError **error) {
+  (void)error;
+  TestMountCall *call = g_new0(TestMountCall, 1);
+  call->source = g_strdup(source);
+  call->target = g_strdup(target);
+  call->read_only = read_only;
+  g_ptr_array_add(test_mount_calls, call);
+  return true;
+}
+
+bool unmount_path(const char *target) {
+  (void)target;
+  return true;
+}
 
 static void test_introspection(void) {
   GError *error = NULL;
@@ -168,6 +202,281 @@ static void test_unix_fd_copy(void) {
   g_object_unref(host_fds);
 }
 
+static void cleanup_document_test_state(BridgeState *state) {
+  for (guint i = 0; i < state->documents.grants->len; i++) {
+    cleanup_grant(g_ptr_array_index(state->documents.grants, i));
+  }
+  g_ptr_array_free(state->documents.grants, TRUE);
+  g_ptr_array_free(state->documents.sandbox_doc_dirs, TRUE);
+}
+
+static void init_document_test_state(BridgeState *state, const char *root,
+                                     const char *store) {
+  memset(state, 0, sizeof(*state));
+  state->app_id = "org.example.App";
+  state->documents.doc_dir = g_build_filename(root, "doc", NULL);
+  state->documents.mountpoint = "/run/user/1001/doc";
+  state->documents.persistent_store = (char *)store;
+  state->documents.grants =
+      g_ptr_array_new_with_free_func((GDestroyNotify)free_grant);
+  state->documents.sandbox_doc_dirs =
+      g_ptr_array_new_with_free_func(g_free);
+  g_assert_cmpint(g_mkdir_with_parents(state->documents.doc_dir, 0700), ==, 0);
+}
+
+static void assert_direct_grant_mount(TestMountCall *call,
+                                      const char *host_dir,
+                                      const char *sandbox_doc_dir,
+                                      const char *doc_id) {
+  char *base = g_path_get_basename(host_dir);
+  char *expected_target =
+      g_build_filename(sandbox_doc_dir, doc_id, base, NULL);
+  g_assert_cmpstr(call->source, ==, host_dir);
+  g_assert_cmpstr(call->target, ==, expected_target);
+  g_assert_false(call->read_only);
+  g_free(expected_target);
+  g_free(base);
+}
+
+static void remove_sandbox_test_path(const char *sandbox_doc_dir) {
+  char *uid_dir = g_path_get_dirname(sandbox_doc_dir);
+  char *user_dir = g_path_get_dirname(uid_dir);
+  char *run_dir = g_path_get_dirname(user_dir);
+  char *instance_dir = g_path_get_dirname(run_dir);
+  g_assert_cmpint(g_rmdir(sandbox_doc_dir), ==, 0);
+  g_assert_cmpint(g_rmdir(uid_dir), ==, 0);
+  g_assert_cmpint(g_rmdir(user_dir), ==, 0);
+  g_assert_cmpint(g_rmdir(run_dir), ==, 0);
+  g_assert_cmpint(g_rmdir(instance_dir), ==, 0);
+  g_free(instance_dir);
+  g_free(run_dir);
+  g_free(user_dir);
+  g_free(uid_dir);
+}
+
+static void test_grant_mount_order_is_direct_and_equivalent(void) {
+  GError *error = NULL;
+  char *root = g_dir_make_tmp("freebsd-flatpak-order-test-XXXXXX", &error);
+  g_assert_no_error(error);
+  char *host_dir = g_build_filename(root, "Selected", NULL);
+  char *store = g_build_filename(root, "grants.ini", NULL);
+  char *sandbox_root = g_build_filename(root, "sandboxes", NULL);
+  char *first_sandbox = g_build_filename(
+      sandbox_root, "first", "run", "user", "1001", "doc", NULL);
+  char *second_sandbox = g_build_filename(
+      sandbox_root, "second", "run", "user", "1001", "doc", NULL);
+  g_assert_cmpint(g_mkdir(host_dir, 0700), ==, 0);
+  g_assert_cmpint(g_mkdir_with_parents(first_sandbox, 0700), ==, 0);
+  g_assert_cmpint(g_mkdir_with_parents(second_sandbox, 0700), ==, 0);
+
+  test_mount_calls =
+      g_ptr_array_new_with_free_func((GDestroyNotify)free_test_mount_call);
+
+  BridgeState grant_first;
+  init_document_test_state(&grant_first, root, store);
+  grant_first.documents.sandbox_root = sandbox_root;
+  char **permissions = read_write_permissions();
+  DocumentGrant *first_grant = NULL;
+  g_assert_true(create_document_grant_from_path(
+      &grant_first, host_dir, grant_first.app_id, permissions, true, false,
+      false,
+      &first_grant, &error));
+  g_assert_no_error(error);
+  g_assert_true(register_document_grant(&grant_first, first_grant, &error));
+  g_assert_no_error(error);
+  g_assert_cmpuint(test_mount_calls->len, ==, 0);
+  g_assert_true(add_sandbox(&grant_first, first_sandbox, &error));
+  g_assert_no_error(error);
+  g_assert_cmpuint(test_mount_calls->len, ==, 1);
+  assert_direct_grant_mount(g_ptr_array_index(test_mount_calls, 0), host_dir,
+                            first_sandbox, first_grant->doc_id);
+  cleanup_document_test_state(&grant_first);
+  g_free(grant_first.documents.doc_dir);
+  g_ptr_array_set_size(test_mount_calls, 0);
+
+  BridgeState sandbox_first;
+  init_document_test_state(&sandbox_first, root, store);
+  sandbox_first.documents.sandbox_root = sandbox_root;
+  g_assert_true(add_sandbox(&sandbox_first, second_sandbox, &error));
+  g_assert_no_error(error);
+  g_assert_cmpuint(test_mount_calls->len, ==, 0);
+  DocumentGrant *second_grant = NULL;
+  g_assert_true(create_document_grant_from_path(
+      &sandbox_first, host_dir, sandbox_first.app_id, permissions, true, false,
+      false,
+      &second_grant, &error));
+  g_assert_no_error(error);
+  g_assert_true(register_document_grant(&sandbox_first, second_grant, &error));
+  g_assert_no_error(error);
+  g_assert_cmpuint(test_mount_calls->len, ==, 1);
+  assert_direct_grant_mount(g_ptr_array_index(test_mount_calls, 0), host_dir,
+                            second_sandbox, second_grant->doc_id);
+  cleanup_document_test_state(&sandbox_first);
+  g_free(sandbox_first.documents.doc_dir);
+
+  g_strfreev(permissions);
+  g_ptr_array_free(test_mount_calls, TRUE);
+  test_mount_calls = NULL;
+  remove_sandbox_test_path(first_sandbox);
+  remove_sandbox_test_path(second_sandbox);
+  g_assert_cmpint(g_rmdir(sandbox_root), ==, 0);
+  g_assert_cmpint(g_rmdir(host_dir), ==, 0);
+  char *doc_dir = g_build_filename(root, "doc", NULL);
+  g_assert_cmpint(g_rmdir(doc_dir), ==, 0);
+  g_assert_cmpint(g_rmdir(root), ==, 0);
+  g_free(doc_dir);
+  g_free(second_sandbox);
+  g_free(first_sandbox);
+  g_free(sandbox_root);
+  g_free(store);
+  g_free(host_dir);
+  g_free(root);
+}
+
+static void test_directory_grant_persists_and_translates(void) {
+  GError *error = NULL;
+  char *root = g_dir_make_tmp("freebsd-flatpak-doc-test-XXXXXX", &error);
+  g_assert_no_error(error);
+  char *host_dir = g_build_filename(root, "Selected Folder", NULL);
+  char *store = g_build_filename(root, "grants.ini", NULL);
+  g_assert_cmpint(g_mkdir(host_dir, 0700), ==, 0);
+
+  BridgeState first;
+  init_document_test_state(&first, root, store);
+  char **permissions = read_write_permissions();
+  DocumentGrant *grant = NULL;
+  g_assert_true(create_document_grant_from_path(
+      &first, host_dir, first.app_id, permissions, true, true, false, &grant,
+      &error));
+  g_assert_no_error(error);
+  g_assert_true(register_document_grant(&first, grant, &error));
+  g_assert_no_error(error);
+  g_assert_true(grant->is_directory);
+  g_assert_true(grant->persistent);
+  g_assert_cmpuint(strlen(grant->doc_id), ==, 22);
+  g_assert_true(document_id_is_valid(grant->doc_id));
+  g_assert_true(
+      g_strv_contains((const char *const *)grant->permissions, "write"));
+  char *doc_id = g_strdup(grant->doc_id);
+  DocumentGrant *reused = NULL;
+  g_assert_true(create_document_grant_from_path(
+      &first, host_dir, first.app_id, permissions, true, true, true, &reused,
+      &error));
+  g_assert_no_error(error);
+  g_assert_true(reused == grant);
+  g_assert_true(register_document_grant(&first, reused, &error));
+  g_assert_no_error(error);
+  g_assert_cmpuint(first.documents.grants->len, ==, 1);
+  char *uri = sandbox_uri_for_grant(&first, grant);
+  g_assert_true(g_str_has_prefix(uri, "file:///run/user/1001/doc/"));
+  g_assert_nonnull(strstr(uri, "/Selected%20Folder"));
+  g_assert_true(g_file_test(store, G_FILE_TEST_IS_REGULAR));
+  g_free(uri);
+  g_strfreev(permissions);
+  cleanup_document_test_state(&first);
+  g_free(first.documents.doc_dir);
+
+  BridgeState second;
+  init_document_test_state(&second, root, store);
+  g_assert_true(load_persistent_document_grants(&second, &error));
+  g_assert_no_error(error);
+  g_assert_cmpuint(second.documents.grants->len, ==, 1);
+  DocumentGrant *restored = find_grant(&second, doc_id);
+  g_assert_nonnull(restored);
+  g_assert_cmpstr(restored->host_path, ==, host_dir);
+  g_assert_true(restored->is_directory);
+  g_assert_true(
+      g_strv_contains((const char *const *)restored->permissions, "write"));
+
+  char *base = g_path_get_basename(host_dir);
+  char *document_path = g_build_filename(second.documents.mountpoint, doc_id,
+                                         base, "nested", NULL);
+  char *translated = host_path_for_document_path(&second, document_path);
+  char *expected = g_build_filename(host_dir, "nested", NULL);
+  g_assert_cmpstr(translated, ==, expected);
+  char *traversal = g_strconcat(document_path, "/../outside", NULL);
+  g_assert_null(host_path_for_document_path(&second, traversal));
+
+  GVariantBuilder options;
+  g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
+  g_variant_builder_add(&options, "{sv}", "current_folder",
+                        g_variant_new_bytestring(document_path));
+  GVariant *parameters = g_variant_ref_sink(g_variant_new(
+      "(ss@a{sv})", "", "Choose", g_variant_builder_end(&options)));
+  GVariant *rewritten =
+      g_variant_ref_sink(rewrite_filechooser_parameters(&second, parameters));
+  GVariant *rewritten_options = g_variant_get_child_value(rewritten, 2);
+  const char *rewritten_folder = NULL;
+  g_assert_true(g_variant_lookup(rewritten_options, "current_folder", "^&ay",
+                                 &rewritten_folder));
+  g_assert_cmpstr(rewritten_folder, ==, expected);
+
+  g_variant_unref(rewritten_options);
+  g_variant_unref(rewritten);
+  g_variant_unref(parameters);
+  g_free(traversal);
+  g_free(expected);
+  g_free(translated);
+  g_free(document_path);
+  g_free(base);
+  cleanup_document_test_state(&second);
+  g_free(second.documents.doc_dir);
+  g_free(doc_id);
+  g_assert_cmpint(g_remove(store), ==, 0);
+  g_assert_cmpint(g_rmdir(host_dir), ==, 0);
+  char *doc_dir = g_build_filename(root, "doc", NULL);
+  g_assert_cmpint(g_rmdir(doc_dir), ==, 0);
+  g_assert_cmpint(g_rmdir(root), ==, 0);
+  g_free(doc_dir);
+  g_free(store);
+  g_free(host_dir);
+  g_free(root);
+}
+
+static void test_ungrantable_filechooser_uri_is_not_leaked(void) {
+  GError *error = NULL;
+  char *root = g_dir_make_tmp("freebsd-flatpak-uri-test-XXXXXX", &error);
+  g_assert_no_error(error);
+  char *host_dir = g_build_filename(root, "directory", NULL);
+  char *store = g_build_filename(root, "grants.ini", NULL);
+  g_assert_cmpint(g_mkdir(host_dir, 0700), ==, 0);
+  BridgeState state;
+  init_document_test_state(&state, root, store);
+
+  char *host_uri = g_filename_to_uri(host_dir, NULL, &error);
+  g_assert_no_error(error);
+  GVariantBuilder uris;
+  g_variant_builder_init(&uris, G_VARIANT_TYPE_STRING_ARRAY);
+  g_variant_builder_add(&uris, "s", host_uri);
+  GVariantBuilder results;
+  g_variant_builder_init(&results, G_VARIANT_TYPE_VARDICT);
+  g_variant_builder_add(&results, "{sv}", "uris",
+                        g_variant_builder_end(&uris));
+  GVariant *result = g_variant_ref_sink(g_variant_builder_end(&results));
+  GVariant *rewritten =
+      g_variant_ref_sink(rewrite_filechooser_results(&state, 0, result, false));
+  GVariant *rewritten_uris =
+      g_variant_lookup_value(rewritten, "uris", G_VARIANT_TYPE("as"));
+  g_assert_nonnull(rewritten_uris);
+  g_assert_cmpuint(g_variant_n_children(rewritten_uris), ==, 0);
+  g_assert_cmpuint(state.documents.grants->len, ==, 0);
+
+  g_variant_unref(rewritten_uris);
+  g_variant_unref(rewritten);
+  g_variant_unref(result);
+  g_free(host_uri);
+  cleanup_document_test_state(&state);
+  g_free(state.documents.doc_dir);
+  g_assert_cmpint(g_rmdir(host_dir), ==, 0);
+  char *doc_dir = g_build_filename(root, "doc", NULL);
+  g_assert_cmpint(g_rmdir(doc_dir), ==, 0);
+  g_assert_cmpint(g_rmdir(root), ==, 0);
+  g_free(doc_dir);
+  g_free(store);
+  g_free(host_dir);
+  g_free(root);
+}
+
 static void test_screencast_source_tracking(void) {
   BridgeState state = {0};
   SessionRecord session = {
@@ -277,6 +586,9 @@ int main(void) {
   test_remove_sandbox_is_per_instance_and_idempotent();
   test_path_and_option_translation();
   test_unix_fd_copy();
+  test_grant_mount_order_is_direct_and_equivalent();
+  test_directory_grant_persists_and_translates();
+  test_ungrantable_filechooser_uri_is_not_leaked();
   test_screencast_source_tracking();
   test_pipewire_client_session_ownership();
   test_pipewire_source_generation_tracking();

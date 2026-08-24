@@ -136,7 +136,7 @@ char *token_from_options(BridgeState *state, GVariant *options, const char *key,
 char *request_path_for_options(BridgeState *state, const char *sender,
                                GVariant *options) {
   char *token =
-      token_from_options(state, options, "handle_token", "freebsd_flatpak_poc");
+      token_from_options(state, options, "handle_token", "freebsd_flatpak");
   char *path = portal_path("request", sender, token);
   g_free(token);
   return path;

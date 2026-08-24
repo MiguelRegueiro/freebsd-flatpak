@@ -1,6 +1,8 @@
 #include "document_portal.h"
 #include "basic_desktop_portals.h"
 #include "document_grant_store.h"
+#include "document_grant_persistence.h"
+#include "document_mounts.h"
 #include "portal_bridge_process.h"
 const char *DOCUMENTS_XML =
     "<node>"
@@ -98,6 +100,11 @@ void handle_add_full(BridgeState *state, GDBusMethodInvocation *invocation) {
   GVariant *permissions = g_variant_get_child_value(parameters, 3);
   const char *app_id = NULL;
   g_variant_get_child(parameters, 2, "&s", &app_id);
+  guint32 flags = 0;
+  g_variant_get_child(parameters, 1, "u", &flags);
+  bool expected_directory = (flags & 8u) != 0;
+  bool persistent = (flags & 2u) != 0;
+  bool reuse_existing = (flags & 1u) != 0;
 
   GDBusMessage *message = g_dbus_method_invocation_get_message(invocation);
   GUnixFDList *fd_list = g_dbus_message_get_unix_fd_list(message);
@@ -126,8 +133,9 @@ void handle_add_full(BridgeState *state, GDBusMethodInvocation *invocation) {
     }
 
     DocumentGrant *grant = NULL;
-    if (!create_document_grant_from_fd(state, fd, app_id, permissions, &grant,
-                                       &error)) {
+    if (!create_document_grant_from_fd(state, fd, app_id, permissions,
+                                       expected_directory, persistent,
+                                       reuse_existing, &grant, &error)) {
       close(fd);
       g_dbus_method_invocation_take_error(invocation, error);
       g_variant_unref(handles);
@@ -135,7 +143,12 @@ void handle_add_full(BridgeState *state, GDBusMethodInvocation *invocation) {
       return;
     }
     close(fd);
-    g_ptr_array_add(state->documents.grants, grant);
+    if (!register_document_grant(state, grant, &error)) {
+      g_dbus_method_invocation_take_error(invocation, error);
+      g_variant_unref(handles);
+      g_variant_unref(permissions);
+      return;
+    }
     g_variant_builder_add(&ids, "s", grant->doc_id);
   }
 
@@ -158,6 +171,11 @@ void handle_delete(BridgeState *state, GDBusMethodInvocation *invocation) {
     if (g_strcmp0(grant->doc_id, doc_id) == 0) {
       cleanup_grant(grant);
       g_ptr_array_remove_index(state->documents.grants, i);
+      GError *error = NULL;
+      if (!save_persistent_document_grants(state, &error)) {
+        g_dbus_method_invocation_take_error(invocation, error);
+        return;
+      }
       g_dbus_method_invocation_return_value(invocation, NULL);
       return;
     }

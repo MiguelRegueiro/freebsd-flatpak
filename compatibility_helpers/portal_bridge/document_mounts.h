@@ -1,7 +1,8 @@
 #ifndef DOCUMENT_MOUNTS_H
 #define DOCUMENT_MOUNTS_H
 #include "portal_bridge_process.h"
-bool run_argv(char **, GError **);
-bool mount_file_read_only(const char *, const char *, GError **);
-bool unmount_path(const char *);
+void cleanup_grant(DocumentGrant *);
+bool sandbox_doc_dir_allowed(BridgeState *, const char *);
+bool mount_grant_in_sandbox(DocumentGrant *, const char *, GError **);
+void remove_sandbox_grants(BridgeState *, const char *);
 #endif

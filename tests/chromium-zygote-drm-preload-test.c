@@ -6,7 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define DRM_PRELOAD "/run/host/freebsd-flatpak-poc/libdrm-syncobj-errno-shim.so"
+#define DRM_PRELOAD "/run/host/freebsd-flatpak/libdrm-syncobj-errno-shim.so"
 
 int chromium_zygote_should_inject(char *const argv[]);
 int chromium_zygote_inject_for_test(char *const argv[]);

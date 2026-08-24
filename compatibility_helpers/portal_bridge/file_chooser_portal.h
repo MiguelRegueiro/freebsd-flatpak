@@ -3,5 +3,7 @@
 #include "portal_bridge_process.h"
 void handle_filechooser_open(BridgeState *, const char *, GVariant *,
                              GDBusMethodInvocation *);
-GVariant *rewrite_filechooser_results(BridgeState *, guint32, GVariant *);
+GVariant *rewrite_filechooser_results(BridgeState *, guint32, GVariant *,
+                                      bool);
+GVariant *rewrite_filechooser_parameters(BridgeState *, GVariant *);
 #endif

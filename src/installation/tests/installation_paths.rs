@@ -17,4 +17,8 @@ fn test_layout_keeps_storage_classes_separate() {
         paths.app_data("org.example.App").unwrap(),
         root.join("home/.var/app/org.example.App")
     );
+    assert_eq!(
+        paths.portal_documents(),
+        root.join("xdg-data/freebsd-flatpak/portal-documents")
+    );
 }

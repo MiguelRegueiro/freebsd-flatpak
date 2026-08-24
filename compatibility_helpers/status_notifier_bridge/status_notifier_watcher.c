@@ -113,7 +113,7 @@ void handle_register_status_item(StatusNotifierBridge *state,
   item->local_path = g_strdup(local_path);
   item->local_registration = status_registration_string(service);
   item->host_path = g_strdup_printf(
-      "/StatusNotifierItem/freebsd_flatpak_poc_%" G_GUINT64_FORMAT,
+      "/StatusNotifierItem/freebsd_flatpak_%" G_GUINT64_FORMAT,
       ++state->status_counter);
   item->menus = g_ptr_array_new_with_free_func((GDestroyNotify)free_menu_proxy);
 

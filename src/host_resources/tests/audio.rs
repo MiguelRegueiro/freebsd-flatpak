@@ -8,7 +8,7 @@ static TEST_ID: AtomicUsize = AtomicUsize::new(0);
 fn temp_root(name: &str) -> PathBuf {
     let id = TEST_ID.fetch_add(1, Ordering::SeqCst);
     let root = std::env::temp_dir().join(format!(
-        "freebsd-flatpak-poc-audio-{name}-{}-{id}",
+        "freebsd-flatpak-audio-{name}-{}-{id}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&root);

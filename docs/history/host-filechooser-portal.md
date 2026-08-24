@@ -43,7 +43,7 @@ smallest bridge around the working native FileChooser UI.
 Each app run now starts a project-controlled portal path:
 
 - a private per-run `dbus-daemon` socket under
-  `/var/run/xdg/regueiro/freebsd-flatpak-poc/<app>-<pid>/bus`;
+  `/var/run/xdg/regueiro/freebsd-flatpak/<app>-<pid>/bus`;
 - `compatibility_helpers/portal-bridge.c`, connected to that private bus and to the real host
   session bus;
 - a project-local document source directory under
@@ -55,7 +55,7 @@ The launched Linux Flatpak gets:
 
 ```text
 GTK_USE_PORTAL=1
-DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/freebsd-flatpak-poc/<app>-<pid>/bus
+DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/freebsd-flatpak/<app>-<pid>/bus
 ```
 
 The bridge owns `org.freedesktop.portal.Desktop` and
@@ -65,10 +65,27 @@ The bridge owns `org.freedesktop.portal.Desktop` and
 returned host `file://` URIs to `/run/user/<uid>/doc/...` document URIs.
 
 For each selected regular file, the bridge creates a read-only single-file
-nullfs mount directly on the chroot-visible document path. This direct target
-mount matters on FreeBSD: a nested mount created only under the source document
-directory did not propagate through the already-mounted parent nullfs view and
-appeared as a 0-byte placeholder inside the chroot.
+nullfs mount directly on the chroot-visible document path. Directory selections
+are exported recursively at the same kind of document path with read-write
+access. This direct target mount matters on FreeBSD: a nested mount created only
+under the source document directory did not propagate through the
+already-mounted parent nullfs view and appeared as a placeholder inside the
+chroot. The bridge applies the same direct mapping in both lifecycle orders:
+existing grants are mounted when a sandbox registers, and newly created grants
+are mounted into every already-registered sandbox before the FileChooser
+response is returned.
+
+FileChooser grants are recorded under the managed data root, outside the
+ephemeral runtime portal tree. A later bridge process restores the same document
+ID and mounts it into each new sandbox instance, so an application can safely
+persist `/run/user/<uid>/doc/<id>/<name>`. When that path is sent back as a
+subsequent chooser's `current_folder`, the private bridge resolves it to the
+host path before forwarding the request. Host paths that cannot be granted are
+dropped rather than returned unchanged to the sandbox.
+
+Document IDs are opaque, collision-checked tokens encoded from 128 random bits.
+The chooser reuses the persistent grant for the same canonical host path and
+entry type instead of allocating a new ID.
 
 ## Validation
 
@@ -109,15 +126,15 @@ then lets the existing sandbox cleanup unmount the parent document directory and
 the rest of the chroot.
 
 Startup recovery also scans `runtime/portal/doc` and
-`$XDG_RUNTIME_DIR/freebsd-flatpak-poc` for stale inactive runs and removes
+`$XDG_RUNTIME_DIR/freebsd-flatpak` for stale inactive runs and removes
 project-owned leftovers where possible.
 
 ## Remaining Gaps
 
-V1 FileChooser support currently handles opening existing regular files. It
-does not implement save portals, directory grants, persistent document portal
-state, broad document portal compatibility, GVFS peer sockets, or other portal
-interfaces beyond the minimal GTK startup surface.
+FileChooser support currently handles opening existing regular files and
+directories. It does not implement save portals, broad document portal
+compatibility, GVFS peer sockets, or other portal interfaces beyond the minimal
+GTK startup surface.
 
 Relevant upstream references:
 

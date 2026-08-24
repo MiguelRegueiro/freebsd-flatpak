@@ -86,7 +86,7 @@ fn host_app_path(app_files: &Path, chroot_path: &str) -> Result<PathBuf> {
         return Ok(app_files.join(relative));
     }
     if chroot_path.starts_with('/') {
-        bail!("entry path must be inside /app for this POC: {chroot_path}");
+        bail!("entry path must be inside /app: {chroot_path}");
     }
     Ok(app_files.join("bin").join(chroot_path))
 }

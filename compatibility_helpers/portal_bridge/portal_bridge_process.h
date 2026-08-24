@@ -40,9 +40,9 @@ typedef struct {
   char *doc_dir;
   char *sandbox_root;
   char *mountpoint;
+  char *persistent_store;
   GPtrArray *sandbox_doc_dirs;
   GPtrArray *grants;
-  guint64 counter;
 } DocumentGrantStore;
 typedef struct {
   GPtrArray *requests;
@@ -63,6 +63,8 @@ struct _DocumentGrant {
   GPtrArray *target_paths;
   char *app_id;
   char **permissions;
+  bool is_directory;
+  bool persistent;
 };
 struct _RequestRecord {
   BridgeState *state;
@@ -76,6 +78,7 @@ struct _RequestRecord {
   SessionRecord *session;
   bool completed;
   bool close_requested;
+  bool filechooser_directory;
 };
 struct _SessionRecord {
   BridgeState *state;

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 #[test]
 fn keeps_drm_and_wayland_preloads_separate_on_one_mount() {
-    let host_dir = PathBuf::from("/tmp/freebsd-flatpak-poc-graphics-shims");
+    let host_dir = PathBuf::from("/tmp/freebsd-flatpak-graphics-shims");
     let graphics = HostGraphics {
         gl: None,
         drm: None,
@@ -22,15 +22,15 @@ fn keeps_drm_and_wayland_preloads_separate_on_one_mount() {
     assert_eq!(
         graphics.ld_preload_paths(),
         vec![
-            "/run/host/freebsd-flatpak-poc/libdrm-syncobj-errno-shim.so",
-            "/run/host/freebsd-flatpak-poc/libwayland-drm-devt-shim.so",
+            "/run/host/freebsd-flatpak/libdrm-syncobj-errno-shim.so",
+            "/run/host/freebsd-flatpak/libwayland-drm-devt-shim.so",
         ]
     );
     assert_eq!(
         graphics.zypak_ld_preload_paths(),
         vec![
-            "/run/host/freebsd-flatpak-poc/libwayland-drm-devt-shim.so",
-            "/run/host/freebsd-flatpak-poc/libdrm-syncobj-errno-shim.so",
+            "/run/host/freebsd-flatpak/libwayland-drm-devt-shim.so",
+            "/run/host/freebsd-flatpak/libdrm-syncobj-errno-shim.so",
         ]
     );
     let mounts = graphics.runtime_mounts();
@@ -38,6 +38,6 @@ fn keeps_drm_and_wayland_preloads_separate_on_one_mount() {
     assert_eq!(mounts[0].host_path(), host_dir);
     assert_eq!(
         mounts[0].sandbox_target_relative().unwrap(),
-        PathBuf::from("run/host/freebsd-flatpak-poc")
+        PathBuf::from("run/host/freebsd-flatpak")
     );
 }

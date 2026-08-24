@@ -81,6 +81,7 @@ impl HostPortal {
         let bus_socket = bus_dir.join("bus");
         let host_private_bus_address = format!("unix:path={}", bus_socket.display());
         let mountpoint = format!("/run/user/{uid}/doc");
+        let grant_store = paths.portal_documents().join(format!("{app_scope}.ini"));
         if !shared_portal_ready(&host_private_bus_address, &mountpoint) {
             stop_shared_portal(&shared_dir)?;
             fs::create_dir_all(&doc_dir)
@@ -107,6 +108,8 @@ impl HostPortal {
                 .arg(&app_sandbox_root)
                 .arg("--mountpoint")
                 .arg(&mountpoint)
+                .arg("--grant-store")
+                .arg(&grant_store)
                 .env("DBUS_SESSION_BUS_ADDRESS", &address)
                 .env("HOST_DBUS_SESSION_BUS_ADDRESS", bus_address)
                 .stdin(Stdio::null())

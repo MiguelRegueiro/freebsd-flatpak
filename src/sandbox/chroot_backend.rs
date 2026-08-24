@@ -165,7 +165,6 @@ impl ChrootNullfsBackend {
             network_enabled,
         )?;
         write_flatpak_info(&root, app, &instance_id)?;
-        host_filesystem.write_xdg_user_dirs_config(&root)?;
         host_audio.prepare(&root)?;
         host_fonts.prepare(&root)?;
         let (run_record, deployment, extension_refs) = pending_run.commit();
@@ -196,7 +195,12 @@ impl ChrootNullfsBackend {
             let source = app_data.join(name);
             fs::create_dir_all(&source)
                 .with_context(|| format!("create persistent app directory {}", source.display()))?;
-            instance.mount_nullfs(&source, PathBuf::from("var").join(name), false)?;
+        }
+        instance
+            .host_filesystem
+            .write_xdg_user_dirs_config(&app_data.join("config"))?;
+        for name in ["data", "config", "cache"] {
+            instance.mount_nullfs(&app_data.join(name), PathBuf::from("var").join(name), false)?;
         }
         for extension in instance.app_extensions.clone() {
             instance.mount_nullfs(

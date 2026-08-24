@@ -7,7 +7,7 @@ static TEST_ID: AtomicUsize = AtomicUsize::new(0);
 fn test_dir(name: &str) -> PathBuf {
     let id = TEST_ID.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!(
-        "freebsd-flatpak-poc-sandbox-{name}-{}-{id}",
+        "freebsd-flatpak-sandbox-{name}-{}-{id}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&dir);

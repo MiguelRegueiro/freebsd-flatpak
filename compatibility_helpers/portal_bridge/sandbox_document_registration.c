@@ -1,5 +1,5 @@
 #include "sandbox_document_registration.h"
-#include "document_grant_store.h"
+#include "document_mounts.h"
 #include "portal_bridge_process.h"
 const char *CONTROL_XML =
     "<node>"
@@ -21,6 +21,30 @@ gint find_sandbox_doc_dir(BridgeState *state, const char *path) {
     }
   }
   return -1;
+}
+
+bool add_sandbox(BridgeState *state, const char *sandbox_doc_dir,
+                 GError **error) {
+  if (!sandbox_doc_dir_allowed(state, sandbox_doc_dir)) {
+    g_set_error(error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
+                "sandbox document directory is outside %s",
+                state->documents.sandbox_root);
+    return false;
+  }
+  if (find_sandbox_doc_dir(state, sandbox_doc_dir) >= 0) {
+    return true;
+  }
+  for (guint i = 0; i < state->documents.grants->len; i++) {
+    if (!mount_grant_in_sandbox(g_ptr_array_index(state->documents.grants, i),
+                                sandbox_doc_dir, error)) {
+      remove_sandbox_grants(state, sandbox_doc_dir);
+      return false;
+    }
+  }
+  g_ptr_array_add(state->documents.sandbox_doc_dirs,
+                  g_strdup(sandbox_doc_dir));
+  log_line("attached sandbox document root %s", sandbox_doc_dir);
+  return true;
 }
 
 void remove_sandbox(BridgeState *state, const char *sandbox_doc_dir) {
@@ -46,32 +70,12 @@ void handle_control_method(GDBusConnection *connection, const gchar *sender,
   BridgeState *state = user_data;
   const char *sandbox_doc_dir = NULL;
   g_variant_get(parameters, "(&s)", &sandbox_doc_dir);
-  if (!sandbox_doc_dir_allowed(state, sandbox_doc_dir)) {
-    g_dbus_method_invocation_return_error(
-        invocation, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED,
-        "sandbox document directory is outside %s",
-        state->documents.sandbox_root);
-    return;
-  }
-
-  gint index = find_sandbox_doc_dir(state, sandbox_doc_dir);
   if (g_strcmp0(method_name, "AddSandbox") == 0) {
-    if (index >= 0) {
-      g_dbus_method_invocation_return_value(invocation, NULL);
+    GError *error = NULL;
+    if (!add_sandbox(state, sandbox_doc_dir, &error)) {
+      g_dbus_method_invocation_take_error(invocation, error);
       return;
     }
-    for (guint i = 0; i < state->documents.grants->len; i++) {
-      GError *error = NULL;
-      if (!mount_grant_in_sandbox(g_ptr_array_index(state->documents.grants, i),
-                                  sandbox_doc_dir, &error)) {
-        remove_sandbox_grants(state, sandbox_doc_dir);
-        g_dbus_method_invocation_take_error(invocation, error);
-        return;
-      }
-    }
-    g_ptr_array_add(state->documents.sandbox_doc_dirs,
-                    g_strdup(sandbox_doc_dir));
-    log_line("attached sandbox document root %s", sandbox_doc_dir);
     g_dbus_method_invocation_return_value(invocation, NULL);
     return;
   }

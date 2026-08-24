@@ -6,7 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define DRM_PRELOAD "/run/host/freebsd-flatpak-poc/libdrm-syncobj-errno-shim.so"
+#define DRM_PRELOAD "/run/host/freebsd-flatpak/libdrm-syncobj-errno-shim.so"
 
 struct preload_state {
     char *old_value;
