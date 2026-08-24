@@ -7,12 +7,15 @@ use std::io::IsTerminal;
 
 pub(crate) fn cmd_remote_info(paths: &Installation, args: Vec<String>) -> Result<()> {
     let options = parse_remote_info_args(args)?;
-    let metadata = remotes::load_remote_metadata(paths)?;
-    let remote = metadata.resolve_app(&options.app_id, true)?;
+    let metadata = remotes::load_remote_metadata(paths, &options.remote)?;
+    let remote = remotes::resolve_remote_app(paths, Some(&options.remote), &options.app_id)?;
     let appstream = match metadata.appstream_info(&remote.app_id) {
         Ok(info) => info,
         Err(error) => {
-            eprintln!("warning: load Flathub AppStream metadata: {error:#}");
+            eprintln!(
+                "warning: load {} AppStream metadata: {error:#}",
+                options.remote
+            );
             None
         }
     };
@@ -235,6 +238,7 @@ pub(super) struct RemoteInfoOptions {
     pub(super) log: bool,
     pub(super) commit: Option<String>,
     pub(super) app_id: String,
+    pub(super) remote: String,
 }
 
 pub(super) fn parse_remote_info_args(args: Vec<String>) -> Result<RemoteInfoOptions> {
@@ -265,15 +269,14 @@ pub(super) fn parse_remote_info_args(args: Vec<String>) -> Result<RemoteInfoOpti
         bail!("--log and --commit cannot be used together");
     }
     if operands.len() != 2 {
-        bail!("usage: flatpak remote-info [--log | --commit=COMMIT] flathub <app-id>");
+        bail!("usage: flatpak remote-info [--log | --commit=COMMIT] REMOTE <ref>");
     }
-    if operands[0] != "flathub" {
-        bail!("remote is not configured: {}", operands[0]);
-    }
+    let remote = operands.remove(0);
     Ok(RemoteInfoOptions {
         log,
         commit,
-        app_id: operands.remove(1),
+        app_id: operands.remove(0),
+        remote,
     })
 }
 

@@ -1,11 +1,21 @@
-use super::{resolve_current_app_id_from_replacements, select_history_commit};
+use super::{
+    remote_app_from_metadata, resolve_current_app_id_from_replacements, select_history_commit,
+};
 use crate::ostree::CommitInfo;
-use crate::remotes::{RemoteMetadata, RemoteRef};
+use crate::remotes::{Remote, RemoteMetadata, RemoteRef};
 use std::collections::BTreeMap;
 
 #[test]
 fn exact_app_ref_does_not_require_appstream_metadata() {
     let metadata = RemoteMetadata {
+        remote: Remote {
+            name: "test".to_string(),
+            url: "https://example.test/repo".to_string(),
+            title: None,
+            enabled: true,
+            gpg_verify: false,
+            gpg_key: None,
+        },
         arch: "x86_64".to_string(),
         refs: vec![RemoteRef {
             name: "app/org.example.App/x86_64/stable".to_string(),
@@ -21,6 +31,74 @@ fn exact_app_ref_does_not_require_appstream_metadata() {
 
     let remote_ref = metadata.resolve_app_ref("org.example.App", true).unwrap();
     assert_eq!(remote_ref.name, "app/org.example.App/x86_64/stable");
+}
+
+#[test]
+fn named_remote_resolution_records_origin_and_accepts_full_refs() {
+    let app_ref = "app/org.example.App/x86_64/stable";
+    let metadata = RemoteMetadata {
+        remote: Remote {
+            name: "example".to_string(),
+            url: "https://example.test/repo".to_string(),
+            title: None,
+            enabled: true,
+            gpg_verify: false,
+            gpg_key: None,
+        },
+        arch: "x86_64".to_string(),
+        refs: vec![
+            RemoteRef {
+                name: app_ref.to_string(),
+                checksum: "app-commit".to_string(),
+                metadata: Some("[Application]\nname=org.example.App\nruntime=org.example.Platform/x86_64/stable\ncommand=example\n".to_string()),
+                download_size: None,
+                installed_size: None,
+            },
+            RemoteRef {
+                name: "runtime/org.example.Platform/x86_64/stable".to_string(),
+                checksum: "runtime-commit".to_string(),
+                metadata: None,
+                download_size: None,
+                installed_size: None,
+            },
+        ],
+        remote_dir: std::path::PathBuf::from("/dev/null"),
+        summary_path: std::path::PathBuf::from("/dev/null"),
+        collection_id: None,
+    };
+
+    for requested in ["org.example.App", app_ref, "org.example.App/x86_64/stable"] {
+        let app = metadata.resolve_app(requested, false).unwrap();
+        assert_eq!(app.origin, "example");
+        assert_eq!(app.runtime_origin, "example");
+    }
+}
+
+#[test]
+fn cross_remote_runtime_origin_is_preserved() {
+    let app = remote_app_from_metadata(
+        RemoteRef {
+            name: "app/org.example.App/x86_64/stable".to_string(),
+            checksum: "app".to_string(),
+            metadata: None,
+            download_size: None,
+            installed_size: None,
+        },
+        "[Application]\nname=org.example.App\nruntime=org.example.Platform/x86_64/stable\ncommand=example\n".to_string(),
+        RemoteRef {
+            name: "runtime/org.example.Platform/x86_64/stable".to_string(),
+            checksum: "runtime".to_string(),
+            metadata: None,
+            download_size: None,
+            installed_size: None,
+        },
+        "x86_64",
+        "apps",
+        "runtimes",
+    )
+    .unwrap();
+    assert_eq!(app.origin, "apps");
+    assert_eq!(app.runtime_origin, "runtimes");
 }
 
 fn commit(checksum: &str) -> CommitInfo {
@@ -130,9 +208,7 @@ fn current_app_id_rejects_ambiguous_replacements() {
         resolve_current_app_id_from_replacements(&refs, &replacements, "org.example.Old", "x86_64")
             .unwrap_err();
 
-    assert!(error
-        .to_string()
-        .contains("multiple Flathub replacements found"));
+    assert!(error.to_string().contains("multiple replacements found"));
 }
 
 #[test]
@@ -168,7 +244,5 @@ fn current_app_id_rejects_replacement_cycles() {
         resolve_current_app_id_from_replacements(&refs, &replacements, "org.example.A", "x86_64")
             .unwrap_err();
 
-    assert!(error
-        .to_string()
-        .contains("cycle in Flathub replacement metadata"));
+    assert!(error.to_string().contains("cycle in replacement metadata"));
 }

@@ -7,7 +7,7 @@ use std::path::Path;
 
 impl RemoteMetadata {
     pub fn appstream_info(&self, app_id: &str) -> Result<Option<AppstreamInfo>> {
-        let path = fetch_appstream(&self.remote_dir, &self.arch)?;
+        let path = fetch_appstream(&self.remote, &self.remote_dir, &self.arch)?;
         let compressed = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
         let xml = decompress_appstream_xml(&compressed)
             .with_context(|| format!("decompress {}", path.display()))?;
@@ -16,10 +16,11 @@ impl RemoteMetadata {
 }
 
 pub(super) fn fetch_appstream_replacements(
+    remote: &crate::remotes::Remote,
     remote_dir: &Path,
     arch: &str,
 ) -> Result<BTreeMap<String, Vec<String>>> {
-    let path = fetch_appstream(remote_dir, arch)?;
+    let path = fetch_appstream(remote, remote_dir, arch)?;
     let compressed = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     let xml = decompress_appstream_xml(&compressed)
         .with_context(|| format!("decompress {}", path.display()))?;

@@ -10,5 +10,5 @@ mod remotes;
 mod sandbox;
 
 fn main() -> anyhow::Result<()> {
-    cli::run()
+    cli::run_at_process_boundary()
 }

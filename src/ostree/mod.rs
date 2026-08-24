@@ -10,11 +10,17 @@ use std::path::Path;
 use std::time::Duration;
 
 pub(crate) struct Deployment<'a> {
+    pub remote: &'a str,
     pub kind: &'a str,
     pub ref_name: &'a str,
     pub checksum: &'a str,
     pub destination: &'a Path,
     pub force: bool,
+}
+
+pub(crate) struct RemoteSource<'a> {
+    pub name: &'a str,
+    pub summary: &'a [u8],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

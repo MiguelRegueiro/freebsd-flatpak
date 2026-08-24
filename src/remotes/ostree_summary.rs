@@ -17,13 +17,13 @@ pub(crate) fn ref_checksum(path: &Path, ref_name: &str) -> Result<String> {
         .into_iter()
         .find(|candidate| candidate.name == ref_name)
         .map(|candidate| candidate.checksum)
-        .with_context(|| format!("ref is not present in Flathub: {ref_name}"))
+        .with_context(|| format!("ref is not present in the remote: {ref_name}"))
 }
 
 pub(super) fn parse_summary_refs(path: &Path) -> Result<Vec<RemoteRef>> {
     let data = fs::read(path).with_context(|| format!("read {}", path.display()))?;
     parse_summary_refs_bytes(data)
-        .with_context(|| format!("parse Flathub architecture summary {}", path.display()))
+        .with_context(|| format!("parse OSTree summary {}", path.display()))
 }
 
 fn parse_summary_refs_bytes(data: Vec<u8>) -> Result<Vec<RemoteRef>> {
@@ -63,7 +63,7 @@ pub(super) fn remote_ref_from_summary_info(name: String, info: &Variant) -> Resu
 
 pub(super) fn parse_summary_index(path: &Path, arch: &str) -> Result<(String, Option<String>)> {
     let variant = variant_from_file(path, "(a{s(ayaaya{sv})}a{sv})")
-        .with_context(|| format!("parse Flathub summary index {}", path.display()))?;
+        .with_context(|| format!("parse OSTree summary index {}", path.display()))?;
     let collection_id =
         lookup_variant_string(&variant.child_value(1), "ostree.summary.collection-id");
     let summaries = variant.child_value(0);
@@ -75,7 +75,16 @@ pub(super) fn parse_summary_index(path: &Path, arch: &str) -> Result<(String, Op
         let details = entry.child_value(1);
         return Ok((bytes_to_checksum(&details.child_value(0))?, collection_id));
     }
-    bail!("Flathub summary index has no metadata for architecture {arch}")
+    bail!("summary index has no metadata for architecture {arch}")
+}
+
+pub(super) fn parse_summary_collection_id(path: &Path) -> Result<Option<String>> {
+    let variant = variant_from_file(path, "(a(s(taya{sv}))a{sv})")
+        .with_context(|| format!("parse OSTree summary {}", path.display()))?;
+    Ok(lookup_variant_string(
+        &variant.child_value(1),
+        "ostree.summary.collection-id",
+    ))
 }
 
 pub(super) fn variant_from_file(path: &Path, ty: &'static str) -> Result<Variant> {

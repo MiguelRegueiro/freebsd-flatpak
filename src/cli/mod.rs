@@ -5,6 +5,8 @@ mod list;
 mod permissions;
 mod prune;
 mod ps;
+#[path = "remotes.rs"]
+mod remote_commands;
 mod remote_info;
 mod repair;
 mod run;
@@ -17,6 +19,32 @@ use crate::remotes;
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
+pub(crate) fn run_at_process_boundary() -> Result<()> {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if !is_stdout_broken_pipe(info.payload()) {
+            default_hook(info);
+        }
+    }));
+
+    match std::panic::catch_unwind(run) {
+        Ok(result) => result,
+        Err(payload) if is_stdout_broken_pipe(payload.as_ref()) => Ok(()),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn is_stdout_broken_pipe(payload: &(dyn std::any::Any + Send)) -> bool {
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied());
+    message.is_some_and(|message| {
+        message.contains("failed printing to stdout")
+            && (message.contains("Broken pipe") || message.contains("os error 32"))
+    })
+}
+
 pub(crate) fn run() -> Result<()> {
     let all_args = std::env::args().skip(1).collect::<Vec<_>>();
     let mut args = all_args.clone().into_iter();
@@ -27,16 +55,19 @@ pub(crate) fn run() -> Result<()> {
     }
     let command_args = all_args.get(1..).unwrap_or_default();
     if command_args == ["-h"] || command_args == ["--help"] {
-        match command.as_deref() {
+        let handled = match command.as_deref() {
             Some("install") => help::print_install_help(),
             Some("update" | "upgrade") => help::print_update_help(),
             Some("uninstall" | "remove") => help::print_uninstall_help(),
-            _ => {}
-        }
-        if matches!(
-            command.as_deref(),
-            Some("install" | "update" | "upgrade" | "uninstall" | "remove")
-        ) {
+            Some("remotes") => help::print_remotes_help(),
+            Some("remote-add") => help::print_remote_add_help(),
+            Some("remote-modify") => help::print_remote_modify_help(),
+            Some("remote-delete") => help::print_remote_delete_help(),
+            Some("remote-ls") => help::print_remote_ls_help(),
+            Some("remote-info") => help::print_remote_info_help(),
+            _ => false,
+        };
+        if handled {
             return Ok(());
         }
     }
@@ -52,6 +83,11 @@ pub(crate) fn run() -> Result<()> {
         Some("repair") => repair::cmd_repair(&paths, args.collect()),
         Some("run") => run::cmd_run(&paths, args.collect()),
         Some("remote-info") => remote_info::cmd_remote_info(&paths, args.collect()),
+        Some("remotes") => remote_commands::cmd_remotes(&paths, args.collect()),
+        Some("remote-add") => remote_commands::cmd_remote_add(&paths, args.collect()),
+        Some("remote-delete") => remote_commands::cmd_remote_delete(&paths, args.collect()),
+        Some("remote-modify") => remote_commands::cmd_remote_modify(&paths, args.collect()),
+        Some("remote-ls") => remote_commands::cmd_remote_ls(&paths, args.collect()),
         Some("uninstall" | "remove") => uninstall::cmd_uninstall(&paths, args.collect()),
         Some("update" | "upgrade") => update::cmd_update(&paths, args.collect()),
         Some("checkout") => {
@@ -74,3 +110,19 @@ pub(crate) fn run() -> Result<()> {
 #[cfg(test)]
 #[path = "tests/support.rs"]
 mod test_support;
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_only_stdout_broken_pipe_panics() {
+        assert!(is_stdout_broken_pipe(
+            &"failed printing to stdout: Broken pipe (os error 32)".to_string()
+        ));
+        assert!(!is_stdout_broken_pipe(&"unrelated panic".to_string()));
+        assert!(!is_stdout_broken_pipe(
+            &"failed printing to stderr: Broken pipe (os error 32)".to_string()
+        ));
+    }
+}

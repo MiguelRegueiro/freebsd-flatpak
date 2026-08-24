@@ -2,11 +2,11 @@
 
 Compatibility layer for running Flatpak applications on FreeBSD using Linuxulator and native FreeBSD integration.
 
-FreeBSD Flatpak downloads applications and runtimes from Flathub, runs their unmodified Linux payloads through Linuxulator, and connects them to the native FreeBSD desktop.
+FreeBSD Flatpak downloads applications and runtimes from configured Flatpak repositories, runs their unmodified Linux payloads through Linuxulator, and connects them to the native FreeBSD desktop. Flathub is configured by default.
 
 ## Features
 
-- Manage Flathub applications with search, install, update, downgrade, run, and uninstall commands.
+- Manage applications from named remotes with search, install, update, downgrade, run, and uninstall commands.
 - Integrate with Wayland desktops, including application launchers and tray icons.
 - Use Mesa GPU acceleration and host audio services.
 - Apply filesystem permissions and portal access from Flatpak metadata.
@@ -46,8 +46,13 @@ icons, and metadata are published into the normal per-user XDG data paths; no
 
 ```sh
 flatpak search <query>
-flatpak remote-info [--log | --commit=COMMIT] flathub <app-id>
-flatpak install <app-id>
+flatpak remotes
+flatpak remote-add NAME LOCATION
+flatpak remote-modify [--enable|--disable] NAME
+flatpak remote-delete [--force] NAME
+flatpak remote-ls [REMOTE]
+flatpak remote-info [--log | --commit=COMMIT] REMOTE <ref>
+flatpak install [REMOTE] <ref>
 flatpak list
 flatpak ps [--columns=instance,application,pid,child-pid]
 flatpak permissions <app-id>
@@ -62,7 +67,8 @@ flatpak uninstall <app-id>
 `remote-info --log` shows the OSTree commit history available for an app ref,
 including apps that are not installed. Use `remote-info --commit=COMMIT` to
 inspect a historical commit and `update --commit=COMMIT` to move an installed
-app to that exact commit. A normal `update` follows the current Flathub tip.
+app to that exact commit. A normal `update` follows the tip in the app's
+recorded origin remote.
 
 `flatpak ps` lists active application instances, including their instance ID,
 wrapper PID, application, and runtime. Use `--columns` to select debugging
@@ -77,7 +83,7 @@ XDG defaults are used when the data or cache variables are unset.
 ## Current limitations
 
 - The project provides a focused compatibility layer rather than the complete upstream Flatpak sandbox model.
-- Flathub is currently the only supported remote, and application compatibility varies.
+- Normal OSTree Flatpak repositories are supported; authenticators, OCI remotes, and system-wide installations are not.
 - Wayland is required; X11-only applications are not supported.
 - GPU, audio, portal, and ScreenCast availability depends on compatible host services and hardware.
 

@@ -66,7 +66,8 @@ impl Installation {
             self.refs(),
             self.extensions(),
             self.exports(),
-            self.remote_metadata(),
+            self.remote_configs(),
+            self.remote_metadata_root(),
             self.chroots(),
             self.runs(),
             self.portal(),
@@ -117,8 +118,14 @@ impl Installation {
     pub fn export_share(&self) -> PathBuf {
         self.exports().join("share")
     }
-    pub fn remote_metadata(&self) -> PathBuf {
-        self.cache_root.join("remote")
+    pub fn remote_configs(&self) -> PathBuf {
+        self.data_root.join("remotes")
+    }
+    pub fn remote_metadata_root(&self) -> PathBuf {
+        self.cache_root.join("remotes")
+    }
+    pub fn remote_metadata(&self, remote: &str) -> PathBuf {
+        self.remote_metadata_root().join(remote)
     }
     pub fn chroots(&self) -> PathBuf {
         self.runtime_root.join("chroots")

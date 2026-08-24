@@ -16,6 +16,7 @@ fn remote_info_parses_log_and_historical_commit_modes() {
             log: true,
             commit: None,
             app_id: "org.example.App".to_string(),
+            remote: "flathub".to_string(),
         }
     );
     assert_eq!(

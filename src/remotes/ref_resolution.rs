@@ -1,14 +1,13 @@
 use super::appstream_metadata::fetch_appstream_replacements;
 use super::metadata_cache::load_arch_summary;
-use super::ostree_summary::{
-    lookup_flatpak_metadata, parse_summary_refs, remote_ref_from_summary_info, variant_from_file,
+use super::ostree_summary::parse_summary_refs;
+use super::{
+    trace_resolution, Remote, RemoteApp, RemoteMetadata, RemoteRef, RemoteRefInfo, SearchResult,
 };
-use super::{trace_resolution, RemoteApp, RemoteMetadata, RemoteRef, SearchResult};
 use crate::installation::installation_paths::Installation;
 use crate::installation::metadata_value;
 use crate::ostree::{CommitInfo, Storage};
 use anyhow::{bail, Context, Result};
-use glib::Variant;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,6 +18,14 @@ impl RemoteMetadata {
     #[cfg(test)]
     pub(crate) fn empty_for_test(root: &Path) -> Self {
         Self {
+            remote: Remote {
+                name: "flathub".to_string(),
+                url: "https://example.invalid/repo".to_string(),
+                title: None,
+                enabled: true,
+                gpg_verify: false,
+                gpg_key: None,
+            },
             arch: "x86_64".to_string(),
             refs: Vec::new(),
             remote_dir: root.join("remote"),
@@ -33,19 +40,62 @@ impl RemoteMetadata {
             .iter()
             .find(|item| item.name == app_ref)
             .cloned()
-            .with_context(|| format!("app ref is no longer present in Flathub: {app_ref}"))?;
-        remote_app_from_ref(&self.refs, remote_ref, &self.arch)
+            .with_context(|| {
+                format!(
+                    "app ref is no longer present in {}: {app_ref}",
+                    self.remote.name
+                )
+            })?;
+        remote_app_from_ref(&self.refs, remote_ref, &self.arch, &self.remote.name)
     }
 
+    pub fn resolve_exact_ref_with_runtime(
+        &self,
+        paths: &Installation,
+        app_ref: &str,
+    ) -> Result<RemoteApp> {
+        let app_ref = self
+            .refs
+            .iter()
+            .find(|item| item.name == app_ref)
+            .cloned()
+            .with_context(|| {
+                format!(
+                    "app ref is no longer present in {}: {app_ref}",
+                    self.remote.name
+                )
+            })?;
+        resolve_ref_with_runtime_fallback(paths, self, app_ref)
+    }
+
+    #[cfg(test)]
     pub fn resolve_app(&self, app_id: &str, replacements: bool) -> Result<RemoteApp> {
         let started = Instant::now();
         let app_ref = self.resolve_app_ref(app_id, replacements)?;
         trace_resolution("select application ref", started);
-        remote_app_from_ref(&self.refs, app_ref, &self.arch)
+        remote_app_from_ref(&self.refs, app_ref, &self.arch, &self.remote.name)
     }
 
     pub fn collection_id(&self) -> Option<&str> {
         self.collection_id.as_deref()
+    }
+
+    pub fn list_refs(&self) -> Vec<RemoteRefInfo> {
+        let mut refs = self
+            .refs
+            .iter()
+            .filter_map(|item| {
+                let parts = split_flatpak_ref(&item.name).ok()?;
+                (parts.arch == self.arch).then(|| RemoteRefInfo {
+                    remote: self.remote.name.clone(),
+                    ref_name: item.name.clone(),
+                    arch: parts.arch,
+                    branch: parts.branch,
+                })
+            })
+            .collect::<Vec<_>>();
+        refs.sort_by(|left, right| left.ref_name.cmp(&right.ref_name));
+        refs
     }
 
     pub fn app_history(
@@ -53,7 +103,7 @@ impl RemoteMetadata {
         paths: &Installation,
         app_id: &str,
     ) -> Result<(RemoteApp, Vec<CommitInfo>)> {
-        let remote = self.resolve_app(app_id, true)?;
+        let remote = resolve_app_with_runtime_fallback(paths, self, app_id)?;
         let history = self.history_for_remote(paths, &remote)?;
         Ok((remote, history))
     }
@@ -83,8 +133,9 @@ impl RemoteMetadata {
                 commit.checksum
             )
         })?;
-        let app = remote_app_from_ref(
-            &self.refs,
+        let app = resolve_ref_with_runtime_fallback(
+            paths,
+            self,
             RemoteRef {
                 name: app_ref.to_string(),
                 checksum: commit.checksum.clone(),
@@ -92,7 +143,6 @@ impl RemoteMetadata {
                 download_size: None,
                 installed_size: None,
             },
-            &self.arch,
         )?;
         Ok((app, commit.clone()))
     }
@@ -104,15 +154,41 @@ impl RemoteMetadata {
     ) -> Result<Vec<CommitInfo>> {
         let summary = fs::read(&self.summary_path)
             .with_context(|| format!("read {}", self.summary_path.display()))?;
-        Storage::open(paths)?.commit_history(&summary, &remote.app_ref, &remote.app_commit)
+        Storage::open(paths)?.commit_history(
+            &self.remote.name,
+            &summary,
+            &remote.app_ref,
+            &remote.app_commit,
+            self.remote.gpg_verify,
+        )
     }
 
     fn resolve_app_ref(&self, app_id: &str, replacements: bool) -> Result<RemoteRef> {
         if app_id.contains('/') {
-            bail!("app id must not contain '/': {app_id}");
+            let ref_name = if app_id.starts_with("app/") {
+                app_id.to_string()
+            } else if app_id.split('/').count() == 3 {
+                format!("app/{app_id}")
+            } else {
+                bail!("invalid application ref: {app_id}");
+            };
+            return self
+                .refs
+                .iter()
+                .find(|item| item.name == ref_name)
+                .cloned()
+                .with_context(|| {
+                    format!("ref is not present in {}: {ref_name}", self.remote.name)
+                });
         }
         let app_id = if replacements && !app_ref_exists(&self.refs, app_id, &self.arch) {
-            resolve_current_app_id(&self.refs, app_id, &self.arch, &self.remote_dir)?
+            resolve_current_app_id(
+                &self.refs,
+                app_id,
+                &self.arch,
+                &self.remote,
+                &self.remote_dir,
+            )?
         } else {
             app_id.to_string()
         };
@@ -130,13 +206,15 @@ pub fn inspect_refs(paths: &Installation, refs: &[String]) -> Result<()> {
         refs.to_vec()
     };
 
-    let metadata = load_remote_metadata(paths)?;
+    let metadata = load_remote_metadata(paths, super::DEFAULT_REMOTE)?;
     for ref_name in refs {
         let remote_ref = metadata
             .refs
             .iter()
             .find(|candidate| candidate.name == ref_name)
-            .with_context(|| format!("ref is not present in Flathub: {ref_name}"))?;
+            .with_context(|| {
+                format!("ref is not present in {}: {ref_name}", metadata.remote.name)
+            })?;
         println!("{ref_name}");
         println!("  commit: {}", remote_ref.checksum);
         if let Some(ref commit_metadata) = remote_ref.metadata {
@@ -151,46 +229,134 @@ pub fn inspect_refs(paths: &Installation, refs: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub fn resolve_remote_app(paths: &Installation, app_id: &str) -> Result<RemoteApp> {
-    if app_id.contains('/') {
-        bail!("app id must not contain '/': {app_id}");
-    }
-    let total_started = Instant::now();
-    let started = Instant::now();
-    let (arch, summary_path, collection_id) = load_arch_summary(paths)?;
-    trace_resolution("load indexed architecture metadata", started);
-    let started = Instant::now();
-    if let Some(app) = resolve_exact_app_from_summary(&summary_path, app_id, &arch)? {
-        trace_resolution("resolve exact app", started);
-        trace_resolution("total exact resolution", total_started);
-        return Ok(app);
-    }
-    trace_resolution("search exact app", started);
-
-    let started = Instant::now();
-    let refs = parse_summary_refs(&summary_path)?;
-    let metadata = RemoteMetadata {
-        arch,
-        refs,
-        remote_dir: paths.remote_metadata(),
-        summary_path,
-        collection_id,
+pub fn resolve_remote_app(
+    paths: &Installation,
+    remote_name: Option<&str>,
+    app_id: &str,
+) -> Result<RemoteApp> {
+    let candidates = if let Some(name) = remote_name {
+        let remote = super::get_remote(paths, name)?;
+        if !remote.enabled {
+            bail!("remote is disabled: {name}");
+        }
+        vec![remote]
+    } else {
+        let mut remotes = super::enabled_remotes(paths)?;
+        remotes.sort_by_key(|remote| (remote.name != super::DEFAULT_REMOTE, remote.name.clone()));
+        remotes
     };
-    let app = metadata.resolve_app(app_id, true)?;
-    trace_resolution("resolve replacement app", started);
-    trace_resolution("total replacement resolution", total_started);
-    Ok(app)
+    if candidates.is_empty() {
+        bail!("no enabled remotes are configured");
+    }
+    let mut failures = Vec::new();
+    for remote in candidates {
+        let metadata = match load_remote_metadata_for(paths, remote.clone()) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                failures.push(format!("{}: {error:#}", remote.name));
+                continue;
+            }
+        };
+        match resolve_app_with_runtime_fallback(paths, &metadata, app_id) {
+            Ok(app) => return Ok(app),
+            Err(error) => failures.push(format!("{}: {error:#}", remote.name)),
+        }
+    }
+    bail!(
+        "ref {app_id} was not found in an enabled remote ({})",
+        failures.join("; ")
+    )
 }
 
-pub fn load_remote_metadata(paths: &Installation) -> Result<RemoteMetadata> {
-    let (arch, summary_path, collection_id) = load_arch_summary(paths)?;
+fn resolve_app_with_runtime_fallback(
+    paths: &Installation,
+    metadata: &RemoteMetadata,
+    app_id: &str,
+) -> Result<RemoteApp> {
+    let app_ref = metadata.resolve_app_ref(app_id, true)?;
+    resolve_ref_with_runtime_fallback(paths, metadata, app_ref)
+}
+
+fn resolve_ref_with_runtime_fallback(
+    paths: &Installation,
+    metadata: &RemoteMetadata,
+    app_ref: RemoteRef,
+) -> Result<RemoteApp> {
+    let app_metadata = app_ref.metadata.clone().with_context(|| {
+        format!(
+            "{} summary has no Flatpak metadata for {}",
+            metadata.remote.name, app_ref.name
+        )
+    })?;
+    let runtime_ref = metadata_value(&app_metadata, "Application", "runtime")
+        .context("remote app metadata has no Application/runtime")?;
+    let runtime_full_ref = format!("runtime/{runtime_ref}");
+    if let Some(runtime) = metadata
+        .refs
+        .iter()
+        .find(|item| item.name == runtime_full_ref)
+        .cloned()
+    {
+        return remote_app_from_metadata(
+            app_ref,
+            app_metadata,
+            runtime,
+            &metadata.arch,
+            &metadata.remote.name,
+            &metadata.remote.name,
+        );
+    }
+    for remote in super::enabled_remotes(paths)? {
+        if remote.name == metadata.remote.name {
+            continue;
+        }
+        let candidate = match load_remote_metadata_for(paths, remote.clone()) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                eprintln!(
+                    "warning: cannot inspect remote {} for runtime {}: {error:#}",
+                    remote.name, runtime_ref
+                );
+                continue;
+            }
+        };
+        if let Some(runtime) = candidate
+            .refs
+            .iter()
+            .find(|item| item.name == runtime_full_ref)
+            .cloned()
+        {
+            return remote_app_from_metadata(
+                app_ref,
+                app_metadata,
+                runtime,
+                &metadata.arch,
+                &metadata.remote.name,
+                &remote.name,
+            );
+        }
+    }
+    bail!("required runtime ref not found in an enabled remote: {runtime_full_ref}")
+}
+
+pub fn load_remote_metadata(paths: &Installation, name: &str) -> Result<RemoteMetadata> {
+    let remote = super::get_remote(paths, name)?;
+    if !remote.enabled {
+        bail!("remote is disabled: {name}");
+    }
+    load_remote_metadata_for(paths, remote)
+}
+
+fn load_remote_metadata_for(paths: &Installation, remote: Remote) -> Result<RemoteMetadata> {
+    let (arch, summary_path, collection_id) = load_arch_summary(paths, &remote)?;
     let started = Instant::now();
     let refs = parse_summary_refs(&summary_path)?;
     trace_resolution("parse architecture refs", started);
     Ok(RemoteMetadata {
+        remote: remote.clone(),
         arch,
         refs,
-        remote_dir: paths.remote_metadata(),
+        remote_dir: paths.remote_metadata(&remote.name),
         summary_path,
         collection_id,
     })
@@ -213,121 +379,15 @@ fn select_history_commit<'a>(history: &'a [CommitInfo], requested: &str) -> Resu
     Ok(selected)
 }
 
-fn resolve_exact_app_from_summary(
-    summary_path: &Path,
-    app_id: &str,
-    arch: &str,
-) -> Result<Option<RemoteApp>> {
-    let variant = variant_from_file(summary_path, "(a(s(taya{sv}))a{sv})")
-        .with_context(|| format!("parse {}", summary_path.display()))?;
-    let refs = variant.child_value(0);
-    let prefix = format!("app/{app_id}/{arch}/");
-    let stable_ref = format!("{prefix}stable");
-    let mut candidates = match find_summary_entry(&refs, &stable_ref)? {
-        Some(candidate) => vec![candidate],
-        None => Vec::new(),
-    };
-
-    if candidates.is_empty() {
-        for index in 0..refs.n_children() {
-            let item = refs.child_value(index);
-            let Some(name) = item.child_value(0).str().map(ToOwned::to_owned) else {
-                continue;
-            };
-            if !name.starts_with(&prefix) {
-                continue;
-            }
-            let info = item.child_value(1);
-            candidates.push((
-                remote_ref_from_summary_info(name, &info)?,
-                lookup_flatpak_metadata(&info.child_value(2)),
-            ));
-        }
-    }
-
-    if candidates.is_empty() {
-        return Ok(None);
-    }
-    let candidate_refs = candidates
-        .iter()
-        .map(|(remote_ref, _)| remote_ref.clone())
-        .collect::<Vec<_>>();
-    let app_remote_ref = choose_app_ref(&candidate_refs, app_id, arch)?;
-    let cached_metadata = candidates
-        .into_iter()
-        .find(|(remote_ref, _)| remote_ref.name == app_remote_ref.name)
-        .and_then(|(_, metadata)| metadata);
-    let metadata = match cached_metadata {
-        Some(metadata) => {
-            trace_resolution("reuse application metadata from summary", Instant::now());
-            metadata
-        }
-        None => bail!(
-            "Flathub summary has no xa.data metadata for {}",
-            app_remote_ref.name
-        ),
-    };
-    let runtime_ref = metadata_value(&metadata, "Application", "runtime")
-        .context("remote app metadata has no Application/runtime")?;
-    let runtime_full_ref = format!("runtime/{runtime_ref}");
-    let runtime_remote_ref = find_summary_ref(&refs, &runtime_full_ref)?.with_context(|| {
-        format!("required runtime ref not found in Flathub summary: {runtime_full_ref}")
-    })?;
-    remote_app_from_metadata(app_remote_ref, metadata, runtime_remote_ref, arch).map(Some)
-}
-
-fn find_summary_ref(refs: &Variant, ref_name: &str) -> Result<Option<RemoteRef>> {
-    Ok(find_summary_entry(refs, ref_name)?.map(|(remote_ref, _)| remote_ref))
-}
-
-fn find_summary_entry(
-    refs: &Variant,
-    ref_name: &str,
-) -> Result<Option<(RemoteRef, Option<String>)>> {
-    let mut left = 0usize;
-    let mut right = refs.n_children();
-    while left < right {
-        let middle = left + (right - left) / 2;
-        let item = refs.child_value(middle);
-        let name_value = item.child_value(0);
-        let name = name_value.str().unwrap_or_default();
-        match name.cmp(ref_name) {
-            std::cmp::Ordering::Less => left = middle + 1,
-            std::cmp::Ordering::Greater => right = middle,
-            std::cmp::Ordering::Equal => {
-                let info = item.child_value(1);
-                return Ok(Some((
-                    remote_ref_from_summary_info(name.to_string(), &info)?,
-                    lookup_flatpak_metadata(&info.child_value(2)),
-                )));
-            }
-        }
-    }
-
-    // OSTree summaries are sorted, but retain a correctness fallback for
-    // non-conforming repositories.
-    for index in 0..refs.n_children() {
-        let item = refs.child_value(index);
-        if item.child_value(0).str() != Some(ref_name) {
-            continue;
-        }
-        let info = item.child_value(1);
-        return Ok(Some((
-            remote_ref_from_summary_info(ref_name.to_string(), &info)?,
-            lookup_flatpak_metadata(&info.child_value(2)),
-        )));
-    }
-    Ok(None)
-}
-
 fn remote_app_from_ref(
     refs: &[RemoteRef],
     app_remote_ref: RemoteRef,
     arch: &str,
+    origin: &str,
 ) -> Result<RemoteApp> {
     let app_metadata = app_remote_ref.metadata.clone().with_context(|| {
         format!(
-            "Flathub summary has no xa.data metadata for {}",
+            "remote summary has no Flatpak metadata for {}",
             app_remote_ref.name
         )
     })?;
@@ -340,10 +400,17 @@ fn remote_app_from_ref(
         .find(|remote_ref| remote_ref.name == runtime_full_ref)
         .cloned()
         .with_context(|| {
-            format!("required runtime ref not found in Flathub summary: {runtime_full_ref}")
+            format!("required runtime ref not found in remote summary: {runtime_full_ref}")
         })?;
     trace_resolution("select runtime ref", started);
-    remote_app_from_metadata(app_remote_ref, app_metadata, runtime_remote_ref, arch)
+    remote_app_from_metadata(
+        app_remote_ref,
+        app_metadata,
+        runtime_remote_ref,
+        arch,
+        origin,
+        origin,
+    )
 }
 
 fn remote_app_from_metadata(
@@ -351,6 +418,8 @@ fn remote_app_from_metadata(
     metadata: String,
     runtime_remote_ref: RemoteRef,
     arch: &str,
+    origin: &str,
+    runtime_origin: &str,
 ) -> Result<RemoteApp> {
     let app_ref_parts = split_flatpak_ref(&app_remote_ref.name)?;
     let app_id = app_ref_parts.name;
@@ -366,10 +435,12 @@ fn remote_app_from_metadata(
     let command = metadata_value(&metadata, "Application", "command")
         .context("remote app metadata has no Application/command")?;
     if command.split_whitespace().count() != 1 {
-        bail!("entry command must be a single executable for this POC: {command:?}");
+        bail!("entry command must be a single executable: {command:?}");
     }
 
     Ok(RemoteApp {
+        origin: origin.to_string(),
+        runtime_origin: runtime_origin.to_string(),
         app_id,
         app_ref: app_remote_ref.name,
         app_commit: app_remote_ref.checksum,
@@ -386,32 +457,55 @@ fn remote_app_from_metadata(
 
 pub fn search_apps(paths: &Installation, query: &str) -> Result<Vec<SearchResult>> {
     let query = query.to_ascii_lowercase();
-    let metadata = load_remote_metadata(paths)?;
-    let arch = metadata.arch;
     let mut results = Vec::new();
-
-    for remote_ref in metadata.refs {
-        let Ok(parts) = split_flatpak_ref(&remote_ref.name) else {
-            continue;
+    let mut loaded = 0usize;
+    let mut failures = Vec::new();
+    let configured_remotes = super::enabled_remotes(paths)?;
+    if configured_remotes.is_empty() {
+        bail!("no enabled remotes are configured");
+    }
+    for configured in configured_remotes {
+        let metadata = match load_remote_metadata_for(paths, configured.clone()) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                failures.push(format!("{}: {error:#}", configured.name));
+                continue;
+            }
         };
-        if parts.kind != "app" || parts.arch != arch {
-            continue;
+        loaded += 1;
+        let arch = metadata.arch;
+        for remote_ref in metadata.refs {
+            let Ok(parts) = split_flatpak_ref(&remote_ref.name) else {
+                continue;
+            };
+            if parts.kind != "app" || parts.arch != arch {
+                continue;
+            }
+            if !parts.name.to_ascii_lowercase().contains(&query) {
+                continue;
+            }
+            results.push(SearchResult {
+                remote: configured.name.clone(),
+                app_id: parts.name,
+                app_ref: remote_ref.name,
+                arch: parts.arch,
+                branch: parts.branch,
+            });
         }
-        if !parts.name.to_ascii_lowercase().contains(&query) {
-            continue;
-        }
-        results.push(SearchResult {
-            app_id: parts.name,
-            app_ref: remote_ref.name,
-            arch: parts.arch,
-            branch: parts.branch,
-        });
+    }
+
+    if loaded == 0 && !failures.is_empty() {
+        bail!("failed to load configured remotes: {}", failures.join("; "));
+    }
+    for failure in failures {
+        eprintln!("warning: search skipped remote {failure}");
     }
 
     results.sort_by(|left, right| {
         left.app_id
             .cmp(&right.app_id)
             .then_with(|| left.branch.cmp(&right.branch))
+            .then_with(|| left.remote.cmp(&right.remote))
     });
     Ok(results)
 }
@@ -420,9 +514,10 @@ fn resolve_current_app_id(
     refs: &[RemoteRef],
     requested: &str,
     arch: &str,
+    remote: &Remote,
     remote_dir: &Path,
 ) -> Result<String> {
-    let replacements = fetch_appstream_replacements(remote_dir, arch)?;
+    let replacements = fetch_appstream_replacements(remote, remote_dir, arch)?;
     resolve_current_app_id_from_replacements(refs, &replacements, requested, arch)
 }
 
@@ -451,17 +546,17 @@ fn resolve_current_app_id_from_replacements(
             0 => return Ok(current),
             1 => {
                 let replacement = available.remove(0);
-                eprintln!("info: Flathub app id {current} is replaced by {replacement}");
+                eprintln!("info: app id {current} is replaced by {replacement}");
                 current = replacement;
             }
             _ => bail!(
-                "multiple Flathub replacements found for {current} on {arch}: {}",
+                "multiple replacements found for {current} on {arch}: {}",
                 available.join(", ")
             ),
         }
     }
 
-    bail!("cycle in Flathub replacement metadata for app id {requested}");
+    bail!("cycle in replacement metadata for app id {requested}");
 }
 
 fn app_ref_exists(refs: &[RemoteRef], app_id: &str, arch: &str) -> bool {
@@ -499,7 +594,7 @@ fn choose_app_ref(refs: &[RemoteRef], app_id: &str, arch: &str) -> Result<Remote
     }
 
     if candidates.is_empty() {
-        bail!("no Flathub ref found for app id {app_id} on architecture {arch}");
+        bail!("no remote ref found for app id {app_id} on architecture {arch}");
     }
 
     let branches = candidates
@@ -507,7 +602,7 @@ fn choose_app_ref(refs: &[RemoteRef], app_id: &str, arch: &str) -> Result<Remote
         .map(|(parts, _)| parts.branch.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    bail!("multiple Flathub branches found for {app_id} on {arch}, and none is stable: {branches}");
+    bail!("multiple remote branches found for {app_id} on {arch}, and none is stable: {branches}");
 }
 
 #[derive(Debug, Clone)]
@@ -544,21 +639,34 @@ pub(super) fn host_flatpak_arch() -> Result<String> {
     match machine.as_str() {
         "amd64" | "x86_64" => Ok("x86_64".to_string()),
         "aarch64" | "arm64" => Ok("aarch64".to_string()),
-        _ => bail!("unsupported host architecture for Flatpak POC: {machine}"),
+        _ => bail!("unsupported host architecture for Flatpak: {machine}"),
     }
 }
 
 pub fn checkout_ref(paths: &Installation, ref_name: &str, dest: PathBuf) -> Result<()> {
-    let (_, summary_path, _) = load_arch_summary(paths)?;
+    let remote = super::get_remote(paths, super::DEFAULT_REMOTE)?;
+    let (_, summary_path, _) = load_arch_summary(paths, &remote)?;
     let refs = parse_summary_refs(&summary_path)?;
     let checksum = refs
         .iter()
         .find(|candidate| candidate.name == ref_name)
         .map(|candidate| candidate.checksum.as_str())
-        .with_context(|| format!("ref is not present in Flathub: {ref_name}"))?;
+        .with_context(|| format!("ref is not present in {}: {ref_name}", remote.name))?;
     let summary =
         fs::read(&summary_path).with_context(|| format!("read {}", summary_path.display()))?;
-    Storage::open(paths)?.checkout(&summary, ref_name, checksum, &dest)
+    Storage::open(paths)?
+        .deploy(
+            &summary,
+            &[crate::ostree::Deployment {
+                remote: &remote.name,
+                kind: "ref",
+                ref_name,
+                checksum,
+                destination: &dest,
+                force: true,
+            }],
+        )
+        .map(|_| ())
 }
 
 #[cfg(test)]

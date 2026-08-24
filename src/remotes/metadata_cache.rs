@@ -1,6 +1,8 @@
-use super::ostree_summary::{parse_summary_index, summary_digest_matches};
+use super::ostree_summary::{
+    parse_summary_collection_id, parse_summary_index, summary_digest_matches,
+};
 use super::ref_resolution::host_flatpak_arch;
-use super::trace_resolution;
+use super::{trace_resolution, Remote};
 use crate::installation::installation_paths::Installation;
 use crate::ostree::Storage;
 use anyhow::{bail, Context, Result};
@@ -10,8 +12,6 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
-
-const REMOTE: &str = "https://dl.flathub.org/repo";
 
 pub(super) fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>> {
     let payload = gzip_deflate_payload(data)?;
@@ -71,62 +71,75 @@ fn safe_dir_fragment(value: &str) -> String {
         .collect()
 }
 
-pub(crate) fn load_arch_summary(paths: &Installation) -> Result<(String, PathBuf, Option<String>)> {
+pub(crate) fn load_arch_summary(
+    paths: &Installation,
+    remote: &Remote,
+) -> Result<(String, PathBuf, Option<String>)> {
     let started = Instant::now();
     let arch = host_flatpak_arch()?;
     trace_resolution("detect architecture", started);
     let started = Instant::now();
-    let index_path = fetch_summary_index(paths)?;
+    let index_path = fetch_summary_index(paths, remote);
     trace_resolution("fetch summary index", started);
     let started = Instant::now();
+    let Ok(index_path) = index_path else {
+        let summary_path = fetch_normal_summary(paths, remote)?;
+        let collection_id = parse_summary_collection_id(&summary_path)?;
+        trace_resolution("fetch normal summary", started);
+        return Ok((arch, summary_path, collection_id));
+    };
     let (digest, collection_id) = parse_summary_index(&index_path, &arch)?;
     if std::env::var_os("FREEBSD_FLATPAK_TRACE_RESOLUTION").is_some() {
         eprintln!("resolution metadata: {arch} summary {digest}");
     }
     trace_resolution("parse summary index", started);
     let started = Instant::now();
-    let summary_path = fetch_subsummary(paths, &arch, &digest)?;
+    let summary_path = fetch_subsummary(paths, remote, &arch, &digest)?;
     trace_resolution("fetch architecture summary", started);
     let started = Instant::now();
-    let summary_path = cache_uncompressed_subsummary(paths, &digest, &summary_path)?;
+    let summary_path = cache_uncompressed_subsummary(paths, remote, &digest, &summary_path)?;
     trace_resolution("prepare architecture summary cache", started);
     Ok((arch, summary_path, collection_id))
 }
 
-fn fetch_summary_index(paths: &Installation) -> Result<PathBuf> {
-    let remote_dir = paths.remote_metadata();
+fn fetch_summary_index(paths: &Installation, remote: &Remote) -> Result<PathBuf> {
+    let remote_dir = paths.remote_metadata(&remote.name);
     let path = remote_dir.join("summary.idx");
     let signature_path = remote_dir.join("summary.idx.sig");
     let checked = remote_dir.join("summary.idx.checked");
     fs::create_dir_all(&remote_dir).context("create remote metadata directory")?;
-    if signature_path.is_file() && metadata_is_fresh(&path, &checked)? {
+    if (!remote.gpg_verify || signature_path.is_file()) && metadata_is_fresh(&path, &checked)? {
         return Ok(path);
     }
     let _lock = MetadataLock::acquire(&remote_dir.join("summary.idx.lock"))?;
-    if signature_path.is_file() && metadata_is_fresh(&path, &checked)? {
+    if (!remote.gpg_verify || signature_path.is_file()) && metadata_is_fresh(&path, &checked)? {
         return Ok(path);
     }
     let candidate = remote_dir.join("summary.idx.candidate");
     let signature_candidate = remote_dir.join("summary.idx.sig.candidate");
     let refresh = || -> Result<()> {
         fetch_metadata_file(
-            &format!("{REMOTE}/summary.idx"),
+            &format!("{}/summary.idx", remote.url),
             &candidate,
-            "Flathub metadata index",
+            &format!("{} metadata index", remote.name),
         )?;
-        fetch_metadata_file(
-            &format!("{REMOTE}/summary.idx.sig"),
-            &signature_candidate,
-            "Flathub metadata signature",
-        )?;
-        let summary =
-            fs::read(&candidate).with_context(|| format!("read {}", candidate.display()))?;
-        let signatures = fs::read(&signature_candidate)
-            .with_context(|| format!("read {}", signature_candidate.display()))?;
-        Storage::open(paths)?.verify_summary(&summary, &signatures)?;
+        if remote.gpg_verify {
+            fetch_metadata_file(
+                &format!("{}/summary.idx.sig", remote.url),
+                &signature_candidate,
+                &format!("{} metadata signature", remote.name),
+            )?;
+            let summary =
+                fs::read(&candidate).with_context(|| format!("read {}", candidate.display()))?;
+            let signatures = fs::read(&signature_candidate)
+                .with_context(|| format!("read {}", signature_candidate.display()))?;
+            Storage::open(paths)?.verify_summary(&remote.name, &summary, &signatures)?;
+        }
         fs::rename(&candidate, &path).with_context(|| format!("activate {}", path.display()))?;
-        fs::rename(&signature_candidate, &signature_path)
-            .with_context(|| format!("activate {}", signature_path.display()))?;
+        if remote.gpg_verify {
+            fs::rename(&signature_candidate, &signature_path)
+                .with_context(|| format!("activate {}", signature_path.display()))?;
+        }
         Ok(())
     };
     match refresh() {
@@ -135,15 +148,23 @@ fn fetch_summary_index(paths: &Installation) -> Result<PathBuf> {
                 .with_context(|| format!("write {}", checked.display()))?;
         }
         Err(error) if path.is_file() => {
-            eprintln!("warning: refresh Flathub metadata index failed; using cache: {error:#}");
+            eprintln!(
+                "warning: refresh {} metadata index failed; using cache: {error:#}",
+                remote.name
+            );
         }
         Err(error) => return Err(error),
     }
     Ok(path)
 }
 
-fn fetch_subsummary(paths: &Installation, arch: &str, digest: &str) -> Result<PathBuf> {
-    let summaries = paths.remote_metadata().join("summaries");
+fn fetch_subsummary(
+    paths: &Installation,
+    remote: &Remote,
+    arch: &str,
+    digest: &str,
+) -> Result<PathBuf> {
+    let summaries = paths.remote_metadata(&remote.name).join("summaries");
     fs::create_dir_all(&summaries).context("create architecture summary cache")?;
     let path = summaries.join(format!("{digest}.gz"));
     if path.is_file() {
@@ -154,20 +175,21 @@ fn fetch_subsummary(paths: &Installation, arch: &str, digest: &str) -> Result<Pa
         return Ok(path);
     }
     fetch_metadata_file(
-        &format!("{REMOTE}/summaries/{digest}.gz"),
+        &format!("{}/summaries/{digest}.gz", remote.url),
         &path,
-        &format!("Flathub metadata for {arch}"),
+        &format!("{} metadata for {arch}", remote.name),
     )?;
     Ok(path)
 }
 
 fn cache_uncompressed_subsummary(
     paths: &Installation,
+    remote: &Remote,
     digest: &str,
     compressed_path: &Path,
 ) -> Result<PathBuf> {
     let path = paths
-        .remote_metadata()
+        .remote_metadata(&remote.name)
         .join("summaries")
         .join(format!("{digest}.sub"));
     if path.is_file() {
@@ -191,7 +213,10 @@ fn cache_uncompressed_subsummary(
         .with_context(|| format!("decompress {}", compressed_path.display()))?;
     if !summary_digest_matches(&data, digest)? {
         let _ = fs::remove_file(compressed_path);
-        bail!("downloaded Flathub architecture summary failed SHA-256 verification");
+        bail!(
+            "downloaded {} architecture summary failed SHA-256 verification",
+            remote.name
+        );
     }
     let partial = path.with_extension("sub.part");
     fs::write(&partial, data).with_context(|| format!("write {}", partial.display()))?;
@@ -362,7 +387,7 @@ fn unix_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
-pub(super) fn fetch_appstream(remote_dir: &Path, arch: &str) -> Result<PathBuf> {
+pub(super) fn fetch_appstream(remote: &Remote, remote_dir: &Path, arch: &str) -> Result<PathBuf> {
     let path = remote_dir.join(format!("appstream-{}.xml.gz", safe_dir_fragment(arch)));
     let checked = remote_dir.join(format!("appstream-{}.checked", safe_dir_fragment(arch)));
     fs::create_dir_all(remote_dir).context("create remote metadata directory")?;
@@ -376,9 +401,9 @@ pub(super) fn fetch_appstream(remote_dir: &Path, arch: &str) -> Result<PathBuf> 
         return Ok(path);
     }
     match fetch_metadata_file(
-        &format!("{REMOTE}/appstream/{arch}/appstream.xml.gz"),
+        &format!("{}/appstream/{arch}/appstream.xml.gz", remote.url),
         &path,
-        "Flathub AppStream metadata",
+        &format!("{} AppStream metadata", remote.name),
     ) {
         Ok(()) => {
             fs::write(&checked, format!("{}\n", unix_timestamp()))
@@ -386,9 +411,57 @@ pub(super) fn fetch_appstream(remote_dir: &Path, arch: &str) -> Result<PathBuf> 
         }
         Err(error) if path.is_file() => {
             eprintln!(
-                "warning: refresh Flathub app replacement metadata failed; using cache: {error:#}"
+                "warning: refresh {} app replacement metadata failed; using cache: {error:#}",
+                remote.name
             );
         }
+        Err(error) => return Err(error),
+    }
+    Ok(path)
+}
+
+fn fetch_normal_summary(paths: &Installation, remote: &Remote) -> Result<PathBuf> {
+    let remote_dir = paths.remote_metadata(&remote.name);
+    fs::create_dir_all(&remote_dir)?;
+    let path = remote_dir.join("summary");
+    let checked = remote_dir.join("summary.checked");
+    if metadata_is_fresh(&path, &checked)? {
+        return Ok(path);
+    }
+    let _lock = MetadataLock::acquire(&remote_dir.join("summary.lock"))?;
+    if metadata_is_fresh(&path, &checked)? {
+        return Ok(path);
+    }
+    let candidate = remote_dir.join("summary.candidate");
+    let signature_candidate = remote_dir.join("summary.sig.candidate");
+    let refresh = || -> Result<()> {
+        fetch_metadata_file(
+            &format!("{}/summary", remote.url),
+            &candidate,
+            &format!("{} summary", remote.name),
+        )?;
+        if remote.gpg_verify {
+            fetch_metadata_file(
+                &format!("{}/summary.sig", remote.url),
+                &signature_candidate,
+                &format!("{} summary signature", remote.name),
+            )?;
+            let summary = fs::read(&candidate)?;
+            let signature = fs::read(&signature_candidate)?;
+            Storage::open(paths)?.verify_summary(&remote.name, &summary, &signature)?;
+        }
+        fs::rename(&candidate, &path)?;
+        if remote.gpg_verify {
+            fs::rename(&signature_candidate, remote_dir.join("summary.sig"))?;
+        }
+        Ok(())
+    };
+    match refresh() {
+        Ok(()) => fs::write(&checked, format!("{}\n", unix_timestamp()))?,
+        Err(error) if path.is_file() => eprintln!(
+            "warning: refresh {} summary failed; using cache: {error:#}",
+            remote.name
+        ),
         Err(error) => return Err(error),
     }
     Ok(path)

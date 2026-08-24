@@ -124,27 +124,37 @@ pub(super) fn checkout_if_missing(
     dest: &Path,
     force: bool,
 ) -> Result<StorageTimings> {
-    let (_, summary_path, _) = load_arch_summary(paths)?;
-    let summary =
-        fs::read(&summary_path).with_context(|| format!("read {}", summary_path.display()))?;
-    let resolved_checksum;
-    let checksum = match expected_checksum {
-        Some(checksum) => checksum,
-        None => {
-            resolved_checksum = ref_checksum(&summary_path, ref_name)?;
-            &resolved_checksum
-        }
-    };
-    Storage::open(paths)?.deploy(
-        &summary,
-        &[Deployment {
-            kind,
-            ref_name,
-            checksum,
-            destination: dest,
-            force,
-        }],
-    )
+    let mut remotes = crate::remotes::enabled_remotes(paths)?;
+    remotes.sort_by_key(|remote| {
+        (
+            remote.name != crate::remotes::DEFAULT_REMOTE,
+            remote.name.clone(),
+        )
+    });
+    for remote in remotes {
+        let (_, summary_path, _) = load_arch_summary(paths, &remote)?;
+        let resolved_checksum = match expected_checksum {
+            Some(checksum) => checksum.to_string(),
+            None => match ref_checksum(&summary_path, ref_name) {
+                Ok(checksum) => checksum,
+                Err(_) => continue,
+            },
+        };
+        let summary =
+            fs::read(&summary_path).with_context(|| format!("read {}", summary_path.display()))?;
+        return Storage::open(paths)?.deploy(
+            &summary,
+            &[Deployment {
+                remote: &remote.name,
+                kind,
+                ref_name,
+                checksum: &resolved_checksum,
+                destination: dest,
+                force,
+            }],
+        );
+    }
+    anyhow::bail!("ref is not present in an enabled remote: {ref_name}")
 }
 
 pub fn runtime_checkout_dir(runtime_ref: &str) -> String {

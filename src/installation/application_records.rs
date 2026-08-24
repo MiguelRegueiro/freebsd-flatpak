@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 pub fn record_install(paths: &Installation, installed: &InstalledApp) -> Result<AppRecord> {
     ensure_layout(paths)?;
     let app = AppRecord {
+        origin: installed.origin.clone(),
+        runtime_origin: installed.runtime_origin.clone(),
         app_id: installed.app_id.clone(),
         app_ref: installed.app_ref.clone(),
         app_commit: installed.app_commit.clone(),
@@ -29,6 +31,7 @@ pub fn record_install(paths: &Installation, installed: &InstalledApp) -> Result<
     write_runtime(
         paths,
         &RuntimeRecord {
+            origin: installed.runtime_origin.clone(),
             runtime_ref: app.runtime_ref.clone(),
             runtime_commit: app.runtime_commit.clone(),
             runtime_dir: app.runtime_dir.clone(),
@@ -67,10 +70,12 @@ pub fn remove_app_record(paths: &Installation, app_id: &str) -> Result<Option<Ap
     Ok(Some(record))
 }
 
-pub(super) fn write_app(paths: &Installation, app: &AppRecord) -> Result<()> {
+pub(crate) fn write_app(paths: &Installation, app: &AppRecord) -> Result<()> {
     let path = app_record_path(paths, &app.app_id)?;
     let data = format!(
-        "app_id={}\napp_ref={}\napp_commit={}\napp_dir={}\narch={}\nbranch={}\nruntime_ref={}\nruntime_commit={}\nruntime_dir={}\ncommand={}\n",
+        "origin={}\nruntime_origin={}\napp_id={}\napp_ref={}\napp_commit={}\napp_dir={}\narch={}\nbranch={}\nruntime_ref={}\nruntime_commit={}\nruntime_dir={}\ncommand={}\n",
+        app.origin,
+        app.runtime_origin,
         app.app_id,
         app.app_ref,
         app.app_commit,
@@ -93,7 +98,16 @@ fn read_app_path(path: &Path) -> Result<AppRecord> {
 pub(super) fn app_from_values(
     values: &std::collections::BTreeMap<String, String>,
 ) -> Result<AppRecord> {
+    let origin = values
+        .get("origin")
+        .cloned()
+        .unwrap_or_else(|| crate::remotes::DEFAULT_REMOTE.to_string());
     Ok(AppRecord {
+        runtime_origin: values
+            .get("runtime_origin")
+            .cloned()
+            .unwrap_or_else(|| origin.clone()),
+        origin,
         app_id: required(values, "app_id")?,
         app_ref: required(values, "app_ref")?,
         app_commit: required(values, "app_commit")?,
@@ -109,4 +123,53 @@ pub(super) fn app_from_values(
 
 fn app_record_path(paths: &Installation, app_id: &str) -> Result<PathBuf> {
     Ok(apps_dir(paths).join(format!("{}.ini", safe_name(app_id)?)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_records_migrate_to_flathub_origin() {
+        let root = std::env::temp_dir().join(format!(
+            "freebsd-flatpak-origin-migration-{}",
+            std::process::id()
+        ));
+        let paths = Installation::for_test(&root);
+        ensure_layout(&paths).unwrap();
+        let record = "app_id=org.example.App\napp_ref=app/org.example.App/x86_64/stable\napp_commit=app\napp_dir=apps/app\narch=x86_64\nbranch=stable\nruntime_ref=org.example.Platform/x86_64/stable\nruntime_commit=runtime\nruntime_dir=runtimes/runtime\ncommand=example\n";
+        fs::write(app_record_path(&paths, "org.example.App").unwrap(), record).unwrap();
+        let migrated = get_app(&paths, "org.example.App").unwrap();
+        assert_eq!(migrated.origin, crate::remotes::DEFAULT_REMOTE);
+        assert_eq!(migrated.runtime_origin, crate::remotes::DEFAULT_REMOTE);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn app_and_runtime_origins_round_trip() {
+        let root = std::env::temp_dir().join(format!(
+            "freebsd-flatpak-origin-roundtrip-{}",
+            std::process::id()
+        ));
+        let paths = Installation::for_test(&root);
+        let app = AppRecord {
+            origin: "apps".to_string(),
+            runtime_origin: "runtimes".to_string(),
+            app_id: "org.example.App".to_string(),
+            app_ref: "app/org.example.App/x86_64/stable".to_string(),
+            app_commit: "app".to_string(),
+            app_dir: PathBuf::from("apps/app"),
+            arch: "x86_64".to_string(),
+            branch: "stable".to_string(),
+            runtime_ref: "org.example.Platform/x86_64/stable".to_string(),
+            runtime_commit: "runtime".to_string(),
+            runtime_dir: PathBuf::from("runtimes/runtime"),
+            command: "example".to_string(),
+        };
+        write_app(&paths, &app).unwrap();
+        let loaded = get_app(&paths, &app.app_id).unwrap();
+        assert_eq!(loaded.origin, "apps");
+        assert_eq!(loaded.runtime_origin, "runtimes");
+        let _ = fs::remove_dir_all(root);
+    }
 }

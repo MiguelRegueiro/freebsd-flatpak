@@ -8,6 +8,8 @@ use std::fs;
 
 fn app(paths: &Installation, app_commit: &str, runtime_commit: &str) -> AppRecord {
     AppRecord {
+        origin: "flathub".to_string(),
+        runtime_origin: "flathub".to_string(),
         app_id: "org.example.App".to_string(),
         app_ref: "app/org.example.App/x86_64/stable".to_string(),
         app_commit: app_commit.to_string(),
@@ -54,6 +56,7 @@ fn shared_runtime_activation_updates_every_future_launch_record() {
     write_runtime(
         &paths,
         &RuntimeRecord {
+            origin: "flathub".to_string(),
             runtime_ref: first.runtime_ref.clone(),
             runtime_commit: "runtime-2".to_string(),
             runtime_dir: paths.relative_data_path(&new_runtime_dir).unwrap(),

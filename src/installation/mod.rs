@@ -22,6 +22,7 @@ pub(crate) use application_records::*;
 pub(crate) use export_records::*;
 pub(crate) use generation_cleanup::*;
 pub(crate) use record_storage::ensure_layout;
+pub(crate) use record_storage::write_atomic as write_state_atomic;
 pub(crate) use run_records::*;
 pub(crate) use runtime_records::*;
 
@@ -29,6 +30,8 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AppRecord {
+    pub origin: String,
+    pub runtime_origin: String,
     pub app_id: String,
     pub app_ref: String,
     pub app_commit: String,
@@ -43,6 +46,7 @@ pub(crate) struct AppRecord {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeRecord {
+    pub origin: String,
     pub runtime_ref: String,
     pub runtime_commit: String,
     pub runtime_dir: PathBuf,

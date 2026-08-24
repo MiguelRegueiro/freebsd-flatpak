@@ -10,11 +10,19 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub fn get_runtime(paths: &Installation, runtime_ref: &str) -> Result<Option<RuntimeRecord>> {
-    let path = runtime_record_path(paths, runtime_ref);
-    if !path.exists() {
-        return Ok(None);
-    }
-    Ok(Some(read_runtime_path(&path)?))
+    Ok(list_runtimes(paths)?
+        .into_iter()
+        .find(|record| record.runtime_ref == runtime_ref))
+}
+
+pub fn get_runtime_from(
+    paths: &Installation,
+    origin: &str,
+    runtime_ref: &str,
+) -> Result<Option<RuntimeRecord>> {
+    Ok(list_runtimes(paths)?
+        .into_iter()
+        .find(|record| record.origin == origin && record.runtime_ref == runtime_ref))
 }
 
 pub fn list_runtimes(paths: &Installation) -> Result<Vec<RuntimeRecord>> {
@@ -75,6 +83,7 @@ fn runtime_deployment_from_path(
         return Ok(None);
     };
     Ok(Some(RuntimeRecord {
+        origin: crate::remotes::DEFAULT_REMOTE.to_string(),
         runtime_ref: runtime_ref.to_string(),
         runtime_commit,
         runtime_dir: paths.relative_data_path(path)?,
@@ -86,7 +95,7 @@ fn runtime_deployment_from_path(
 /// old or new app/runtime pair.
 pub fn reconcile_runtime_bindings(paths: &Installation) -> Result<()> {
     for mut app in list_apps(paths)? {
-        let Some(runtime) = get_runtime(paths, &app.runtime_ref)? else {
+        let Some(runtime) = get_runtime_from(paths, &app.runtime_origin, &app.runtime_ref)? else {
             continue;
         };
         if app.runtime_commit == runtime.runtime_commit && app.runtime_dir == runtime.runtime_dir {
@@ -101,9 +110,11 @@ pub fn reconcile_runtime_bindings(paths: &Installation) -> Result<()> {
 
 pub fn write_runtime(paths: &Installation, runtime: &RuntimeRecord) -> Result<()> {
     ensure_layout(paths)?;
-    let path = runtime_record_path(paths, &runtime.runtime_ref);
+    let path = existing_runtime_record_path(paths, &runtime.origin, &runtime.runtime_ref)?
+        .unwrap_or_else(|| runtime_record_path(paths, &runtime.origin, &runtime.runtime_ref));
     let data = format!(
-        "runtime_ref={}\nruntime_commit={}\nruntime_dir={}\n",
+        "origin={}\nruntime_ref={}\nruntime_commit={}\nruntime_dir={}\n",
+        runtime.origin,
         runtime.runtime_ref,
         runtime.runtime_commit,
         runtime.runtime_dir.display()
@@ -112,9 +123,14 @@ pub fn write_runtime(paths: &Installation, runtime: &RuntimeRecord) -> Result<()
 }
 
 pub fn remove_runtime_record(paths: &Installation, runtime_ref: &str) -> Result<()> {
-    let path = runtime_record_path(paths, runtime_ref);
-    if path.exists() {
-        fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    for entry in fs::read_dir(runtimes_dir(paths)).context("read runtime state directory")? {
+        let entry = entry?;
+        if entry.file_type()?.is_file()
+            && read_runtime_path(&entry.path())?.runtime_ref == runtime_ref
+        {
+            fs::remove_file(entry.path())
+                .with_context(|| format!("remove runtime record {runtime_ref}"))?;
+        }
     }
     Ok(())
 }
@@ -153,14 +169,39 @@ pub fn runtime_is_required(paths: &Installation, runtime_ref: &str) -> Result<bo
 fn read_runtime_path(path: &Path) -> Result<RuntimeRecord> {
     let values = read_kv_file(path)?;
     Ok(RuntimeRecord {
+        origin: values
+            .get("origin")
+            .cloned()
+            .unwrap_or_else(|| crate::remotes::DEFAULT_REMOTE.to_string()),
         runtime_ref: required(&values, "runtime_ref")?,
         runtime_commit: required(&values, "runtime_commit")?,
         runtime_dir: PathBuf::from(required(&values, "runtime_dir")?),
     })
 }
 
-fn runtime_record_path(paths: &Installation, runtime_ref: &str) -> PathBuf {
-    runtimes_dir(paths).join(format!("{}.ini", safe_name_lossy(runtime_ref)))
+fn runtime_record_path(paths: &Installation, origin: &str, runtime_ref: &str) -> PathBuf {
+    runtimes_dir(paths).join(format!(
+        "{}--{}.ini",
+        safe_name_lossy(origin),
+        safe_name_lossy(runtime_ref)
+    ))
+}
+
+fn existing_runtime_record_path(
+    paths: &Installation,
+    origin: &str,
+    runtime_ref: &str,
+) -> Result<Option<PathBuf>> {
+    for entry in fs::read_dir(runtimes_dir(paths)).context("read runtime state directory")? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            let record = read_runtime_path(&entry.path())?;
+            if record.origin == origin && record.runtime_ref == runtime_ref {
+                return Ok(Some(entry.path()));
+            }
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

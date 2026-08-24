@@ -13,6 +13,7 @@ pub(super) struct InstallOptions {
     pub(super) transaction: TransactionOptions,
     pub(super) or_update: bool,
     pub(super) app_id: String,
+    pub(super) remote: Option<String>,
 }
 
 pub(super) fn parse_install_args(args: Vec<String>) -> Result<InstallOptions> {
@@ -28,13 +29,16 @@ pub(super) fn parse_install_args(args: Vec<String>) -> Result<InstallOptions> {
             _ => operands.push(arg),
         }
     }
-    if operands.len() != 1 {
-        bail!("usage: flatpak install [OPTION] <app-id>");
+    if !(1..=2).contains(&operands.len()) {
+        bail!("usage: flatpak install [OPTION] [REMOTE] <app-id>");
     }
+    let app_id = operands.pop().unwrap();
+    let remote = operands.pop();
     Ok(InstallOptions {
         transaction,
         or_update,
-        app_id: operands.remove(0),
+        app_id,
+        remote,
     })
 }
 
@@ -45,7 +49,7 @@ pub(crate) fn cmd_install(paths: &Installation, args: Vec<String>) -> Result<()>
         println!("==> Resolving {}", options.app_id);
     }
     let resolution_started = Instant::now();
-    let remote = remotes::resolve_remote_app(paths, &options.app_id)?;
+    let remote = remotes::resolve_remote_app(paths, options.remote.as_deref(), &options.app_id)?;
     let resolution = resolution_started.elapsed();
     if let Ok(record) =
         state::get_app(paths, &options.app_id).or_else(|_| state::get_app(paths, &remote.app_id))
@@ -57,13 +61,15 @@ pub(crate) fn cmd_install(paths: &Installation, args: Vec<String>) -> Result<()>
         return update_resolved(paths, vec![(record, remote)], options.transaction);
     }
 
-    let runtime_record = state::get_runtime(paths, &remote.runtime_ref)?;
+    let runtime_record =
+        state::get_runtime_from(paths, &remote.runtime_origin, &remote.runtime_ref)?;
     let runtime_dir = runtime_record
         .as_ref()
         .map(|record| state::absolute(paths, &record.runtime_dir))
         .unwrap_or_else(|| {
             paths
                 .runtimes()
+                .join(&remote.runtime_origin)
                 .join(runtime::runtime_checkout_dir(&remote.runtime_ref))
         });
     let runtime_changed = runtime_record

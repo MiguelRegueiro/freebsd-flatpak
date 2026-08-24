@@ -104,7 +104,7 @@ fn remote_history_fetches_tip_into_an_empty_repo_and_tolerates_pruned_tail() {
         .remote_change(
             None::<&gio::File>,
             RepoRemoteChange::Replace,
-            REMOTE_NAME,
+            "test",
             Some(&format!("file://{}", source_path.display())),
             Some(&remote_options.end()),
             gio::Cancellable::NONE,
@@ -112,7 +112,7 @@ fn remote_history_fetches_tip_into_an_empty_repo_and_tolerates_pruned_tail() {
         .unwrap();
 
     let history = storage
-        .commit_history_with_verification(&summary, ref_name, &tip, false)
+        .commit_history_with_verification("test", &summary, ref_name, &tip, false)
         .unwrap();
 
     assert_eq!(history.len(), 1);

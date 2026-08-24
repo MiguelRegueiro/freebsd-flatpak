@@ -30,6 +30,8 @@ pub(super) fn create_checkout(root: &Path, rel: &Path) {
 
 pub(super) fn app_record(app_id: &str, app_ref: &str, app_commit: &str) -> state::AppRecord {
     state::AppRecord {
+        origin: "flathub".to_string(),
+        runtime_origin: "flathub".to_string(),
         app_id: app_id.to_string(),
         app_ref: app_ref.to_string(),
         app_commit: app_commit.to_string(),
@@ -45,6 +47,8 @@ pub(super) fn app_record(app_id: &str, app_ref: &str, app_commit: &str) -> state
 
 pub(super) fn remote_app(app_id: &str, app_ref: &str, app_commit: &str) -> remotes::RemoteApp {
     remotes::RemoteApp {
+        origin: "flathub".to_string(),
+        runtime_origin: "flathub".to_string(),
         app_id: app_id.to_string(),
         app_ref: app_ref.to_string(),
         app_commit: app_commit.to_string(),

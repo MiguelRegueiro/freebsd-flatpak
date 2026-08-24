@@ -18,18 +18,76 @@ pub(crate) fn cmd_update(paths: &Installation, args: Vec<String>) -> Result<()> 
         println!("No installed apps");
         return Ok(());
     }
-    let metadata = remotes::load_remote_metadata(paths)?;
-    let targets = update_targets(installed, options.app_ids, &metadata)?;
+    let targets = if options.app_ids.is_empty() {
+        installed
+            .into_iter()
+            .map(|record| UpdateTarget {
+                record,
+                remote: None,
+            })
+            .collect()
+    } else {
+        let mut targets = Vec::new();
+        let mut seen = BTreeSet::new();
+        for requested in &options.app_ids {
+            if let Some(record) = installed.iter().find(|record| record.app_id == *requested) {
+                if seen.insert(record.app_id.clone()) {
+                    targets.push(UpdateTarget {
+                        record: record.clone(),
+                        remote: None,
+                    });
+                }
+                continue;
+            }
+            let mut matched = None;
+            for origin in installed
+                .iter()
+                .map(|record| record.origin.as_str())
+                .collect::<BTreeSet<_>>()
+            {
+                if let Ok(remote) = remotes::resolve_remote_app(paths, Some(origin), requested) {
+                    if let Some(record) = installed
+                        .iter()
+                        .find(|record| record.origin == origin && record.app_id == remote.app_id)
+                    {
+                        matched = Some(UpdateTarget {
+                            record: record.clone(),
+                            remote: Some(remote),
+                        });
+                        break;
+                    }
+                }
+            }
+            let target = matched.with_context(|| format!("{requested} is not installed"))?;
+            if seen.insert(target.record.app_id.clone()) {
+                targets.push(target);
+            }
+        }
+        targets
+    };
     let mut resolved = Vec::new();
     for target in targets {
+        let metadata =
+            remotes::load_remote_metadata(paths, &target.record.origin).with_context(|| {
+                format!(
+                    "load origin {} for {}",
+                    target.record.origin, target.record.app_id
+                )
+            })?;
         let remote = if let Some(commit) = options.commit.as_deref() {
             metadata.resolve_app_commit(paths, &target.record.app_ref, commit)?
         } else {
             match target.remote {
                 Some(remote) => remote,
                 None => metadata
-                    .resolve_exact_ref(&target.record.app_ref)
-                    .or_else(|_| metadata.resolve_app(&target.record.app_id, true))?,
+                    .resolve_exact_ref_with_runtime(paths, &target.record.app_ref)
+                    .or_else(|_| {
+                        remotes::resolve_remote_app(
+                            paths,
+                            Some(&target.record.origin),
+                            &target.record.app_id,
+                        )
+                    })?,
             }
         };
         resolved.push((target.record, remote));
@@ -78,9 +136,20 @@ pub(super) fn update_resolved(
                 ref_name: plan.remote.app_ref.clone(),
             });
         }
-        if plan.status.runtime_changed && runtime_entries.insert(plan.remote.runtime_ref.clone()) {
+        if plan.status.runtime_changed
+            && runtime_entries.insert(format!(
+                "{}:{}",
+                plan.remote.runtime_origin, plan.remote.runtime_ref
+            ))
+        {
             entries.push(TransactionEntry {
-                operation: if state::get_runtime(paths, &plan.remote.runtime_ref)?.is_some() {
+                operation: if state::get_runtime_from(
+                    paths,
+                    &plan.remote.runtime_origin,
+                    &plan.remote.runtime_ref,
+                )?
+                .is_some()
+                {
                     TransactionOperation::Update
                 } else {
                     TransactionOperation::Install
@@ -99,8 +168,8 @@ pub(super) fn update_resolved(
         let record = plan.record;
         let remote = plan.remote;
         let status = plan.status;
-        let force_runtime =
-            status.runtime_checkout_stale && touched_runtimes.insert(remote.runtime_ref.clone());
+        let force_runtime = status.runtime_checkout_stale
+            && touched_runtimes.insert(format!("{}:{}", remote.runtime_origin, remote.runtime_ref));
         let installed =
             runtime::update_app(paths, &remote, status.app_checkout_stale, force_runtime)?;
         let installed_record = state::record_install(paths, &installed)?;
@@ -200,6 +269,7 @@ pub(super) struct UpdateStatus {
     pub(super) current_runtime_commit: Option<String>,
 }
 
+#[cfg(test)]
 pub(super) fn update_targets(
     installed: Vec<state::AppRecord>,
     args: Vec<String>,
@@ -258,25 +328,35 @@ pub(super) fn update_status(
 ) -> Result<UpdateStatus> {
     let app_dir = state::absolute(paths, &record.app_dir);
     let app_checkout_present = checkout_present(&app_dir);
-    let app_state_changed = record.app_id != remote.app_id
+    let app_state_changed = record.origin != remote.origin
+        || record.app_id != remote.app_id
         || record.app_ref != remote.app_ref
         || record.app_commit != remote.app_commit
         || record.arch != remote.arch
         || record.branch != remote.branch
         || record.command != remote.command;
     let app_checkout_stale = !app_checkout_present
+        || record.origin != remote.origin
         || record.app_id != remote.app_id
         || record.app_ref != remote.app_ref
         || record.app_commit != remote.app_commit;
 
-    let runtime_record = state::get_runtime(paths, &remote.runtime_ref)?;
+    let runtime_record =
+        state::get_runtime_from(paths, &remote.runtime_origin, &remote.runtime_ref)?;
     let runtime_dir = runtime_record
         .as_ref()
         .map(|runtime| state::absolute(paths, &runtime.runtime_dir))
         .unwrap_or_else(|| {
-            paths
-                .runtimes()
-                .join(runtime::runtime_checkout_dir(&remote.runtime_ref))
+            if record.runtime_origin == remote.runtime_origin
+                && record.runtime_ref == remote.runtime_ref
+            {
+                state::absolute(paths, &record.runtime_dir)
+            } else {
+                paths
+                    .runtimes()
+                    .join(&remote.runtime_origin)
+                    .join(runtime::runtime_checkout_dir(&remote.runtime_ref))
+            }
         });
     let available_runtime_commit = runtime_record
         .map(|runtime| runtime.runtime_commit)
@@ -289,8 +369,9 @@ pub(super) fn update_status(
         });
     let runtime_checkout_stale = !checkout_present(&runtime_dir)
         || available_runtime_commit.as_deref() != Some(remote.runtime_commit.as_str());
-    let runtime_state_changed =
-        record.runtime_ref != remote.runtime_ref || record.runtime_commit != remote.runtime_commit;
+    let runtime_state_changed = record.runtime_origin != remote.runtime_origin
+        || record.runtime_ref != remote.runtime_ref
+        || record.runtime_commit != remote.runtime_commit;
 
     Ok(UpdateStatus {
         app_changed: app_state_changed || app_checkout_stale,

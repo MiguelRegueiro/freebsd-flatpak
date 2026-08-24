@@ -24,6 +24,8 @@ fn checkout(path: &Path, ref_name: &str, commit: &str) {
 
 fn app(paths: &Installation, app_commit: &str, runtime_commit: &str) -> AppRecord {
     AppRecord {
+        origin: "flathub".to_string(),
+        runtime_origin: "flathub".to_string(),
         app_id: "org.example.App".to_string(),
         app_ref: "app/org.example.App/x86_64/stable".to_string(),
         app_commit: app_commit.to_string(),
@@ -77,6 +79,7 @@ fn multiple_pinned_generations_retire_after_their_last_run() {
     write_runtime(
         &paths,
         &RuntimeRecord {
+            origin: "flathub".to_string(),
             runtime_ref: current.runtime_ref.clone(),
             runtime_commit: current.runtime_commit.clone(),
             runtime_dir: current.runtime_dir.clone(),

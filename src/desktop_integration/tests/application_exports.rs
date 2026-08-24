@@ -22,6 +22,8 @@ fn publishes_desktop_files_into_normal_xdg_data_home() {
     )
     .unwrap();
     let app = AppRecord {
+        origin: "flathub".to_string(),
+        runtime_origin: "flathub".to_string(),
         app_id: "org.example.App".into(),
         app_ref: "app/org.example.App/x86_64/stable".into(),
         app_commit: "a".repeat(64),

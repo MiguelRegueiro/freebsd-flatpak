@@ -1,4 +1,4 @@
-use super::ostree_repository::{Storage, REMOTE_NAME};
+use super::ostree_repository::Storage;
 use super::CommitInfo;
 use anyhow::{bail, Context, Result};
 use glib::prelude::*;
@@ -8,15 +8,18 @@ use ostree::{gio, ObjectType, RepoPullFlags};
 impl Storage {
     pub fn commit_history(
         &self,
+        remote: &str,
         summary: &[u8],
         ref_name: &str,
         tip: &str,
+        gpg_verify: bool,
     ) -> Result<Vec<CommitInfo>> {
-        self.commit_history_with_verification(summary, ref_name, tip, true)
+        self.commit_history_with_verification(remote, summary, ref_name, tip, gpg_verify)
     }
 
     pub(super) fn commit_history_with_verification(
         &self,
+        remote: &str,
         summary: &[u8],
         ref_name: &str,
         tip: &str,
@@ -38,7 +41,7 @@ impl Storage {
         options.insert("append-user-agent", "freebsd-flatpak/0.1");
 
         self.repo
-            .pull_with_options(REMOTE_NAME, &options.end(), None, gio::Cancellable::NONE)
+            .pull_with_options(remote, &options.end(), None, gio::Cancellable::NONE)
             .with_context(|| format!("pull OSTree history for {ref_name}"))?;
 
         let mut history = Vec::new();

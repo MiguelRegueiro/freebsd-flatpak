@@ -1,5 +1,7 @@
 use crate::installation::installation_paths::Installation;
 use anyhow::{Context, Result};
+use glib::prelude::Cast;
+use glib::translate::{from_glib_full, ToGlibPtr};
 use glib::{Bytes, VariantDict};
 use ostree::gio;
 use ostree::{ObjectType, Repo, RepoListObjectsFlags, RepoMode, RepoPruneFlags, RepoRemoteChange};
@@ -7,11 +9,7 @@ use std::fs::{self, File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 
-pub(super) const REMOTE_NAME: &str = "flathub";
-const REMOTE_URL: &str = "https://dl.flathub.org/repo";
 pub(super) const TRANSACTION_FILE: &str = ".storage-transaction";
-const FLATHUB_GPG_KEY_BASE64: &str = include_str!("../../vendor/flathub.gpg.base64");
-const FLATHUB_GPG_FINGERPRINT: &str = "6E5C05D979C76DAF93C081354184DD4D907A7CAE";
 
 /// The only component that owns OSTree repository mechanics.  Ref selection,
 /// deployment layout and user-facing policy remain in Rust.
@@ -67,34 +65,6 @@ impl Storage {
                 .with_context(|| format!("create OSTree repository {}", repo_path.display()))?;
         }
 
-        let remote_options = VariantDict::new(None);
-        remote_options.insert("gpg-verify", true);
-        remote_options.insert("gpg-verify-summary", true);
-        remote_options.insert("http2", true);
-        repo.remote_change(
-            None::<&gio::File>,
-            RepoRemoteChange::Replace,
-            REMOTE_NAME,
-            Some(REMOTE_URL),
-            Some(&remote_options.end()),
-            gio::Cancellable::NONE,
-        )
-        .context("configure private Flathub remote")?;
-
-        if !repo_path.join("flathub.trustedkeys.gpg").is_file() {
-            let key = base64::decode(FLATHUB_GPG_KEY_BASE64.trim())
-                .context("decode embedded Flathub signing key")?;
-            let key_bytes = Bytes::from_owned(key);
-            let key_stream = gio::MemoryInputStream::from_bytes(&key_bytes);
-            repo.remote_gpg_import(
-                REMOTE_NAME,
-                Some(&key_stream),
-                &[FLATHUB_GPG_FINGERPRINT],
-                gio::Cancellable::NONE,
-            )
-            .context("import pinned Flathub signing key")?;
-        }
-
         let storage = Self {
             repo,
             transaction_path: paths.data_root().join(TRANSACTION_FILE),
@@ -104,14 +74,53 @@ impl Storage {
         Ok(storage)
     }
 
-    pub fn verify_summary(&self, summary: &[u8], signatures: &[u8]) -> Result<()> {
+    pub fn configure_remote(&self, remote: &crate::remotes::Remote) -> Result<()> {
+        let options = VariantDict::new(None);
+        options.insert("gpg-verify", remote.gpg_verify);
+        options.insert("gpg-verify-summary", remote.gpg_verify);
+        options.insert("http2", true);
+        self.repo
+            .remote_change(
+                None::<&gio::File>,
+                RepoRemoteChange::Replace,
+                &remote.name,
+                Some(&remote.url),
+                Some(&options.end()),
+                gio::Cancellable::NONE,
+            )
+            .with_context(|| format!("configure private OSTree remote {}", remote.name))?;
+        if let Some(encoded) = &remote.gpg_key {
+            let key = base64::decode(encoded.trim())
+                .with_context(|| format!("decode GPG key for remote {}", remote.name))?;
+            let key_bytes = Bytes::from_owned(key);
+            let key_stream = gio::MemoryInputStream::from_bytes(&key_bytes);
+            remote_gpg_import_all(&self.repo, &remote.name, &key_stream)
+                .with_context(|| format!("import GPG key for remote {}", remote.name))?;
+        }
+        Ok(())
+    }
+
+    pub fn delete_remote(&self, name: &str) -> Result<()> {
+        self.repo
+            .remote_change(
+                None::<&gio::File>,
+                RepoRemoteChange::Delete,
+                name,
+                None,
+                None,
+                gio::Cancellable::NONE,
+            )
+            .with_context(|| format!("delete private OSTree remote {name}"))
+    }
+
+    pub fn verify_summary(&self, remote: &str, summary: &[u8], signatures: &[u8]) -> Result<()> {
         let summary = Bytes::from(summary);
         let signatures = Bytes::from(signatures);
         self.repo
-            .verify_summary(REMOTE_NAME, &summary, &signatures, gio::Cancellable::NONE)
-            .context("verify Flathub summary signature")?
+            .verify_summary(remote, &summary, &signatures, gio::Cancellable::NONE)
+            .with_context(|| format!("verify {remote} summary signature"))?
             .require_valid_signature()
-            .context("Flathub summary has no valid signature")
+            .with_context(|| format!("{remote} summary has no valid signature"))
     }
 
     pub fn fsck_commits(&self, commits: &[&str]) -> Result<()> {
@@ -141,10 +150,17 @@ impl Storage {
     }
 
     pub fn remove_refs(&self, refs: &[&str]) -> Result<()> {
-        for ref_name in refs {
-            self.repo
-                .set_ref_immediate(Some(REMOTE_NAME), ref_name, None, gio::Cancellable::NONE)
-                .with_context(|| format!("remove OSTree ref {ref_name}"))?;
+        for remote in self.repo.remote_list() {
+            for ref_name in refs {
+                self.repo
+                    .set_ref_immediate(
+                        Some(remote.as_str()),
+                        ref_name,
+                        None,
+                        gio::Cancellable::NONE,
+                    )
+                    .with_context(|| format!("remove OSTree ref {remote}:{ref_name}"))?;
+            }
         }
         Ok(())
     }
@@ -156,5 +172,26 @@ impl Storage {
         self.repo
             .prune(RepoPruneFlags::REFS_ONLY, 0, gio::Cancellable::NONE)
             .context("prune unreachable OSTree objects")
+    }
+}
+
+fn remote_gpg_import_all(repo: &Repo, name: &str, stream: &gio::MemoryInputStream) -> Result<u32> {
+    unsafe {
+        let input: &gio::InputStream = stream.upcast_ref();
+        let mut imported = 0;
+        let mut error = std::ptr::null_mut();
+        let ok = ostree::ffi::ostree_repo_remote_gpg_import(
+            repo.to_glib_none().0,
+            name.to_glib_none().0,
+            input.to_glib_none().0,
+            std::ptr::null(),
+            &mut imported,
+            std::ptr::null_mut(),
+            &mut error,
+        );
+        if ok == glib::ffi::GFALSE {
+            return Err(from_glib_full::<_, glib::Error>(error).into());
+        }
+        Ok(imported)
     }
 }

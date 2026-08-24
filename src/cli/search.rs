@@ -12,13 +12,13 @@ pub(crate) fn cmd_search(paths: &Installation, args: Vec<String>) -> Result<()> 
         return Ok(());
     }
     println!(
-        "{:<42} {:<8} {:<12} Ref",
-        "Application ID", "Arch", "Branch"
+        "{:<20} {:<42} {:<8} {:<12} Ref",
+        "Remote", "Application ID", "Arch", "Branch"
     );
     for result in results.into_iter().take(50) {
         println!(
-            "{:<42} {:<8} {:<12} {}",
-            result.app_id, result.arch, result.branch, result.app_ref
+            "{:<20} {:<42} {:<8} {:<12} {}",
+            result.remote, result.app_id, result.arch, result.branch, result.app_ref
         );
     }
     Ok(())

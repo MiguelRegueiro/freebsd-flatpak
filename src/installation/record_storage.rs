@@ -39,7 +39,7 @@ pub(super) fn required(values: &BTreeMap<String, String>, key: &str) -> Result<S
         .with_context(|| format!("state record missing {key}"))
 }
 
-pub(super) fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

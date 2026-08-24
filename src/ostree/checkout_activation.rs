@@ -1,5 +1,5 @@
-use super::ostree_repository::{Storage, REMOTE_NAME};
-use super::{Deployment, StorageTimings};
+use super::ostree_repository::Storage;
+use super::{Deployment, RemoteSource, StorageTimings};
 use anyhow::{bail, Context, Result};
 use glib::prelude::*;
 use glib::VariantDict;
@@ -23,6 +23,24 @@ struct Activation {
 
 impl Storage {
     pub fn deploy(&self, summary: &[u8], deployments: &[Deployment<'_>]) -> Result<StorageTimings> {
+        let remote = deployments
+            .first()
+            .map(|deployment| deployment.remote)
+            .context("deployment list is empty")?;
+        self.deploy_from_sources(
+            &[RemoteSource {
+                name: remote,
+                summary,
+            }],
+            deployments,
+        )
+    }
+
+    pub fn deploy_from_sources(
+        &self,
+        sources: &[RemoteSource<'_>],
+        deployments: &[Deployment<'_>],
+    ) -> Result<StorageTimings> {
         let pending = deployments
             .iter()
             .filter(|deployment| {
@@ -40,13 +58,24 @@ impl Storage {
         }
 
         println!("  Pulling {} ref(s) with libostree", pending.len());
-        let pull = self.pull_exact(
-            summary,
-            &pending
+        let mut pull = Duration::ZERO;
+        for source in sources {
+            let refs = pending
                 .iter()
+                .filter(|deployment| deployment.remote == source.name)
                 .map(|deployment| (deployment.ref_name, deployment.checksum))
-                .collect::<Vec<_>>(),
-        )?;
+                .collect::<Vec<_>>();
+            if !refs.is_empty() {
+                pull += self.pull_exact(source.name, source.summary, &refs)?;
+            }
+        }
+        if pending.iter().any(|deployment| {
+            !sources
+                .iter()
+                .any(|source| source.name == deployment.remote)
+        }) {
+            bail!("deployment transaction is missing remote summary data");
+        }
 
         let checkout_started = Instant::now();
         let mut activations = Vec::with_capacity(pending.len());
@@ -63,27 +92,7 @@ impl Storage {
         })
     }
 
-    pub fn checkout(
-        &self,
-        summary: &[u8],
-        ref_name: &str,
-        checksum: &str,
-        destination: &Path,
-    ) -> Result<()> {
-        self.deploy(
-            summary,
-            &[Deployment {
-                kind: "ref",
-                ref_name,
-                checksum,
-                destination,
-                force: true,
-            }],
-        )
-        .map(|_| ())
-    }
-
-    fn pull_exact(&self, summary: &[u8], refs: &[(&str, &str)]) -> Result<Duration> {
+    fn pull_exact(&self, remote: &str, summary: &[u8], refs: &[(&str, &str)]) -> Result<Duration> {
         let names = refs.iter().map(|(name, _)| *name).collect::<Vec<_>>();
         let commits = refs
             .iter()
@@ -92,7 +101,8 @@ impl Storage {
         let options = VariantDict::new(None);
         options.insert_value("refs", &names.to_variant());
         options.insert_value("override-commit-ids", &commits.to_variant());
-        options.insert("gpg-verify", true);
+        // GPG verification policy comes from the named OSTree remote.  The
+        // authenticated indexed-summary bytes are supplied below when used.
         // The indexed summary signature was checked before selecting the
         // architecture subsummary.  Its authenticated SHA-256 covers these
         // exact bytes, so asking libostree to verify a non-existent per-arch
@@ -109,7 +119,7 @@ impl Storage {
         let progress = pull_progress();
         let started = Instant::now();
         let result = self.repo.pull_with_options(
-            REMOTE_NAME,
+            remote,
             &options.end(),
             Some(&progress),
             gio::Cancellable::NONE,
@@ -118,7 +128,7 @@ impl Storage {
         if std::io::stdout().is_terminal() {
             print!("\r\x1b[2K");
         }
-        result.context("pull verified Flathub refs with libostree")?;
+        result.with_context(|| format!("pull verified refs from {remote} with libostree"))?;
         let elapsed = started.elapsed();
         println!("    Pull completed in {:.1}s", elapsed.as_secs_f64());
 

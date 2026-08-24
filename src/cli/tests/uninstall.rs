@@ -66,6 +66,8 @@ fn uninstall_unused_preserves_installed_and_pinned_dependencies() {
     state::record_install(
         &paths,
         &runtime::InstalledApp {
+            origin: "flathub".to_string(),
+            runtime_origin: "flathub".to_string(),
             app_id: "org.example.App".to_string(),
             app_ref: "app/org.example.App/x86_64/stable".to_string(),
             app_commit: "app-current".to_string(),
@@ -98,6 +100,8 @@ fn uninstall_unused_preserves_installed_and_pinned_dependencies() {
         "[Runtime]\nname=org.example.Platform\n",
     );
     let pinned = state::AppRecord {
+        origin: "flathub".to_string(),
+        runtime_origin: "flathub".to_string(),
         app_id: "org.example.Old".to_string(),
         app_ref: "app/org.example.Old/x86_64/stable".to_string(),
         app_commit: "app-old".to_string(),
@@ -112,6 +116,7 @@ fn uninstall_unused_preserves_installed_and_pinned_dependencies() {
     state::write_runtime(
         &paths,
         &state::RuntimeRecord {
+            origin: "flathub".to_string(),
             runtime_ref: runtime_two.to_string(),
             runtime_commit: "runtime-two".to_string(),
             runtime_dir: pinned.runtime_dir.clone(),
@@ -142,6 +147,7 @@ fn uninstall_unused_preserves_installed_and_pinned_dependencies() {
     state::write_runtime(
         &paths,
         &state::RuntimeRecord {
+            origin: "flathub".to_string(),
             runtime_ref: runtime_three.to_string(),
             runtime_commit: "runtime-three".to_string(),
             runtime_dir: paths.relative_data_path(&runtime_three_dir).unwrap(),
@@ -217,6 +223,8 @@ fn normal_app_uninstall_leaves_runtime_for_unused_cleanup() {
     state::record_install(
         &paths,
         &runtime::InstalledApp {
+            origin: "flathub".to_string(),
+            runtime_origin: "flathub".to_string(),
             app_id: app_id.to_string(),
             app_ref: "app/org.gnome.Calculator/x86_64/stable".to_string(),
             app_commit: "calculator-commit".to_string(),

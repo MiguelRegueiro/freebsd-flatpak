@@ -1,4 +1,6 @@
-use std::process::Command;
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
+use std::process::{Command, Stdio};
 
 const EXPECTED_HELP: &str = r#"Usage:
   flatpak [OPTION] COMMAND
@@ -6,10 +8,15 @@ const EXPECTED_HELP: &str = r#"Usage:
 Commands:
   install       Install an application
   update        Update installed applications
+  remotes       List configured remotes
+  remote-add    Add a remote
+  remote-delete Delete a remote
+  remote-modify Modify a remote
+  remote-ls     List refs in remotes
   remote-info   Show information about an application in a remote
   uninstall     Uninstall an application
   list          List installed applications
-  search        Search Flathub
+  search        Search configured remotes
   run           Run an application
   ps            List running applications
   permissions   Show application permissions
@@ -32,7 +39,7 @@ Options:
 "#;
 
 const EXPECTED_INSTALL_HELP: &str = r#"Usage:
-  flatpak install [OPTION] APP-ID
+  flatpak install [OPTION] [REMOTE] APP-ID
 
 Options:
   --or-update          Update install if already installed
@@ -118,4 +125,64 @@ fn compatibility_aliases_work_but_stay_hidden_from_top_level_help() {
     }
     assert!(!EXPECTED_HELP.contains("upgrade"));
     assert!(!EXPECTED_HELP.contains("remove"));
+}
+
+#[test]
+fn remote_command_help_is_recognized_before_initialization_and_operand_parsing() {
+    for (command, usage) in [
+        ("remotes", "Usage:\n  flatpak remotes\n"),
+        (
+            "remote-add",
+            "Usage:\n  flatpak remote-add [OPTION] NAME LOCATION\n",
+        ),
+        (
+            "remote-modify",
+            "Usage:\n  flatpak remote-modify [OPTION] NAME\n",
+        ),
+        (
+            "remote-delete",
+            "Usage:\n  flatpak remote-delete [OPTION] NAME\n",
+        ),
+        ("remote-ls", "Usage:\n  flatpak remote-ls [REMOTE]\n"),
+        (
+            "remote-info",
+            "Usage:\n  flatpak remote-info [OPTION] REMOTE REF\n",
+        ),
+    ] {
+        for flag in ["-h", "--help"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_flatpak"))
+                .args([command, flag])
+                .env_remove("HOME")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{command} {flag} failed: {output:?}"
+            );
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(
+                stdout.starts_with(usage),
+                "unexpected {command} help: {stdout}"
+            );
+            assert!(stdout.contains("-h, --help"));
+            assert!(output.stderr.is_empty(), "{command} {flag} wrote to stderr");
+        }
+    }
+}
+
+#[test]
+fn closed_stdout_is_a_successful_quiet_exit() {
+    let (reader, writer) = UnixStream::pair().unwrap();
+    drop(reader);
+    let writer: OwnedFd = writer.into();
+    let output = Command::new(env!("CARGO_BIN_EXE_flatpak"))
+        .args(["remote-add", "--help"])
+        .env_remove("HOME")
+        .stdout(Stdio::from(writer))
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "broken stdout failed: {output:?}");
+    assert!(output.stderr.is_empty(), "broken stdout was noisy");
 }

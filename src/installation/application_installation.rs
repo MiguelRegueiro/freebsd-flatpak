@@ -1,6 +1,6 @@
 use super::installation_paths::Installation;
 use crate::extensions::{ensure_default_gl_extension_timed, runtime_checkout_dir};
-use crate::ostree::{Deployment, Storage};
+use crate::ostree::{Deployment, RemoteSource, Storage};
 use crate::remotes::{load_arch_summary, RemoteApp};
 use anyhow::{Context, Result};
 use std::fs;
@@ -9,6 +9,8 @@ use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct InstalledApp {
+    pub origin: String,
+    pub runtime_origin: String,
     pub app_id: String,
     pub app_ref: String,
     pub app_commit: String,
@@ -46,37 +48,88 @@ fn checkout_remote_app(
 ) -> Result<InstalledApp> {
     let app_dir =
         generation_checkout_dir(&paths.app(&remote.app_id), &remote.app_commit, force_app);
-    let runtime_dir = generation_checkout_dir(
-        &paths
-            .runtimes()
-            .join(runtime_checkout_dir(&remote.runtime_ref)),
-        &remote.runtime_commit,
-        force_runtime,
-    );
-    let (_, summary_path, _) = load_arch_summary(paths)?;
+    let existing_runtime =
+        super::get_runtime_from(paths, &remote.runtime_origin, &remote.runtime_ref)?;
+    let runtime_dir = if !force_runtime
+        && existing_runtime
+            .as_ref()
+            .is_some_and(|record| record.runtime_commit == remote.runtime_commit)
+    {
+        paths.absolute_data_path(&existing_runtime.unwrap().runtime_dir)
+    } else {
+        generation_checkout_dir(
+            &paths
+                .runtimes()
+                .join(&remote.runtime_origin)
+                .join(runtime_checkout_dir(&remote.runtime_ref)),
+            &remote.runtime_commit,
+            force_runtime,
+        )
+    };
+    let configured = crate::remotes::get_remote(paths, &remote.origin)?;
+    let (_, summary_path, _) = load_arch_summary(paths, &configured)?;
     let summary =
         fs::read(&summary_path).with_context(|| format!("read {}", summary_path.display()))?;
     let runtime_full_ref = format!("runtime/{}", remote.runtime_ref);
     let storage = Storage::open(paths)?;
-    let mut timings = storage.deploy(
-        &summary,
-        &[
-            Deployment {
-                kind: "application",
-                ref_name: &remote.app_ref,
-                checksum: &remote.app_commit,
-                destination: &app_dir,
-                force: force_app,
-            },
-            Deployment {
-                kind: "runtime",
-                ref_name: &runtime_full_ref,
-                checksum: &remote.runtime_commit,
-                destination: &runtime_dir,
-                force: force_runtime,
-            },
-        ],
-    )?;
+    let mut timings = if remote.origin == remote.runtime_origin {
+        storage.deploy(
+            &summary,
+            &[
+                Deployment {
+                    remote: &remote.origin,
+                    kind: "application",
+                    ref_name: &remote.app_ref,
+                    checksum: &remote.app_commit,
+                    destination: &app_dir,
+                    force: force_app,
+                },
+                Deployment {
+                    remote: &remote.runtime_origin,
+                    kind: "runtime",
+                    ref_name: &runtime_full_ref,
+                    checksum: &remote.runtime_commit,
+                    destination: &runtime_dir,
+                    force: force_runtime,
+                },
+            ],
+        )?
+    } else {
+        let runtime_remote = crate::remotes::get_remote(paths, &remote.runtime_origin)?;
+        let (_, runtime_summary_path, _) = load_arch_summary(paths, &runtime_remote)?;
+        let runtime_summary = fs::read(&runtime_summary_path)
+            .with_context(|| format!("read {}", runtime_summary_path.display()))?;
+        storage.deploy_from_sources(
+            &[
+                RemoteSource {
+                    name: &remote.origin,
+                    summary: &summary,
+                },
+                RemoteSource {
+                    name: &remote.runtime_origin,
+                    summary: &runtime_summary,
+                },
+            ],
+            &[
+                Deployment {
+                    remote: &remote.origin,
+                    kind: "application",
+                    ref_name: &remote.app_ref,
+                    checksum: &remote.app_commit,
+                    destination: &app_dir,
+                    force: force_app,
+                },
+                Deployment {
+                    remote: &remote.runtime_origin,
+                    kind: "runtime",
+                    ref_name: &runtime_full_ref,
+                    checksum: &remote.runtime_commit,
+                    destination: &runtime_dir,
+                    force: force_runtime,
+                },
+            ],
+        )?
+    };
     drop(storage);
     let (_, extension_timings) =
         ensure_default_gl_extension_timed(paths, &remote.runtime_ref, &runtime_dir)?;
@@ -84,6 +137,8 @@ fn checkout_remote_app(
     timings.checkout += extension_timings.checkout;
 
     Ok(InstalledApp {
+        origin: remote.origin.clone(),
+        runtime_origin: remote.runtime_origin.clone(),
         app_id: remote.app_id.clone(),
         app_ref: remote.app_ref.clone(),
         app_commit: remote.app_commit.clone(),

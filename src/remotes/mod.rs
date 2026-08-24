@@ -2,6 +2,9 @@ mod appstream_metadata;
 mod metadata_cache;
 mod ostree_summary;
 mod ref_resolution;
+mod remote_config;
+
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::path::PathBuf;
 
@@ -10,11 +13,25 @@ pub(crate) use ostree_summary::ref_checksum;
 pub use ref_resolution::{
     checkout_ref, inspect_refs, load_remote_metadata, resolve_remote_app, search_apps,
 };
+pub(crate) use remote_config::{
+    add as add_remote, delete as delete_remote, from_location, initialize, modify as modify_remote,
+    read_gpg_key, Remote, DEFAULT_REMOTE,
+};
+pub use remote_config::{enabled as enabled_remotes, get as get_remote, list as list_remotes};
 
 #[derive(Debug, Clone)]
 pub struct SearchResult {
+    pub remote: String,
     pub app_id: String,
     pub app_ref: String,
+    pub arch: String,
+    pub branch: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteRefInfo {
+    pub remote: String,
+    pub ref_name: String,
     pub arch: String,
     pub branch: String,
 }
@@ -29,6 +46,8 @@ pub struct AppstreamInfo {
 
 #[derive(Debug, Clone)]
 pub struct RemoteApp {
+    pub origin: String,
+    pub runtime_origin: String,
     pub app_id: String,
     pub app_ref: String,
     pub app_commit: String,
@@ -53,11 +72,18 @@ struct RemoteRef {
 
 #[derive(Debug, Clone)]
 pub struct RemoteMetadata {
+    remote: Remote,
     arch: String,
     refs: Vec<RemoteRef>,
     remote_dir: PathBuf,
     summary_path: PathBuf,
     collection_id: Option<String>,
+}
+
+static UNIQUE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn unique_sequence() -> u64 {
+    UNIQUE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
 }
 
 fn trace_resolution(label: &str, started: std::time::Instant) {
