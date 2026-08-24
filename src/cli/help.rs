@@ -3,6 +3,7 @@ const HELP: &str = r#"Usage:
 
 Commands:
   install       Install an application
+  info          Show information about an installed ref
   update        Update installed applications
   remotes       List configured remotes
   remote-add    Add a remote
@@ -11,7 +12,7 @@ Commands:
   remote-ls     List refs in remotes
   remote-info   Show information about an application in a remote
   uninstall     Uninstall an application
-  list          List installed applications
+  list          List installed applications and runtimes
   search        Search configured remotes
   run           Run an application
   ps            List running applications
@@ -51,6 +52,32 @@ Options:
   --commit=COMMIT      Update to this commit
   -y, --assumeyes      Automatically answer yes for all questions
   --noninteractive     Produce minimal output and don't ask questions
+  -h, --help           Show help
+"#;
+
+const LIST_HELP: &str = r#"Usage:
+  flatpak list [OPTION]
+
+Options:
+  --app                List installed applications
+  --runtime            List installed runtimes and extensions
+  -d, --show-details   Show all supported details (same as --columns=all)
+  --columns=FIELD,...  Specify the columns to show; may be repeated
+  -h, --help           Show help
+
+Columns:
+  application, arch, branch, runtime, ref, origin, installation,
+  active, size, all, help
+"#;
+
+const INFO_HELP: &str = r#"Usage:
+  flatpak info [OPTION] NAME [BRANCH]
+
+Show information about an installed application or runtime.
+
+Options:
+  -s, --show-size      Show installed size in bytes
+  -l, --show-location  Show deployment location
   -h, --help           Show help
 "#;
 
@@ -128,13 +155,14 @@ pub(super) fn print_usage() {
     eprintln!("usage:");
     eprintln!("  flatpak search <query>");
     eprintln!("  flatpak install [OPTION] [REMOTE] <app-id>");
+    eprintln!("  flatpak info [OPTION] NAME [BRANCH]");
     eprintln!("  flatpak remotes");
     eprintln!("  flatpak remote-add [OPTION] NAME LOCATION");
     eprintln!("  flatpak remote-delete [--force] NAME");
     eprintln!("  flatpak remote-modify [OPTION] NAME");
     eprintln!("  flatpak remote-ls [REMOTE]");
     eprintln!("  flatpak remote-info [--log | --commit=COMMIT] REMOTE <ref>");
-    eprintln!("  flatpak list");
+    eprintln!("  flatpak list [--app | --runtime] [--columns=FIELD,...]");
     eprintln!("  flatpak permissions <app-id>");
     eprintln!("  flatpak ps [--columns=FIELD,...]");
     eprintln!("  flatpak prune");
@@ -155,6 +183,16 @@ pub(super) fn print_uninstall_help() -> bool {
 
 pub(super) fn print_install_help() -> bool {
     print!("{INSTALL_HELP}");
+    true
+}
+
+pub(super) fn print_list_help() -> bool {
+    print!("{LIST_HELP}");
+    true
+}
+
+pub(super) fn print_info_help() -> bool {
+    print!("{INFO_HELP}");
     true
 }
 

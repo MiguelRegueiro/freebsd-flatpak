@@ -14,11 +14,13 @@ pub struct InstalledApp {
     pub app_id: String,
     pub app_ref: String,
     pub app_commit: String,
+    pub installed_size: u64,
     pub app_dir: PathBuf,
     pub arch: String,
     pub branch: String,
     pub runtime_ref: String,
     pub runtime_commit: String,
+    pub runtime_installed_size: u64,
     pub runtime_dir: PathBuf,
     pub command: String,
     pub timings: InstallTimings,
@@ -130,6 +132,8 @@ fn checkout_remote_app(
             ],
         )?
     };
+    let installed_size = storage.installed_size(&remote.app_commit)?;
+    let runtime_installed_size = storage.installed_size(&remote.runtime_commit)?;
     drop(storage);
     let (_, extension_timings) =
         ensure_default_gl_extension_timed(paths, &remote.runtime_ref, &runtime_dir)?;
@@ -142,11 +146,13 @@ fn checkout_remote_app(
         app_id: remote.app_id.clone(),
         app_ref: remote.app_ref.clone(),
         app_commit: remote.app_commit.clone(),
+        installed_size,
         app_dir,
         arch: remote.arch.clone(),
         branch: remote.branch.clone(),
         runtime_ref: remote.runtime_ref.clone(),
         runtime_commit: remote.runtime_commit.clone(),
+        runtime_installed_size,
         runtime_dir,
         command: remote.command.clone(),
         timings: InstallTimings {

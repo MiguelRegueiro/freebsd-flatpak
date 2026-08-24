@@ -5,6 +5,7 @@ pub(crate) mod startup_recovery;
 mod application_records;
 mod export_records;
 mod generation_cleanup;
+mod installed_sizes;
 mod record_storage;
 mod run_records;
 mod runtime_records;
@@ -21,6 +22,7 @@ pub(crate) use application_installation::*;
 pub(crate) use application_records::*;
 pub(crate) use export_records::*;
 pub(crate) use generation_cleanup::*;
+pub(crate) use installed_sizes::*;
 pub(crate) use record_storage::ensure_layout;
 pub(crate) use record_storage::write_atomic as write_state_atomic;
 pub(crate) use run_records::*;
@@ -35,6 +37,7 @@ pub(crate) struct AppRecord {
     pub app_id: String,
     pub app_ref: String,
     pub app_commit: String,
+    pub installed_size: u64,
     pub app_dir: PathBuf,
     pub arch: String,
     pub branch: String,
@@ -49,5 +52,15 @@ pub(crate) struct RuntimeRecord {
     pub origin: String,
     pub runtime_ref: String,
     pub runtime_commit: String,
+    pub installed_size: u64,
     pub runtime_dir: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExtensionRecord {
+    pub origin: String,
+    pub ref_name: String,
+    pub commit: String,
+    pub installed_size: u64,
+    pub checkout_dir: PathBuf,
 }

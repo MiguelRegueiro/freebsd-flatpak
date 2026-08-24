@@ -35,6 +35,7 @@ pub(super) fn app_record(app_id: &str, app_ref: &str, app_commit: &str) -> state
         app_id: app_id.to_string(),
         app_ref: app_ref.to_string(),
         app_commit: app_commit.to_string(),
+        installed_size: 0,
         app_dir: PathBuf::from("apps").join(app_id),
         arch: "x86_64".to_string(),
         branch: "stable".to_string(),
@@ -75,7 +76,7 @@ pub(super) fn create_marked_checkout(path: &Path, ref_name: &str, commit: &str, 
     fs::write(path.join("metadata"), metadata).unwrap();
     fs::write(
         path.join(".ostree-commit"),
-        format!("{ref_name}\n{commit}\n"),
+        format!("{ref_name}\n{commit}\n0\nflathub\n"),
     )
     .unwrap();
 }

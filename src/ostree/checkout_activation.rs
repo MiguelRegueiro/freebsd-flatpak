@@ -180,11 +180,14 @@ impl Storage {
             });
         }
         validate_checkout(&staging)?;
+        let installed_size = self.installed_size(deployment.checksum)?;
         let marker_path = staging.join(DEPLOYMENT_MARKER);
         let mut marker = File::create(&marker_path)
             .with_context(|| format!("create {}", marker_path.display()))?;
         writeln!(marker, "{}", deployment.ref_name)?;
         writeln!(marker, "{}", deployment.checksum)?;
+        writeln!(marker, "{installed_size}")?;
+        writeln!(marker, "{}", deployment.remote)?;
         marker.sync_all()?;
 
         Ok(Activation {

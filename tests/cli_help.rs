@@ -7,6 +7,7 @@ const EXPECTED_HELP: &str = r#"Usage:
 
 Commands:
   install       Install an application
+  info          Show information about an installed ref
   update        Update installed applications
   remotes       List configured remotes
   remote-add    Add a remote
@@ -15,7 +16,7 @@ Commands:
   remote-ls     List refs in remotes
   remote-info   Show information about an application in a remote
   uninstall     Uninstall an application
-  list          List installed applications
+  list          List installed applications and runtimes
   search        Search configured remotes
   run           Run an application
   ps            List running applications
@@ -166,6 +167,27 @@ fn remote_command_help_is_recognized_before_initialization_and_operand_parsing()
             );
             assert!(stdout.contains("-h, --help"));
             assert!(output.stderr.is_empty(), "{command} {flag} wrote to stderr");
+        }
+    }
+}
+
+#[test]
+fn installed_ref_command_help_is_recognized_before_initialization() {
+    for (command, options) in [
+        ("list", ["--columns", "--show-details"]),
+        ("info", ["--show-size", "--show-location"]),
+    ] {
+        for flag in ["-h", "--help"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_flatpak"))
+                .args([command, flag])
+                .env_remove("HOME")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{command} {flag}: {output:?}");
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(stdout.starts_with(&format!("Usage:\n  flatpak {command}")));
+            assert!(stdout.contains(options[0]));
+            assert!(stdout.contains(options[1]));
         }
     }
 }

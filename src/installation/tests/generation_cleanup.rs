@@ -17,7 +17,7 @@ fn checkout(path: &Path, ref_name: &str, commit: &str) {
     .unwrap();
     fs::write(
         path.join(".ostree-commit"),
-        format!("{ref_name}\n{commit}\n"),
+        format!("{ref_name}\n{commit}\n0\nflathub\n"),
     )
     .unwrap();
 }
@@ -29,6 +29,7 @@ fn app(paths: &Installation, app_commit: &str, runtime_commit: &str) -> AppRecor
         app_id: "org.example.App".to_string(),
         app_ref: "app/org.example.App/x86_64/stable".to_string(),
         app_commit: app_commit.to_string(),
+        installed_size: 0,
         app_dir: paths
             .relative_data_path(&paths.app("org.example.App").join(app_commit))
             .unwrap(),
@@ -82,6 +83,7 @@ fn multiple_pinned_generations_retire_after_their_last_run() {
             origin: "flathub".to_string(),
             runtime_ref: current.runtime_ref.clone(),
             runtime_commit: current.runtime_commit.clone(),
+            installed_size: 0,
             runtime_dir: current.runtime_dir.clone(),
         },
     )

@@ -17,6 +17,7 @@ pub fn record_install(paths: &Installation, installed: &InstalledApp) -> Result<
         app_id: installed.app_id.clone(),
         app_ref: installed.app_ref.clone(),
         app_commit: installed.app_commit.clone(),
+        installed_size: installed.installed_size,
         app_dir: paths.relative_data_path(&installed.app_dir)?,
         arch: installed.arch.clone(),
         branch: installed.branch.clone(),
@@ -34,6 +35,7 @@ pub fn record_install(paths: &Installation, installed: &InstalledApp) -> Result<
             origin: installed.runtime_origin.clone(),
             runtime_ref: app.runtime_ref.clone(),
             runtime_commit: app.runtime_commit.clone(),
+            installed_size: installed.runtime_installed_size,
             runtime_dir: app.runtime_dir.clone(),
         },
     )?;
@@ -73,12 +75,13 @@ pub fn remove_app_record(paths: &Installation, app_id: &str) -> Result<Option<Ap
 pub(crate) fn write_app(paths: &Installation, app: &AppRecord) -> Result<()> {
     let path = app_record_path(paths, &app.app_id)?;
     let data = format!(
-        "origin={}\nruntime_origin={}\napp_id={}\napp_ref={}\napp_commit={}\napp_dir={}\narch={}\nbranch={}\nruntime_ref={}\nruntime_commit={}\nruntime_dir={}\ncommand={}\n",
+        "origin={}\nruntime_origin={}\napp_id={}\napp_ref={}\napp_commit={}\ninstalled_size={}\napp_dir={}\narch={}\nbranch={}\nruntime_ref={}\nruntime_commit={}\nruntime_dir={}\ncommand={}\n",
         app.origin,
         app.runtime_origin,
         app.app_id,
         app.app_ref,
         app.app_commit,
+        app.installed_size,
         app.app_dir.display(),
         app.arch,
         app.branch,
@@ -111,6 +114,9 @@ pub(super) fn app_from_values(
         app_id: required(values, "app_id")?,
         app_ref: required(values, "app_ref")?,
         app_commit: required(values, "app_commit")?,
+        installed_size: required(values, "installed_size")?
+            .parse()
+            .context("invalid installed_size")?,
         app_dir: PathBuf::from(required(values, "app_dir")?),
         arch: required(values, "arch")?,
         branch: required(values, "branch")?,
@@ -137,7 +143,7 @@ mod tests {
         ));
         let paths = Installation::for_test(&root);
         ensure_layout(&paths).unwrap();
-        let record = "app_id=org.example.App\napp_ref=app/org.example.App/x86_64/stable\napp_commit=app\napp_dir=apps/app\narch=x86_64\nbranch=stable\nruntime_ref=org.example.Platform/x86_64/stable\nruntime_commit=runtime\nruntime_dir=runtimes/runtime\ncommand=example\n";
+        let record = "app_id=org.example.App\napp_ref=app/org.example.App/x86_64/stable\napp_commit=app\ninstalled_size=1234\napp_dir=apps/app\narch=x86_64\nbranch=stable\nruntime_ref=org.example.Platform/x86_64/stable\nruntime_commit=runtime\nruntime_dir=runtimes/runtime\ncommand=example\n";
         fs::write(app_record_path(&paths, "org.example.App").unwrap(), record).unwrap();
         let migrated = get_app(&paths, "org.example.App").unwrap();
         assert_eq!(migrated.origin, crate::remotes::DEFAULT_REMOTE);
@@ -158,6 +164,7 @@ mod tests {
             app_id: "org.example.App".to_string(),
             app_ref: "app/org.example.App/x86_64/stable".to_string(),
             app_commit: "app".to_string(),
+            installed_size: 1234,
             app_dir: PathBuf::from("apps/app"),
             arch: "x86_64".to_string(),
             branch: "stable".to_string(),

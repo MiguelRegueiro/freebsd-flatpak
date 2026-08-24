@@ -1,5 +1,5 @@
 use super::application_records::{list_apps, write_app};
-use super::generation_cleanup::deployment_marker;
+use super::generation_cleanup::deployment_data;
 use super::installation_paths::Installation;
 use super::record_storage::{
     ensure_layout, read_kv_file, required, runtimes_dir, safe_name_lossy, write_atomic,
@@ -76,16 +76,17 @@ fn runtime_deployment_from_path(
     paths: &Installation,
     path: &Path,
 ) -> Result<Option<RuntimeRecord>> {
-    let Some((ref_name, runtime_commit)) = deployment_marker(path)? else {
+    let Some(data) = deployment_data(path)? else {
         return Ok(None);
     };
-    let Some(runtime_ref) = ref_name.strip_prefix("runtime/") else {
+    let Some(runtime_ref) = data.ref_name.strip_prefix("runtime/") else {
         return Ok(None);
     };
     Ok(Some(RuntimeRecord {
-        origin: crate::remotes::DEFAULT_REMOTE.to_string(),
+        origin: data.origin,
         runtime_ref: runtime_ref.to_string(),
-        runtime_commit,
+        runtime_commit: data.commit,
+        installed_size: data.installed_size,
         runtime_dir: paths.relative_data_path(path)?,
     }))
 }
@@ -113,10 +114,11 @@ pub fn write_runtime(paths: &Installation, runtime: &RuntimeRecord) -> Result<()
     let path = existing_runtime_record_path(paths, &runtime.origin, &runtime.runtime_ref)?
         .unwrap_or_else(|| runtime_record_path(paths, &runtime.origin, &runtime.runtime_ref));
     let data = format!(
-        "origin={}\nruntime_ref={}\nruntime_commit={}\nruntime_dir={}\n",
+        "origin={}\nruntime_ref={}\nruntime_commit={}\ninstalled_size={}\nruntime_dir={}\n",
         runtime.origin,
         runtime.runtime_ref,
         runtime.runtime_commit,
+        runtime.installed_size,
         runtime.runtime_dir.display()
     );
     write_atomic(&path, data.as_bytes())
@@ -166,7 +168,7 @@ pub fn runtime_is_required(paths: &Installation, runtime_ref: &str) -> Result<bo
     Ok(false)
 }
 
-fn read_runtime_path(path: &Path) -> Result<RuntimeRecord> {
+pub(super) fn read_runtime_path(path: &Path) -> Result<RuntimeRecord> {
     let values = read_kv_file(path)?;
     Ok(RuntimeRecord {
         origin: values
@@ -175,6 +177,9 @@ fn read_runtime_path(path: &Path) -> Result<RuntimeRecord> {
             .unwrap_or_else(|| crate::remotes::DEFAULT_REMOTE.to_string()),
         runtime_ref: required(&values, "runtime_ref")?,
         runtime_commit: required(&values, "runtime_commit")?,
+        installed_size: required(&values, "installed_size")?
+            .parse()
+            .context("invalid installed_size")?,
         runtime_dir: PathBuf::from(required(&values, "runtime_dir")?),
     })
 }

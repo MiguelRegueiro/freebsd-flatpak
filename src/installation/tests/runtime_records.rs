@@ -13,6 +13,7 @@ fn app(paths: &Installation, app_commit: &str, runtime_commit: &str) -> AppRecor
         app_id: "org.example.App".to_string(),
         app_ref: "app/org.example.App/x86_64/stable".to_string(),
         app_commit: app_commit.to_string(),
+        installed_size: 0,
         app_dir: paths
             .relative_data_path(&paths.app("org.example.App").join(app_commit))
             .unwrap(),
@@ -59,6 +60,7 @@ fn shared_runtime_activation_updates_every_future_launch_record() {
             origin: "flathub".to_string(),
             runtime_ref: first.runtime_ref.clone(),
             runtime_commit: "runtime-2".to_string(),
+            installed_size: 0,
             runtime_dir: paths.relative_data_path(&new_runtime_dir).unwrap(),
         },
     )

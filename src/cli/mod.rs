@@ -1,7 +1,9 @@
 mod confirmation;
 mod help;
+mod info;
 mod install;
 mod list;
+mod list_table;
 mod permissions;
 mod prune;
 mod ps;
@@ -11,6 +13,7 @@ mod remote_info;
 mod repair;
 mod run;
 mod search;
+mod size_format;
 mod uninstall;
 mod update;
 
@@ -54,9 +57,17 @@ pub(crate) fn run() -> Result<()> {
         return Ok(());
     }
     let command_args = all_args.get(1..).unwrap_or_default();
-    if command_args == ["-h"] || command_args == ["--help"] {
+    if command_args == ["-h"]
+        || command_args == ["--help"]
+        || (matches!(command.as_deref(), Some("list" | "info"))
+            && command_args
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "-h" | "--help")))
+    {
         let handled = match command.as_deref() {
             Some("install") => help::print_install_help(),
+            Some("info") => help::print_info_help(),
+            Some("list") => help::print_list_help(),
             Some("update" | "upgrade") => help::print_update_help(),
             Some("uninstall" | "remove") => help::print_uninstall_help(),
             Some("remotes") => help::print_remotes_help(),
@@ -76,6 +87,7 @@ pub(crate) fn run() -> Result<()> {
     match command.as_deref() {
         Some("search") => search::cmd_search(&paths, args.collect()),
         Some("install") => install::cmd_install(&paths, args.collect()),
+        Some("info") => info::cmd_info(&paths, args.collect()),
         Some("list") => list::cmd_list(&paths, args.collect()),
         Some("permissions") => permissions::cmd_permissions(&paths, args.collect()),
         Some("ps") => ps::cmd_ps(&paths, args.collect()),

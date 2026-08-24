@@ -12,6 +12,7 @@ fn app_record(app_id: &str) -> AppRecord {
         app_id: app_id.into(),
         app_ref: format!("app/{app_id}/x86_64/stable"),
         app_commit: "a".repeat(64),
+        installed_size: 0,
         app_dir: PathBuf::from(format!("apps/{app_id}")),
         arch: "x86_64".into(),
         branch: "stable".into(),

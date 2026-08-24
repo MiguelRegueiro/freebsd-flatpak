@@ -13,7 +13,7 @@ fn write_app(paths: &Installation) {
     fs::create_dir_all(paths.refs().join("apps")).unwrap();
     fs::write(
         paths.refs().join("apps/app.zen_browser.zen.ini"),
-        "app_id=app.zen_browser.zen\napp_ref=app/app.zen_browser.zen/x86_64/stable\napp_commit=app-commit\napp_dir=apps/app.zen_browser.zen\narch=x86_64\nbranch=stable\nruntime_ref=org.freedesktop.Platform/x86_64/25.08\nruntime_commit=runtime-commit\nruntime_dir=runtimes/org.freedesktop.Platform-25.08\ncommand=zen\n",
+        "app_id=app.zen_browser.zen\napp_ref=app/app.zen_browser.zen/x86_64/stable\napp_commit=app-commit\ninstalled_size=1234\napp_dir=apps/app.zen_browser.zen\narch=x86_64\nbranch=stable\nruntime_ref=org.freedesktop.Platform/x86_64/25.08\nruntime_commit=runtime-commit\nruntime_dir=runtimes/org.freedesktop.Platform-25.08\ncommand=zen\n",
     )
     .unwrap();
 }
@@ -80,7 +80,7 @@ fn pinned_columns_do_not_follow_a_later_current_generation() {
     .unwrap();
     fs::write(
         paths.refs().join("apps/app.zen_browser.zen.ini"),
-        "app_id=app.zen_browser.zen\napp_ref=app/app.zen_browser.zen/x86_64/stable\napp_commit=app-new\napp_dir=apps/app.zen_browser.zen/app-new\narch=x86_64\nbranch=stable\nruntime_ref=org.freedesktop.Platform/x86_64/25.08\nruntime_commit=runtime-new\nruntime_dir=runtimes/org.freedesktop.Platform-25.08/runtime-new\ncommand=zen\n",
+        "app_id=app.zen_browser.zen\napp_ref=app/app.zen_browser.zen/x86_64/stable\napp_commit=app-new\ninstalled_size=5678\napp_dir=apps/app.zen_browser.zen/app-new\narch=x86_64\nbranch=stable\nruntime_ref=org.freedesktop.Platform/x86_64/25.08\nruntime_commit=runtime-new\nruntime_dir=runtimes/org.freedesktop.Platform-25.08/runtime-new\ncommand=zen\n",
     )
     .unwrap();
 

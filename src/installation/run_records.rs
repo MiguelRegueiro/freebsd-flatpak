@@ -98,6 +98,7 @@ fn write_run_record_inner(
         use std::fmt::Write as _;
         writeln!(data, "app_ref={}", app.app_ref)?;
         writeln!(data, "app_commit={}", app.app_commit)?;
+        writeln!(data, "installed_size={}", app.installed_size)?;
         writeln!(data, "app_dir={}", app.app_dir.display())?;
         writeln!(data, "arch={}", app.arch)?;
         writeln!(data, "branch={}", app.branch)?;

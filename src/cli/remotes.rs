@@ -224,6 +224,7 @@ mod tests {
                 app_id: "org.example.App".to_string(),
                 app_ref: "app/org.example.App/x86_64/stable".to_string(),
                 app_commit: "commit".to_string(),
+                installed_size: 0,
                 app_dir: PathBuf::from("apps/org.example.App/commit"),
                 arch: "x86_64".to_string(),
                 branch: "stable".to_string(),

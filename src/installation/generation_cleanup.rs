@@ -6,6 +6,14 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone)]
+pub(super) struct DeploymentData {
+    pub ref_name: String,
+    pub commit: String,
+    pub installed_size: u64,
+    pub origin: String,
+}
+
 pub fn cleanup_retired_deployments(paths: &Installation) -> Result<Vec<PathBuf>> {
     let mut protected = std::collections::BTreeSet::new();
     for app in list_apps(paths)? {
@@ -100,6 +108,33 @@ pub(super) fn deployment_marker(path: &Path) -> Result<Option<(String, String)>>
     let ref_name = lines.next().context("deployment marker missing ref")?;
     let commit = lines.next().context("deployment marker missing commit")?;
     Ok(Some((ref_name.to_string(), commit.to_string())))
+}
+
+pub(super) fn deployment_data(path: &Path) -> Result<Option<DeploymentData>> {
+    let marker_path = path.join(".ostree-commit");
+    if !marker_path.is_file() {
+        return Ok(None);
+    }
+    let marker = fs::read_to_string(&marker_path)
+        .with_context(|| format!("read {}", marker_path.display()))?;
+    let mut lines = marker.lines();
+    let ref_name = lines.next().context("deployment marker missing ref")?;
+    let commit = lines.next().context("deployment marker missing commit")?;
+    let installed_size = lines
+        .next()
+        .context("deployment marker missing installed size")?
+        .parse()
+        .context("deployment marker has invalid installed size")?;
+    let origin = lines
+        .next()
+        .context("deployment marker missing origin")?
+        .to_string();
+    Ok(Some(DeploymentData {
+        ref_name: ref_name.to_string(),
+        commit: commit.to_string(),
+        installed_size,
+        origin,
+    }))
 }
 
 pub fn checkout_ref(path: &Path) -> Result<Option<String>> {

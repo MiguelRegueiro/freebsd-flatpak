@@ -4,6 +4,7 @@ use glib::prelude::Cast;
 use glib::translate::{from_glib_full, ToGlibPtr};
 use glib::{Bytes, VariantDict};
 use ostree::gio;
+use ostree::gio::prelude::*;
 use ostree::{ObjectType, Repo, RepoListObjectsFlags, RepoMode, RepoPruneFlags, RepoRemoteChange};
 use std::fs::{self, File, OpenOptions};
 use std::os::fd::AsRawFd;
@@ -132,6 +133,17 @@ impl Storage {
         Ok(())
     }
 
+    /// Return the logical checkout size used by upstream Flatpak deployment
+    /// data: every regular file in the commit, rounded up to a 512-byte block.
+    pub fn installed_size(&self, checksum: &str) -> Result<u64> {
+        let (root, _) = self
+            .repo
+            .read_commit(checksum, gio::Cancellable::NONE)
+            .with_context(|| format!("read OSTree commit {checksum}"))?;
+        collect_installed_size(&root)
+            .with_context(|| format!("collect installed size for commit {checksum}"))
+    }
+
     pub fn fsck_all(&self) -> Result<usize> {
         let objects = self
             .repo
@@ -173,6 +185,33 @@ impl Storage {
             .prune(RepoPruneFlags::REFS_ONLY, 0, gio::Cancellable::NONE)
             .context("prune unreachable OSTree objects")
     }
+}
+
+fn collect_installed_size(root: &gio::File) -> Result<u64> {
+    const ATTRIBUTES: &str = "standard::name,standard::type,standard::size";
+    let enumerator = root.enumerate_children(
+        ATTRIBUTES,
+        gio::FileQueryInfoFlags::NOFOLLOW_SYMLINKS,
+        gio::Cancellable::NONE,
+    )?;
+    let mut size = 0u64;
+    while let Some(info) = enumerator.next_file(gio::Cancellable::NONE)? {
+        match info.file_type() {
+            gio::FileType::Regular => {
+                let file_size = u64::try_from(info.size()).context("negative OSTree file size")?;
+                size = size
+                    .checked_add(file_size.saturating_add(511) / 512 * 512)
+                    .context("installed size overflow")?;
+            }
+            gio::FileType::Directory => {
+                size = size
+                    .checked_add(collect_installed_size(&root.child(info.name()))?)
+                    .context("installed size overflow")?;
+            }
+            _ => {}
+        }
+    }
+    Ok(size)
 }
 
 fn remote_gpg_import_all(repo: &Repo, name: &str, stream: &gio::MemoryInputStream) -> Result<u32> {

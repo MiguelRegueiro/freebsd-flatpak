@@ -161,6 +161,7 @@ fn runtime_branch_change_reports_the_apps_previous_runtime_commit() {
             origin: "flathub".to_string(),
             runtime_ref: "org.example.Platform/x86_64/50".to_string(),
             runtime_commit: "runtime-50".to_string(),
+            installed_size: 0,
             runtime_dir: paths.relative_data_path(&runtime_50_dir).unwrap(),
         },
     )
