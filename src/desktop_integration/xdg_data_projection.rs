@@ -1,13 +1,20 @@
 use super::application_exports::remove_empty_parents;
 use crate::installation::installation_paths::Installation;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Component, Path};
 
-pub(super) fn publish_projection(paths: &Installation, rel: &Path) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProjectionOutcome {
+    NotApplicable,
+    Published,
+    PreservedConflict,
+}
+
+pub(super) fn publish_projection(paths: &Installation, rel: &Path) -> Result<ProjectionOutcome> {
     if !is_launcher_projection(rel) {
-        return Ok(());
+        return Ok(ProjectionOutcome::NotApplicable);
     }
     let source = paths.export_share().join(rel);
     let target = paths.data_home().join(rel);
@@ -18,33 +25,13 @@ pub(super) fn publish_projection(paths: &Installation, rel: &Path) -> Result<()>
 
     if let Ok(metadata) = fs::symlink_metadata(&target) {
         if !metadata.file_type().is_symlink() || !is_managed_projection(paths, rel, &target) {
-            bail!(
-                "refusing to replace existing XDG export {} (source would be {})",
-                target.display(),
-                source.display()
-            );
+            return Ok(ProjectionOutcome::PreservedConflict);
         }
         fs::remove_file(&target).with_context(|| format!("replace {}", target.display()))?;
     }
     unix_fs::symlink(&source, &target)
-        .with_context(|| format!("publish XDG export {}", target.display()))
-}
-
-pub(super) fn preflight_projection(paths: &Installation, rel: &Path) -> Result<()> {
-    if !is_launcher_projection(rel) {
-        return Ok(());
-    }
-    let target = paths.data_home().join(rel);
-    let Ok(metadata) = fs::symlink_metadata(&target) else {
-        return Ok(());
-    };
-    if metadata.file_type().is_symlink() && is_managed_projection(paths, rel, &target) {
-        return Ok(());
-    }
-    bail!(
-        "refusing to replace existing XDG export {}",
-        target.display()
-    )
+        .with_context(|| format!("publish XDG export {}", target.display()))?;
+    Ok(ProjectionOutcome::Published)
 }
 
 fn is_managed_projection(paths: &Installation, rel: &Path, target: &Path) -> bool {

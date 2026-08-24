@@ -402,6 +402,15 @@ fn print_export_report(paths: &Installation, export: &desktop_integration::Expor
             .join(", ");
         println!("  skipped host-incompatible exports: {skipped}");
     }
+    if !export.conflicts.is_empty() {
+        let conflicts = export
+            .conflicts
+            .iter()
+            .map(|path| paths.data_home().join(path).display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  preserved conflicting user exports: {conflicts}");
+    }
 }
 
 fn value_after_equals(arg: &str) -> &str {

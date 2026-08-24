@@ -131,6 +131,15 @@ pub(crate) fn cmd_install(paths: &Installation, args: Vec<String>) -> Result<()>
                 .join(", ");
             println!("    Skipped host-incompatible exports: {skipped}");
         }
+        if !export.conflicts.is_empty() {
+            let conflicts = export
+                .conflicts
+                .iter()
+                .map(|path| paths.data_home().join(path).display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("    Preserved conflicting user exports: {conflicts}");
+        }
     }
     if std::env::var_os("FREEBSD_FLATPAK_BENCHMARK").is_some() {
         println!("\nBenchmark timings:");

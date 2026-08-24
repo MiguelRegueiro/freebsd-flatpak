@@ -1,8 +1,7 @@
 use super::desktop_caches::refresh_export_caches;
 use super::desktop_entries::rewrite_desktop_file;
 use super::xdg_data_projection::{
-    cleanup_managed_projections_for_app, preflight_projection, publish_projection,
-    remove_projection,
+    cleanup_managed_projections_for_app, publish_projection, remove_projection, ProjectionOutcome,
 };
 use crate::installation::installation_paths::Installation;
 use crate::installation::{self as state, AppRecord};
@@ -17,6 +16,7 @@ pub struct ExportReport {
     pub files: usize,
     pub desktop_entries: usize,
     pub skipped: Vec<PathBuf>,
+    pub conflicts: Vec<PathBuf>,
 }
 
 pub fn export_data_dir(paths: &Installation) -> PathBuf {
@@ -38,12 +38,6 @@ pub fn export_app(paths: &Installation, app: &AppRecord) -> Result<ExportReport>
             source_share.display()
         );
         return Ok(report);
-    }
-
-    // Refuse unrelated host-file collisions before changing our private
-    // export tree. Project-owned stale links are deliberately replaceable.
-    for rel in collect_export_files(&source_share, &source_share)? {
-        preflight_projection(paths, &rel)?;
     }
 
     let export_share = export_data_dir(paths);
@@ -70,7 +64,9 @@ pub fn export_app(paths: &Installation, app: &AppRecord) -> Result<ExportReport>
     )?;
     exported_paths.sort();
     for rel in &exported_paths {
-        publish_projection(paths, rel)?;
+        if publish_projection(paths, rel)? == ProjectionOutcome::PreservedConflict {
+            report.conflicts.push(rel.clone());
+        }
     }
     state::write_export_record(paths, &app.app_id, &exported_paths)?;
     refresh_export_caches(paths)?;
@@ -202,28 +198,6 @@ fn copy_export_dir(
     }
 
     Ok(())
-}
-
-fn collect_export_files(source_root: &Path, directory: &Path) -> Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    for entry in fs::read_dir(directory)
-        .with_context(|| format!("read export directory {}", directory.display()))?
-    {
-        let entry = entry?;
-        let source = entry.path();
-        let rel = source.strip_prefix(source_root)?.to_path_buf();
-        validate_relative_export_path(&rel)?;
-        if should_skip_export_path(&rel) {
-            continue;
-        }
-        let metadata = fs::symlink_metadata(&source)?;
-        if metadata.file_type().is_dir() {
-            paths.extend(collect_export_files(source_root, &source)?);
-        } else if metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-            paths.push(rel);
-        }
-    }
-    Ok(paths)
 }
 
 fn should_skip_export_path(rel: &Path) -> bool {
