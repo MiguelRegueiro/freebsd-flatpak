@@ -1,5 +1,6 @@
 #include "status_notifier_item_proxy.h"
 #include "dbusmenu_proxy.h"
+#include "icon_resolver.h"
 const char *STATUS_ITEM_XML =
     "<node>"
     "  <interface name='org.kde.StatusNotifierItem'>"
@@ -10,6 +11,7 @@ const char *STATUS_ITEM_XML =
     "    <property name='WindowId' type='u' access='read'/>"
     "    <property name='IconName' type='s' access='read'/>"
     "    <property name='IconPixmap' type='a(iiay)' access='read'/>"
+    "    <property name='IconThemePath' type='s' access='read'/>"
     "    <property name='OverlayIconName' type='s' access='read'/>"
     "    <property name='OverlayIconPixmap' type='a(iiay)' access='read'/>"
     "    <property name='AttentionIconName' type='s' access='read'/>"
@@ -45,6 +47,13 @@ const char *STATUS_ITEM_XML =
     "  </interface>"
     "</node>";
 
+static void clear_status_icon(StatusIcon *icon) {
+  g_clear_pointer(&icon->local_name, g_free);
+  g_clear_pointer(&icon->exposed_name, g_free);
+  g_clear_pointer(&icon->pixmap, g_variant_unref);
+  icon->loaded = false;
+}
+
 void free_status_item(StatusItem *item) {
   if (item == NULL) {
     return;
@@ -60,6 +69,9 @@ void free_status_item(StatusItem *item) {
   if (item->menus != NULL) {
     g_ptr_array_free(item->menus, TRUE);
   }
+  clear_status_icon(&item->icon);
+  clear_status_icon(&item->overlay_icon);
+  clear_status_icon(&item->attention_icon);
   g_free(item->local_service);
   g_free(item->local_path);
   g_free(item->local_registration);
@@ -109,7 +121,8 @@ GVariant *default_status_property(StatusItem *item, const char *property_name) {
     return g_variant_new_uint32(0);
   }
   if (g_str_has_suffix(property_name, "IconName") ||
-      g_strcmp0(property_name, "AttentionMovieName") == 0) {
+      g_strcmp0(property_name, "AttentionMovieName") == 0 ||
+      g_strcmp0(property_name, "IconThemePath") == 0) {
     return g_variant_new_string("");
   }
   if (g_str_has_suffix(property_name, "IconPixmap")) {
@@ -136,6 +149,13 @@ void on_local_status_signal(GDBusConnection *connection,
   (void)sender_name;
   (void)object_path;
   StatusItem *item = user_data;
+  if (g_strcmp0(signal_name, "NewIcon") == 0) {
+    clear_status_icon(&item->icon);
+  } else if (g_strcmp0(signal_name, "NewOverlayIcon") == 0) {
+    clear_status_icon(&item->overlay_icon);
+  } else if (g_strcmp0(signal_name, "NewAttentionIcon") == 0) {
+    clear_status_icon(&item->attention_icon);
+  }
   if (!g_dbus_connection_emit_signal(
           item->state->host_bus, NULL, item->host_path, interface_name,
           signal_name, g_variant_ref(parameters), NULL)) {
@@ -143,7 +163,9 @@ void on_local_status_signal(GDBusConnection *connection,
   }
 }
 
-GVariant *local_status_property(StatusItem *item, const char *property_name) {
+static GVariant *raw_local_status_property(StatusItem *item,
+                                           const char *property_name,
+                                           bool log_error) {
   GError *error = NULL;
   GVariant *reply = g_dbus_connection_call_sync(
       item->state->local_bus, item->local_service, item->local_path,
@@ -151,10 +173,12 @@ GVariant *local_status_property(StatusItem *item, const char *property_name) {
       g_variant_new("(ss)", "org.kde.StatusNotifierItem", property_name),
       G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, 1000, NULL, &error);
   if (reply == NULL) {
-    status_notifier_log("StatusNotifier property %s.%s unavailable: %s",
-                        item->local_service, property_name, error->message);
+    if (log_error) {
+      status_notifier_log("StatusNotifier property %s.%s unavailable: %s",
+                          item->local_service, property_name, error->message);
+    }
     g_error_free(error);
-    return default_status_property(item, property_name);
+    return NULL;
   }
 
   GVariant *boxed = g_variant_get_child_value(reply, 0);
@@ -162,6 +186,100 @@ GVariant *local_status_property(StatusItem *item, const char *property_name) {
   g_variant_unref(boxed);
   g_variant_unref(reply);
 
+  return value;
+}
+
+static bool pixmap_is_empty(GVariant *pixmap) {
+  return pixmap == NULL ||
+         !g_variant_is_of_type(pixmap, G_VARIANT_TYPE("a(iiay)")) ||
+         g_variant_n_children(pixmap) == 0;
+}
+
+static void load_status_icon(StatusItem *item, StatusIcon *icon,
+                             const char *name_property,
+                             const char *pixmap_property) {
+  if (icon->loaded) {
+    return;
+  }
+  icon->loaded = true;
+  GVariant *pixmap =
+      raw_local_status_property(item, pixmap_property, false);
+  GVariant *name = raw_local_status_property(item, name_property, false);
+  icon->local_name =
+      name != NULL && g_variant_is_of_type(name, G_VARIANT_TYPE_STRING)
+          ? g_variant_dup_string(name, NULL)
+          : g_strdup("");
+  if (name != NULL) {
+    g_variant_unref(name);
+  }
+
+  if (!pixmap_is_empty(pixmap)) {
+    icon->pixmap = pixmap;
+    icon->exposed_name = g_strdup(icon->local_name);
+    return;
+  }
+  g_clear_pointer(&pixmap, g_variant_unref);
+
+  GVariant *theme =
+      raw_local_status_property(item, "IconThemePath", false);
+  const char *theme_path =
+      theme != NULL && g_variant_is_of_type(theme, G_VARIANT_TYPE_STRING)
+          ? g_variant_get_string(theme, NULL)
+          : "";
+  icon->pixmap =
+      resolve_status_icon(item->state, icon->local_name, theme_path);
+  if (theme != NULL) {
+    g_variant_unref(theme);
+  }
+  icon->exposed_name =
+      g_strdup(icon->pixmap == NULL ? icon->local_name : "");
+  if (icon->pixmap != NULL) {
+    status_notifier_log("resolved sandbox icon %s as pixmap",
+                        icon->local_name);
+  }
+}
+
+static GVariant *status_icon_property(StatusItem *item, StatusIcon *icon,
+                                      const char *name_property,
+                                      const char *pixmap_property,
+                                      const char *property_name) {
+  load_status_icon(item, icon, name_property, pixmap_property);
+  if (g_strcmp0(property_name, name_property) == 0) {
+    return g_variant_new_string(icon->exposed_name);
+  }
+  if (icon->pixmap != NULL) {
+    return g_variant_ref(icon->pixmap);
+  }
+  return empty_icon_pixmap();
+}
+
+GVariant *local_status_property(StatusItem *item, const char *property_name) {
+  if (g_strcmp0(property_name, "IconThemePath") == 0) {
+    // Sandbox paths are not meaningful to a native host. Resolvable named
+    // icons are exposed through the corresponding pixmap property instead.
+    return g_variant_new_string("");
+  }
+  if (g_strcmp0(property_name, "IconName") == 0 ||
+      g_strcmp0(property_name, "IconPixmap") == 0) {
+    return status_icon_property(item, &item->icon, "IconName", "IconPixmap",
+                                property_name);
+  }
+  if (g_strcmp0(property_name, "OverlayIconName") == 0 ||
+      g_strcmp0(property_name, "OverlayIconPixmap") == 0) {
+    return status_icon_property(item, &item->overlay_icon, "OverlayIconName",
+                                "OverlayIconPixmap", property_name);
+  }
+  if (g_strcmp0(property_name, "AttentionIconName") == 0 ||
+      g_strcmp0(property_name, "AttentionIconPixmap") == 0) {
+    return status_icon_property(item, &item->attention_icon,
+                                "AttentionIconName", "AttentionIconPixmap",
+                                property_name);
+  }
+
+  GVariant *value = raw_local_status_property(item, property_name, true);
+  if (value == NULL) {
+    return default_status_property(item, property_name);
+  }
   if (g_strcmp0(property_name, "Menu") == 0 &&
       g_variant_is_of_type(value, G_VARIANT_TYPE_OBJECT_PATH)) {
     MenuProxy *menu =

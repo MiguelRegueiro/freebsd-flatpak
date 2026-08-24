@@ -8,6 +8,7 @@ use super::private_session_bus::{
 };
 use crate::desktop_integration::DesktopSession;
 use crate::installation::installation_paths::Installation;
+use crate::installation::FlatpakApp;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -41,12 +42,13 @@ enum PortalMode {
 impl HostPortal {
     pub fn prepare(
         paths: &Installation,
-        app_id: &str,
+        app: &FlatpakApp,
         instance_id: &str,
         desktop: &DesktopSession,
         uid: u32,
         sandbox_root: &Path,
     ) -> Result<Self> {
+        let app_id = &app.app_id;
         let mut warnings = Vec::new();
         let Some(bus_address) = desktop.dbus_session_bus_address.as_ref() else {
             warnings.push("DBUS_SESSION_BUS_ADDRESS is not set; desktop portals disabled".into());
@@ -130,6 +132,10 @@ impl HostPortal {
                 .arg(app_id)
                 .arg("--shared-dir")
                 .arg(&shared_dir)
+                .arg("--app-root")
+                .arg(app.app_dir.join("files"))
+                .arg("--runtime-root")
+                .arg(app.runtime_dir.join("files"))
                 .env("DBUS_SESSION_BUS_ADDRESS", &address)
                 .env("HOST_DBUS_SESSION_BUS_ADDRESS", bus_address)
                 .stdin(Stdio::null())

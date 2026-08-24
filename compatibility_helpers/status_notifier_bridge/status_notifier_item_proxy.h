@@ -2,6 +2,12 @@
 #define STATUS_NOTIFIER_ITEM_PROXY_H
 #include "status_notifier_watcher.h"
 typedef struct _MenuProxy MenuProxy;
+typedef struct {
+  char *local_name;
+  char *exposed_name;
+  GVariant *pixmap;
+  bool loaded;
+} StatusIcon;
 struct _StatusItem {
   StatusNotifierBridge *state;
   char *local_service;
@@ -11,6 +17,9 @@ struct _StatusItem {
   guint host_registration_id;
   guint local_signal_id;
   GPtrArray *menus;
+  StatusIcon icon;
+  StatusIcon overlay_icon;
+  StatusIcon attention_icon;
 };
 extern const char *STATUS_ITEM_XML;
 extern const GDBusInterfaceVTable STATUS_ITEM_VTABLE;

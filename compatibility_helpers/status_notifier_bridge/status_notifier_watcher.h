@@ -12,6 +12,8 @@ typedef struct _StatusNotifierBridge StatusNotifierBridge;
 typedef struct _StatusItem StatusItem;
 struct _StatusNotifierBridge {
   char *app_id;
+  char *app_root;
+  char *runtime_root;
   GMainLoop *loop;
   GDBusConnection *host_bus;
   GDBusConnection *local_bus;

@@ -436,7 +436,7 @@ HELPER_BUILD_DIR=target/release/freebsd-flatpak-helpers
 OSTREE_PREFIX="$BASE/target/vendor-ostree/prefix"
 LINUX_CC=${LINUX_CC:-/compat/linux/usr/bin/gcc}
 LINUX_BUILD_PATH=/compat/linux/usr/bin:/compat/linux/bin:/usr/bin:/bin
-REQUIRED_PACKAGES="rust gmake pkgconf glib curl gpgme pipewire"
+REQUIRED_PACKAGES="rust gmake pkgconf glib gdk-pixbuf2 curl gpgme pipewire"
 
 print_install_tree() {
     install_root=${INSTALL_BIN%/*}
@@ -565,8 +565,8 @@ BUILD_UID=$(id -u "$BUILD_USER" 2>/dev/null) ||
     fail "the build must be owned by a normal user; run this installer with doas or sudo from that account"
 
 [ -x "$LINUX_CC" ] || fail "Linux compiler not found or not executable: $LINUX_CC"
-pkg-config --exists gio-2.0 gio-unix-2.0 glib-2.0 libpipewire-0.3 ||
-    fail "missing development packages for GLib/GIO or PipeWire"
+pkg-config --exists gio-2.0 gio-unix-2.0 glib-2.0 gdk-pixbuf-2.0 libpipewire-0.3 ||
+    fail "missing development packages for GLib/GIO, GdkPixbuf, or PipeWire"
 
 printf 'Build user: %s\n' "$BUILD_USER" >>"$LOG_FILE"
 chown "$BUILD_USER" "$LOG_FILE" || fail "could not make the installation log readable by $BUILD_USER"

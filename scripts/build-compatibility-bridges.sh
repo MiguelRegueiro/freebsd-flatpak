@@ -37,10 +37,11 @@ cc -O2 -Wall -Wextra \
     @"$PORTAL_RESPONSE"
 
 ui_progress "Status notifier bridge"
-pkg-config --cflags --libs gio-2.0 gio-unix-2.0 glib-2.0 \
+pkg-config --cflags --libs gio-2.0 gio-unix-2.0 glib-2.0 gdk-pixbuf-2.0 \
     >"$STATUS_NOTIFIER_RESPONSE"
 cc -O2 -Wall -Wextra \
     compatibility_helpers/status_notifier_bridge/dbusmenu_proxy.c \
+    compatibility_helpers/status_notifier_bridge/icon_resolver.c \
     compatibility_helpers/status_notifier_bridge/main.c \
     compatibility_helpers/status_notifier_bridge/status_notifier_item_proxy.c \
     compatibility_helpers/status_notifier_bridge/status_notifier_watcher.c \

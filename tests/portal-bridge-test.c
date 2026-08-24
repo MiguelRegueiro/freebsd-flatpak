@@ -10,6 +10,8 @@
 #include "../compatibility_helpers/portal_bridge/sandbox_document_registration.h"
 #include "../compatibility_helpers/portal_bridge/screencast_portal.h"
 #include "../compatibility_helpers/status_notifier_bridge/status_notifier_watcher.h"
+#include "../compatibility_helpers/status_notifier_bridge/icon_resolver.h"
+#include <gdk-pixbuf/gdk-pixbuf.h>
 
 typedef struct {
   char *source;
@@ -580,6 +582,99 @@ static void test_pipewire_source_generation_tracking(void) {
   g_array_free(session.sources, TRUE);
 }
 
+static void save_test_icon(const char *path) {
+  GError *error = NULL;
+  GdkPixbuf *pixbuf =
+      gdk_pixbuf_new(GDK_COLORSPACE_RGB, TRUE, 8, 2, 1);
+  g_assert_nonnull(pixbuf);
+  guchar *pixels = gdk_pixbuf_get_pixels(pixbuf);
+  pixels[0] = 0x11;
+  pixels[1] = 0x22;
+  pixels[2] = 0x33;
+  pixels[3] = 0x44;
+  pixels[4] = 0xaa;
+  pixels[5] = 0xbb;
+  pixels[6] = 0xcc;
+  pixels[7] = 0xdd;
+  g_assert_true(gdk_pixbuf_save(pixbuf, path, "png", &error, NULL));
+  g_assert_no_error(error);
+  g_object_unref(pixbuf);
+}
+
+static void assert_test_icon_pixmap(GVariant *pixmaps) {
+  g_assert_nonnull(pixmaps);
+  g_assert_cmpuint(g_variant_n_children(pixmaps), ==, 1);
+  GVariant *entry = g_variant_get_child_value(pixmaps, 0);
+  int width = 0;
+  int height = 0;
+  GVariant *bytes = NULL;
+  g_variant_get(entry, "(ii@ay)", &width, &height, &bytes);
+  g_assert_cmpint(width, ==, 2);
+  g_assert_cmpint(height, ==, 1);
+  gsize size = 0;
+  const guchar *argb = g_variant_get_fixed_array(bytes, &size, 1);
+  const guchar expected[] = {0x44, 0x11, 0x22, 0x33,
+                             0xdd, 0xaa, 0xbb, 0xcc};
+  g_assert_cmpuint(size, ==, sizeof(expected));
+  g_assert_cmpmem(argb, size, expected, sizeof(expected));
+  g_variant_unref(bytes);
+  g_variant_unref(entry);
+  g_variant_unref(pixmaps);
+}
+
+static void test_status_icon_resolution(void) {
+  GError *error = NULL;
+  char *root = g_dir_make_tmp("freebsd-flatpak-icon-test-XXXXXX", &error);
+  g_assert_no_error(error);
+  char *app_root = g_build_filename(root, "app", NULL);
+  char *runtime_root = g_build_filename(root, "runtime", NULL);
+  char *icon_dir = g_build_filename(app_root, "share", "icons", "hicolor",
+                                    "32x32", "apps", NULL);
+  char *named_icon = g_build_filename(icon_dir, "org.example.Tray.png", NULL);
+  char *runtime_icon_dir =
+      g_build_filename(runtime_root, "custom", NULL);
+  char *runtime_icon = g_build_filename(runtime_icon_dir, "absolute.png", NULL);
+  g_assert_cmpint(g_mkdir_with_parents(icon_dir, 0700), ==, 0);
+  g_assert_cmpint(g_mkdir_with_parents(runtime_icon_dir, 0700), ==, 0);
+  save_test_icon(named_icon);
+  save_test_icon(runtime_icon);
+
+  StatusNotifierBridge state = {
+      .app_root = app_root,
+      .runtime_root = runtime_root,
+  };
+  assert_test_icon_pixmap(
+      resolve_status_icon(&state, "org.example.Tray", ""));
+  assert_test_icon_pixmap(
+      resolve_status_icon(&state, "/usr/custom/absolute.png", ""));
+  g_assert_null(resolve_status_icon(&state, "org.example.Missing", ""));
+  g_assert_null(resolve_status_icon(&state, "../outside", ""));
+  g_assert_null(
+      resolve_status_icon(&state, "/app/../../runtime/custom/absolute.png", ""));
+
+  g_assert_cmpint(g_remove(runtime_icon), ==, 0);
+  g_assert_cmpint(g_remove(named_icon), ==, 0);
+  char *directory = g_strdup(icon_dir);
+  while (g_strcmp0(directory, app_root) != 0) {
+    g_assert_cmpint(g_rmdir(directory), ==, 0);
+    char *parent = g_path_get_dirname(directory);
+    g_free(directory);
+    directory = parent;
+  }
+  g_assert_cmpint(g_rmdir(app_root), ==, 0);
+  g_assert_cmpint(g_rmdir(runtime_icon_dir), ==, 0);
+  g_assert_cmpint(g_rmdir(runtime_root), ==, 0);
+  g_assert_cmpint(g_rmdir(root), ==, 0);
+  g_free(directory);
+  g_free(runtime_icon);
+  g_free(runtime_icon_dir);
+  g_free(named_icon);
+  g_free(icon_dir);
+  g_free(runtime_root);
+  g_free(app_root);
+  g_free(root);
+}
+
 int main(void) {
   test_introspection();
   test_shared_sandbox_scope_validation();
@@ -592,5 +687,6 @@ int main(void) {
   test_screencast_source_tracking();
   test_pipewire_client_session_ownership();
   test_pipewire_source_generation_tracking();
+  test_status_icon_resolution();
   return 0;
 }

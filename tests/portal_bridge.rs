@@ -16,6 +16,7 @@ fn compatibility_bridge_contract() {
             "gio-unix-2.0",
             "glib-2.0",
             "libpipewire-0.3",
+            "gdk-pixbuf-2.0",
         ])
         .output()
         .expect("run pkg-config for portal bridge test");
@@ -40,6 +41,7 @@ fn compatibility_bridge_contract() {
             "compatibility_helpers/portal_bridge/sandbox_document_registration.c",
             "compatibility_helpers/portal_bridge/screencast_portal.c",
             "compatibility_helpers/status_notifier_bridge/dbusmenu_proxy.c",
+            "compatibility_helpers/status_notifier_bridge/icon_resolver.c",
             "compatibility_helpers/status_notifier_bridge/status_notifier_item_proxy.c",
             "compatibility_helpers/status_notifier_bridge/status_notifier_watcher.c",
         ])

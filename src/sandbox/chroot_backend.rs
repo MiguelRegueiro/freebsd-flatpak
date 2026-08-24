@@ -139,8 +139,7 @@ impl ChrootNullfsBackend {
             HostAudio::from_metadata_file(&metadata_path, &desktop.xdg_runtime_dir, uid)?;
         let host_cursor = HostCursorTheme::from_host(desktop);
         let host_fonts = HostFonts::from_host();
-        let host_portal =
-            HostPortal::prepare(&self.paths, &app.app_id, &instance_id, desktop, uid, &root)?;
+        let host_portal = HostPortal::prepare(&self.paths, app, &instance_id, desktop, uid, &root)?;
         let host_graphics = HostGraphics::prepare(&self.paths, app, &instance_id)?;
         let host_video = HostVideo::prepare(&self.paths, app)?;
         let app_extensions = runtime::ensure_app_codec_extensions(&self.paths, app)?;

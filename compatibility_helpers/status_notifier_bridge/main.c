@@ -79,10 +79,15 @@ static GDBusConnection *connect_to_bus_address(const char *address,
 int main(int argc, char **argv) {
   const char *app_id = arg_value(argc, argv, "--app-id");
   const char *shared_dir = arg_value(argc, argv, "--shared-dir");
+  const char *app_root = arg_value(argc, argv, "--app-root");
+  const char *runtime_root = arg_value(argc, argv, "--runtime-root");
   const char *host_address = getenv("HOST_DBUS_SESSION_BUS_ADDRESS");
-  if (app_id == NULL || shared_dir == NULL || host_address == NULL ||
+  if (app_id == NULL || shared_dir == NULL || app_root == NULL ||
+      runtime_root == NULL || host_address == NULL ||
       *host_address == '\0') {
-    fprintf(stderr, "usage: %s --app-id APP_ID --shared-dir APP_PORTAL_DIR\n",
+    fprintf(stderr,
+            "usage: %s --app-id APP_ID --shared-dir APP_PORTAL_DIR "
+            "--app-root APP_FILES --runtime-root RUNTIME_FILES\n",
             argv[0]);
     fprintf(
         stderr,
@@ -92,6 +97,8 @@ int main(int argc, char **argv) {
   GError *error = NULL;
   StatusNotifierBridge state = {
       .app_id = g_strdup(app_id),
+      .app_root = g_strdup(app_root),
+      .runtime_root = g_strdup(runtime_root),
       .loop = g_main_loop_new(NULL, FALSE),
       .host_bus = connect_to_bus_address(host_address, &error),
       .local_bus = NULL,
@@ -127,5 +134,7 @@ int main(int argc, char **argv) {
   g_dbus_node_info_unref(state.dbusmenu_node);
   g_main_loop_unref(state.loop);
   g_free(state.app_id);
+  g_free(state.app_root);
+  g_free(state.runtime_root);
   return 0;
 }
