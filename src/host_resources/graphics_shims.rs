@@ -15,6 +15,11 @@ pub(super) struct DrmSyncobjErrnoShim {
 }
 
 #[derive(Debug, Clone)]
+pub(super) struct Gtk3WaylandGeometryShim {
+    pub(super) host_dir: PathBuf,
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct ChromiumZygoteDrmPreload {
     pub(super) host_dir: PathBuf,
 }
@@ -43,6 +48,17 @@ impl DrmSyncobjErrnoShim {
     }
 }
 
+impl Gtk3WaylandGeometryShim {
+    pub(super) fn prepare(paths: &Installation) -> Result<Self> {
+        let helper = ensure_gtk3_wayland_geometry_shim(paths)?;
+        let host_dir = helper
+            .parent()
+            .context("GTK3 Wayland geometry shim output path has no parent")?
+            .to_path_buf();
+        Ok(Self { host_dir })
+    }
+}
+
 impl ChromiumZygoteDrmPreload {
     pub(super) fn prepare(paths: &Installation) -> Result<Self> {
         let helper = ensure_chromium_zygote_drm_preload(paths)?;
@@ -60,6 +76,10 @@ fn ensure_wayland_drm_devt_shim(paths: &Installation) -> Result<PathBuf> {
 
 fn ensure_drm_syncobj_errno_shim(paths: &Installation) -> Result<PathBuf> {
     installed_helper(paths, "libdrm-syncobj-errno-shim.so")
+}
+
+fn ensure_gtk3_wayland_geometry_shim(paths: &Installation) -> Result<PathBuf> {
+    installed_helper(paths, "libgtk3-wayland-geometry-shim.so")
 }
 
 fn ensure_chromium_zygote_drm_preload(paths: &Installation) -> Result<PathBuf> {

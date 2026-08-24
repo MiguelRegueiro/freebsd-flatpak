@@ -1,5 +1,7 @@
 use super::HostGraphics;
-use crate::host_resources::graphics_shims::{DrmSyncobjErrnoShim, WaylandDrmDevtShim};
+use crate::host_resources::graphics_shims::{
+    DrmSyncobjErrnoShim, Gtk3WaylandGeometryShim, WaylandDrmDevtShim,
+};
 use std::path::PathBuf;
 
 #[test]
@@ -9,6 +11,9 @@ fn keeps_drm_and_wayland_preloads_separate_on_one_mount() {
         gl: None,
         drm: None,
         drm_syncobj_errno_shim: Some(DrmSyncobjErrnoShim {
+            host_dir: host_dir.clone(),
+        }),
+        gtk3_wayland_geometry_shim: Some(Gtk3WaylandGeometryShim {
             host_dir: host_dir.clone(),
         }),
         chromium_zygote_drm_preload: None,
@@ -24,12 +29,14 @@ fn keeps_drm_and_wayland_preloads_separate_on_one_mount() {
         vec![
             "/run/host/freebsd-flatpak/libdrm-syncobj-errno-shim.so",
             "/run/host/freebsd-flatpak/libwayland-drm-devt-shim.so",
+            "/run/host/freebsd-flatpak/libgtk3-wayland-geometry-shim.so",
         ]
     );
     assert_eq!(
         graphics.zypak_ld_preload_paths(),
         vec![
             "/run/host/freebsd-flatpak/libwayland-drm-devt-shim.so",
+            "/run/host/freebsd-flatpak/libgtk3-wayland-geometry-shim.so",
             "/run/host/freebsd-flatpak/libdrm-syncobj-errno-shim.so",
         ]
     );

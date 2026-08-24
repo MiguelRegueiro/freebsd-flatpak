@@ -1,5 +1,7 @@
 use super::drm_device::DrmDevice;
-use super::graphics_shims::{ChromiumZygoteDrmPreload, DrmSyncobjErrnoShim, WaylandDrmDevtShim};
+use super::graphics_shims::{
+    ChromiumZygoteDrmPreload, DrmSyncobjErrnoShim, Gtk3WaylandGeometryShim, WaylandDrmDevtShim,
+};
 use super::linux_drm_sysfs::{linux_drm_dev_t, DrmSysfsBridge};
 use crate::installation::installation_paths::Installation;
 use crate::installation::{self as runtime, FlatpakApp, RuntimeGlExtension};
@@ -9,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 pub(super) const DRM_MAJOR: u32 = 226;
 pub(super) const DRM_SYNCOBJ_ERRNO_SHIM_LIB: &str = "libdrm-syncobj-errno-shim.so";
+pub(super) const GTK3_WAYLAND_GEOMETRY_SHIM_LIB: &str = "libgtk3-wayland-geometry-shim.so";
 pub(super) const CHROMIUM_ZYGOTE_DRM_PRELOAD_LIB: &str = "libchromium-zygote-drm-preload.so";
 pub(super) const GRAPHICS_SHIM_SANDBOX_DIR: &str = "/run/host/freebsd-flatpak";
 pub(super) const WAYLAND_DRM_DEVT_SHIM_LIB: &str = "libwayland-drm-devt-shim.so";
@@ -18,6 +21,7 @@ pub struct HostGraphics {
     gl: Option<RuntimeGlExtension>,
     drm: Option<DrmSysfsBridge>,
     drm_syncobj_errno_shim: Option<DrmSyncobjErrnoShim>,
+    gtk3_wayland_geometry_shim: Option<Gtk3WaylandGeometryShim>,
     chromium_zygote_drm_preload: Option<ChromiumZygoteDrmPreload>,
     wayland_drm_devt_shim: Option<WaylandDrmDevtShim>,
     warnings: Vec<String>,
@@ -62,6 +66,18 @@ impl HostGraphics {
             None
         };
 
+        let gtk3_wayland_geometry_shim = if gl.is_some() {
+            match Gtk3WaylandGeometryShim::prepare(paths) {
+                Ok(shim) => Some(shim),
+                Err(error) => {
+                    warnings.push(format!("GTK3 Wayland geometry shim disabled: {error:#}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let drm_syncobj_errno_shim = if drm.is_some() {
             match DrmSyncobjErrnoShim::prepare(paths) {
                 Ok(shim) => Some(shim),
@@ -90,6 +106,7 @@ impl HostGraphics {
             gl,
             drm,
             drm_syncobj_errno_shim,
+            gtk3_wayland_geometry_shim,
             chromium_zygote_drm_preload,
             wayland_drm_devt_shim,
             warnings,
@@ -110,9 +127,14 @@ impl HostGraphics {
             })
             .collect();
         let shim_dir = self
-            .drm_syncobj_errno_shim
+            .gtk3_wayland_geometry_shim
             .as_ref()
             .map(|shim| &shim.host_dir)
+            .or_else(|| {
+                self.drm_syncobj_errno_shim
+                    .as_ref()
+                    .map(|shim| &shim.host_dir)
+            })
             .or_else(|| {
                 self.wayland_drm_devt_shim
                     .as_ref()
@@ -194,6 +216,11 @@ impl HostGraphics {
                 "{GRAPHICS_SHIM_SANDBOX_DIR}/{WAYLAND_DRM_DEVT_SHIM_LIB}"
             ));
         }
+        if self.gtk3_wayland_geometry_shim.is_some() {
+            paths.push(format!(
+                "{GRAPHICS_SHIM_SANDBOX_DIR}/{GTK3_WAYLAND_GEOMETRY_SHIM_LIB}"
+            ));
+        }
         paths
     }
 
@@ -202,6 +229,11 @@ impl HostGraphics {
         if self.wayland_drm_devt_shim.is_some() {
             paths.push(format!(
                 "{GRAPHICS_SHIM_SANDBOX_DIR}/{WAYLAND_DRM_DEVT_SHIM_LIB}"
+            ));
+        }
+        if self.gtk3_wayland_geometry_shim.is_some() {
+            paths.push(format!(
+                "{GRAPHICS_SHIM_SANDBOX_DIR}/{GTK3_WAYLAND_GEOMETRY_SHIM_LIB}"
             ));
         }
         if self.drm_syncobj_errno_shim.is_some() {
@@ -266,6 +298,14 @@ impl HostGraphics {
                 shim.host_dir.display(),
                 GRAPHICS_SHIM_SANDBOX_DIR,
                 DRM_SYNCOBJ_ERRNO_SHIM_LIB
+            ));
+        }
+        if let Some(shim) = &self.gtk3_wayland_geometry_shim {
+            lines.push(format!(
+                "GTK3 Wayland geometry shim: {} -> {}/{}",
+                shim.host_dir.display(),
+                GRAPHICS_SHIM_SANDBOX_DIR,
+                GTK3_WAYLAND_GEOMETRY_SHIM_LIB
             ));
         }
         if let Some(shim) = &self.chromium_zygote_drm_preload {

@@ -55,3 +55,30 @@ fn chromium_zygote_preload_matches_only_zygote_exec() {
         .expect("run Zypak child spawn preload test");
     assert!(run.success());
 }
+
+#[test]
+fn wayland_gtk3_minimum_size_hint_respects_tiled_configures() {
+    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let output_dir = project_root.join("target/graphics-tests");
+    fs::create_dir_all(&output_dir).unwrap();
+    let output = output_dir.join("wayland-gtk3-geometry-test");
+    let compile = Command::new("/compat/linux/usr/bin/gcc")
+        .args(["-O2", "-Wall", "-Wextra", "-Werror"])
+        .arg("-DGTK3_WAYLAND_GEOMETRY_SHIM_TEST")
+        .arg(project_root.join("compatibility_helpers/gtk3-wayland-geometry-shim.c"))
+        .arg(project_root.join("tests/wayland-gtk3-geometry-test.c"))
+        .args(["-ldl", "-o"])
+        .arg(&output)
+        .env(
+            "PATH",
+            "/compat/linux/usr/bin:/compat/linux/bin:/usr/bin:/bin",
+        )
+        .status()
+        .expect("compile Wayland GTK3 geometry test");
+    assert!(compile.success());
+
+    let run = Command::new(&output)
+        .status()
+        .expect("run Wayland GTK3 geometry test");
+    assert!(run.success());
+}
