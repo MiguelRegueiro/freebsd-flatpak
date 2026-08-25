@@ -1,4 +1,5 @@
 pub(crate) mod application_installation;
+mod extra_data;
 pub(crate) mod installation_paths;
 pub(crate) mod startup_recovery;
 
@@ -21,6 +22,7 @@ pub(crate) use crate::sandbox::{resolve_app, FlatpakApp, ResolveAppOptions};
 pub(crate) use application_installation::*;
 pub(crate) use application_records::*;
 pub(crate) use export_records::*;
+pub(crate) use extra_data::apply_extra_data;
 pub(crate) use generation_cleanup::*;
 pub(crate) use installed_sizes::*;
 pub(crate) use record_storage::ensure_layout;

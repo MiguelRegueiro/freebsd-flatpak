@@ -1,4 +1,5 @@
 pub(crate) mod application_entrypoint;
+pub(crate) mod apply_extra;
 mod chroot_backend;
 mod chroot_instance;
 mod file_argument_translation;

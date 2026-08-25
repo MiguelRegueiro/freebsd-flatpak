@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
 pub struct InstalledApp {
@@ -135,6 +136,24 @@ fn checkout_remote_app(
     let installed_size = storage.installed_size(&remote.app_commit)?;
     let runtime_installed_size = storage.installed_size(&remote.runtime_commit)?;
     drop(storage);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let pin_id = format!("install-{nonce:x}-{}", std::process::id());
+    let pin_root = paths.chroots().join(&remote.app_id).join(&pin_id);
+    let pin = super::write_checkout_pin(
+        paths,
+        &remote.app_id,
+        &pin_id,
+        &pin_root,
+        &app_dir,
+        &runtime_dir,
+    )?;
+    let extra_result = super::apply_extra_data(paths, &app_dir, &runtime_dir);
+    let unpin_result = super::remove_run_record(&pin);
+    extra_result?;
+    unpin_result?;
     let (_, extension_timings) =
         ensure_default_gl_extension_timed(paths, &remote.runtime_ref, &runtime_dir)?;
     timings.pull += extension_timings.pull;

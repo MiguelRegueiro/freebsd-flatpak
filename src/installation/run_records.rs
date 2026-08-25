@@ -33,6 +33,28 @@ pub fn write_run_record(
         launcher_pid,
         child_pid,
         None,
+        None,
+        &[],
+    )
+}
+
+pub fn write_checkout_pin(
+    paths: &Installation,
+    app_id: &str,
+    instance_id: &str,
+    root: &Path,
+    app_dir: &Path,
+    runtime_dir: &Path,
+) -> Result<PathBuf> {
+    write_run_record_inner(
+        paths,
+        app_id,
+        instance_id,
+        root,
+        std::process::id(),
+        0,
+        None,
+        Some((app_dir, runtime_dir)),
         &[],
     )
 }
@@ -73,6 +95,7 @@ pub fn write_pinned_run_record_with_extensions(
         launcher_pid,
         child_pid,
         Some(app),
+        None,
         extension_refs,
     )
 }
@@ -86,6 +109,7 @@ fn write_run_record_inner(
     launcher_pid: u32,
     child_pid: u32,
     deployment: Option<&AppRecord>,
+    checkout_paths: Option<(&Path, &Path)>,
     extension_refs: &[String],
 ) -> Result<PathBuf> {
     ensure_layout(paths)?;
@@ -106,6 +130,10 @@ fn write_run_record_inner(
         writeln!(data, "runtime_commit={}", app.runtime_commit)?;
         writeln!(data, "runtime_dir={}", app.runtime_dir.display())?;
         writeln!(data, "command={}", app.command)?;
+    } else if let Some((app_dir, runtime_dir)) = checkout_paths {
+        use std::fmt::Write as _;
+        writeln!(data, "app_dir={}", app_dir.display())?;
+        writeln!(data, "runtime_dir={}", runtime_dir.display())?;
     }
     if !extension_refs.is_empty() {
         use std::fmt::Write as _;
