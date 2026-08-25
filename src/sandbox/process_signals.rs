@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 static SIGNAL_HANDLERS_INSTALLED: AtomicBool = AtomicBool::new(false);
-pub(super) static ACTIVE_CHILD_PID: AtomicI32 = AtomicI32::new(0);
+pub(super) static ACTIVE_PROCESS_GROUP: AtomicI32 = AtomicI32::new(0);
 pub(super) static LAST_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
 pub(super) fn install_signal_handlers() {
@@ -34,10 +34,10 @@ extern "C" fn handle_signal(signal: libc::c_int) {
         return;
     }
 
-    let pid = ACTIVE_CHILD_PID.load(Ordering::SeqCst);
-    if pid > 0 {
+    let process_group = ACTIVE_PROCESS_GROUP.load(Ordering::SeqCst);
+    if process_group > 0 {
         unsafe {
-            libc::kill(pid, signal);
+            libc::kill(-process_group, signal);
         }
     }
 }

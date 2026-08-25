@@ -6,7 +6,8 @@ use super::launch_environment::{
     ensure_metadata_runtime_dirs, launch_env, merge_env, prepend_env_paths,
 };
 use super::mount_operations::owned_mount_teardown_order;
-use super::process_signals::{install_signal_handlers, ACTIVE_CHILD_PID, LAST_SIGNAL};
+use super::process_signals::{install_signal_handlers, ACTIVE_PROCESS_GROUP, LAST_SIGNAL};
+use super::process_supervision::wait_for_sandbox_process_group;
 use super::stale_sandbox_recovery::{
     remove_instance_root, terminate_chroot_processes, unmount_mountpoint,
 };
@@ -21,6 +22,7 @@ use crate::installation as state;
 use crate::installation::installation_paths::Installation;
 use crate::portal_integration::HostPortal;
 use anyhow::{bail, Context, Result};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::Ordering;
@@ -224,22 +226,36 @@ impl ChrootInstance {
         command
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::inherit())
+            .process_group(0);
 
         LAST_SIGNAL.store(0, Ordering::SeqCst);
         let mut child = command.spawn().context("launch app through chroot")?;
-        ACTIVE_CHILD_PID.store(child.id() as i32, Ordering::SeqCst);
-        state::write_pinned_run_record_with_extensions(
-            &self.paths,
-            &self.instance_id,
-            &self.root,
-            std::process::id(),
-            child.id(),
-            &self.deployment,
-            &self.extension_refs,
-        )?;
-        let status = child.wait().context("wait for app process")?;
-        ACTIVE_CHILD_PID.store(0, Ordering::SeqCst);
+        // Launchers may exit after backgrounding the real application. Its
+        // processes inherit this group, so keep the sandbox until they exit.
+        let process_group = child.id() as i32;
+        ACTIVE_PROCESS_GROUP.store(process_group, Ordering::SeqCst);
+        let launch_result: Result<ExitStatus> = (|| {
+            state::write_pinned_run_record_with_extensions(
+                &self.paths,
+                &self.instance_id,
+                &self.root,
+                std::process::id(),
+                child.id(),
+                &self.deployment,
+                &self.extension_refs,
+            )?;
+            let status = child.wait().context("wait for app process")?;
+            wait_for_sandbox_process_group(&self.root, process_group, || {
+                matches!(
+                    LAST_SIGNAL.load(Ordering::SeqCst),
+                    libc::SIGINT | libc::SIGTERM
+                )
+            })?;
+            Ok(status)
+        })();
+        ACTIVE_PROCESS_GROUP.store(0, Ordering::SeqCst);
+        let status = launch_result?;
 
         let signal = LAST_SIGNAL.swap(0, Ordering::SeqCst);
         if signal != 0 {

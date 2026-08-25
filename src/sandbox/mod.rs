@@ -9,6 +9,7 @@ mod launch_application;
 mod launch_environment;
 mod mount_operations;
 mod process_signals;
+mod process_supervision;
 mod sandbox_root;
 mod stale_sandbox_recovery;
 

@@ -1,4 +1,5 @@
 use super::application_entrypoint::sandbox_name;
+use super::process_supervision::process_rooted_in;
 use crate::installation as state;
 use crate::installation::installation_paths::Installation;
 use anyhow::{bail, Context, Result};
@@ -223,30 +224,6 @@ fn mount_holders(mountpoint: &Path) -> Result<Vec<i32>> {
         .filter_map(|line| line.split_whitespace().nth(2))
         .filter_map(|pid| pid.parse::<i32>().ok())
         .collect())
-}
-
-fn process_rooted_in(pid: i32, root: &Path) -> Result<bool> {
-    let output = Command::new("procstat")
-        .arg("-f")
-        .arg(pid.to_string())
-        .output()
-        .with_context(|| format!("inspect process {pid} root"))?;
-    if !output.status.success() {
-        return Ok(false);
-    }
-    let text = String::from_utf8(output.stdout)?;
-    Ok(text.lines().any(|line| {
-        let mut fields = line.split_whitespace();
-        let _pid = fields.next();
-        let _comm = fields.next();
-        let Some(fd) = fields.next() else {
-            return false;
-        };
-        if fd != "root" && fd != "jail" && fd != "cwd" {
-            return false;
-        }
-        fields.last().is_some_and(|path| Path::new(path) == root)
-    }))
 }
 
 pub(super) fn chroot_root_for_mount(chroot_root: &Path, mountpoint: &Path) -> Option<PathBuf> {
