@@ -11,6 +11,7 @@ use crate::host_resources::audio::HostAudio;
 use crate::host_resources::cursor_themes::HostCursorTheme;
 use crate::host_resources::fonts::HostFonts;
 use crate::host_resources::graphics::HostGraphics;
+use crate::host_resources::network::HostNetwork;
 use crate::host_resources::video_acceleration::HostVideo;
 use crate::installation as runtime;
 use crate::installation as state;
@@ -129,6 +130,7 @@ impl ChrootNullfsBackend {
         let mut pending_run = PendingRunRecord::new(&self.paths, app, &instance_id, &root)?;
         let metadata_path = app.app_dir.join("metadata");
         let network_enabled = app_allows_network(&metadata_path)?;
+        let host_network = HostNetwork::prepare(&self.paths, network_enabled)?;
         let host_filesystem = HostFilesystem::from_metadata_file_for_user(
             &metadata_path,
             &user,
@@ -180,6 +182,7 @@ impl ChrootNullfsBackend {
             host_fonts,
             host_portal,
             host_graphics,
+            host_network,
             host_video,
             app_extensions,
             run_record,
@@ -208,8 +211,20 @@ impl ChrootNullfsBackend {
                 true,
             )?;
         }
-        for mount in instance.host_graphics.runtime_mounts() {
+        let graphics_mounts = instance.host_graphics.runtime_mounts();
+        let network_mount = instance.host_network.runtime_mount();
+        for mount in &graphics_mounts {
             instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
+        }
+        if let Some(mount) = network_mount {
+            let target = mount.sandbox_target_relative()?;
+            let already_mounted = graphics_mounts
+                .iter()
+                .filter_map(|graphics| graphics.sandbox_target_relative().ok())
+                .any(|graphics_target| graphics_target == target);
+            if !already_mounted {
+                instance.mount_nullfs(mount.host_path(), target, true)?;
+            }
         }
         for mount in instance.host_video.runtime_mounts() {
             instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;

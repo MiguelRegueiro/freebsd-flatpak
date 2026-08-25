@@ -5,4 +5,5 @@ pub(crate) mod fonts;
 pub(crate) mod graphics;
 mod graphics_shims;
 mod linux_drm_sysfs;
+pub(crate) mod network;
 pub(crate) mod video_acceleration;

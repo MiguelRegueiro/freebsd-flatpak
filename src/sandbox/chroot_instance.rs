@@ -16,6 +16,7 @@ use crate::host_resources::audio::HostAudio;
 use crate::host_resources::cursor_themes::HostCursorTheme;
 use crate::host_resources::fonts::HostFonts;
 use crate::host_resources::graphics::HostGraphics;
+use crate::host_resources::network::HostNetwork;
 use crate::host_resources::video_acceleration::HostVideo;
 use crate::installation as runtime;
 use crate::installation as state;
@@ -41,6 +42,7 @@ pub(super) struct ChrootInstance {
     pub(super) host_fonts: HostFonts,
     pub(super) host_portal: HostPortal,
     pub(super) host_graphics: HostGraphics,
+    pub(super) host_network: HostNetwork,
     pub(super) host_video: HostVideo,
     pub(super) app_extensions: Vec<runtime::AppExtension>,
     pub(super) owned_mounts: Vec<OwnedMount>,
@@ -71,6 +73,7 @@ impl ChrootInstance {
         host_fonts: HostFonts,
         host_portal: HostPortal,
         host_graphics: HostGraphics,
+        host_network: HostNetwork,
         host_video: HostVideo,
         app_extensions: Vec<runtime::AppExtension>,
         run_record: PathBuf,
@@ -90,6 +93,7 @@ impl ChrootInstance {
             host_fonts,
             host_portal,
             host_graphics,
+            host_network,
             host_video,
             app_extensions,
             owned_mounts: Vec::new(),
@@ -125,6 +129,12 @@ impl ChrootInstance {
             &mut env,
             self.host_graphics.ld_preload_paths(),
             self.host_graphics.zypak_ld_preload_paths(),
+        );
+        prepend_env_paths(&mut env, "LD_PRELOAD", self.host_network.preload_paths());
+        prepend_env_paths(
+            &mut env,
+            "ZYPAK_LD_PRELOAD",
+            self.host_network.preload_paths(),
         );
         prepend_env_paths(
             &mut env,
