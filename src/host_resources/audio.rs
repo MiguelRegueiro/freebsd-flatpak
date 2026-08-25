@@ -4,6 +4,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+const UNAVAILABLE_PIPEWIRE_REMOTE: &str = "freebsd-flatpak-no-audio";
+
 #[derive(Debug, Clone)]
 pub struct HostAudio {
     sockets: Vec<String>,
@@ -189,7 +191,14 @@ impl HostAudio {
                 ));
             }
         }
-        if let Some(pipewire) = &self.pipewire {
+        if self.pulse.is_some() {
+            // The native FreeBSD PipeWire daemon is used by desktop portals, but without an
+            // audio device it must not win backend auto-detection over the working Pulse bridge.
+            env.push((
+                "PIPEWIRE_REMOTE".to_string(),
+                UNAVAILABLE_PIPEWIRE_REMOTE.to_string(),
+            ));
+        } else if let Some(pipewire) = &self.pipewire {
             env.push(("PIPEWIRE_REMOTE".to_string(), pipewire.remote.clone()));
         }
         env
