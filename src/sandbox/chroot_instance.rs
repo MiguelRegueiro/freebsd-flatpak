@@ -121,6 +121,7 @@ impl ChrootInstance {
         env.extend(self.host_filesystem.user_dir_env());
         env.extend(self.host_audio.env());
         env.extend(self.host_cursor.env());
+        prepend_env_paths(&mut env, "XDG_CONFIG_DIRS", self.host_cursor.config_dirs());
         env.extend(self.host_portal.env());
         let metadata_env = app_metadata_env(app, &env)?;
         merge_env(&mut env, metadata_env);

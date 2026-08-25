@@ -6,6 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 const SANDBOX_ICON_ROOT: &str = "/run/host/share/icons";
+const SANDBOX_CURSOR_CONFIG_ROOT: &str = "/run/host/freebsd-flatpak-cursor-config";
 
 #[derive(Debug, Clone)]
 pub struct HostCursorTheme {
@@ -107,6 +108,47 @@ impl HostCursorTheme {
         }
         env
     }
+
+    pub fn prepare(&self, chroot_root: &Path) -> Result<()> {
+        let Some(settings) = self.gtk_cursor_settings() else {
+            return Ok(());
+        };
+
+        let config_root = chroot_root.join(relative_sandbox_path(Path::new(
+            SANDBOX_CURSOR_CONFIG_ROOT,
+        ))?);
+        for version in ["gtk-3.0", "gtk-4.0"] {
+            let directory = config_root.join(version);
+            fs::create_dir_all(&directory)
+                .with_context(|| format!("create {}", directory.display()))?;
+            let path = directory.join("settings.ini");
+            fs::write(&path, &settings).with_context(|| format!("write {}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    pub fn config_dirs(&self) -> Vec<String> {
+        self.gtk_cursor_settings()
+            .map(|_| vec![SANDBOX_CURSOR_CONFIG_ROOT.to_string()])
+            .unwrap_or_default()
+    }
+
+    fn gtk_cursor_settings(&self) -> Option<String> {
+        let theme = self
+            .xcursor_theme
+            .as_deref()
+            .filter(|theme| valid_theme_name(theme))?;
+        let mut settings = format!("[Settings]\ngtk-cursor-theme-name={theme}\n");
+        if let Some(size) = self
+            .xcursor_size
+            .as_deref()
+            .and_then(|size| size.parse::<u32>().ok())
+            .filter(|size| *size > 0)
+        {
+            settings.push_str(&format!("gtk-cursor-theme-size={size}\n"));
+        }
+        Some(settings)
+    }
 }
 
 fn host_icon_theme(bus_address: Option<&str>) -> Option<String> {
@@ -190,6 +232,12 @@ impl CursorThemeMount {
                 )
             })
     }
+}
+
+fn relative_sandbox_path(path: &Path) -> Result<PathBuf> {
+    path.strip_prefix("/")
+        .map(Path::to_path_buf)
+        .with_context(|| format!("cursor sandbox path is not absolute: {}", path.display()))
 }
 
 fn host_var(name: &str, desktop_env: &BTreeMap<String, String>) -> Option<String> {

@@ -59,3 +59,68 @@ fn mounts_non_runtime_icon_theme_and_uses_runtime_fallbacks() {
     );
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn prepares_standard_gtk_cursor_settings_for_x11_toolkits() {
+    let root = std::env::temp_dir().join(format!(
+        "freebsd-flatpak-cursor-settings-test-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let cursor = HostCursorTheme {
+        icon_theme: None,
+        xcursor_theme: Some("Bibata-Modern-Classic".to_string()),
+        xcursor_size: Some("24".to_string()),
+        hyprcursor_theme: None,
+        hyprcursor_size: None,
+        mounts: Vec::new(),
+        warnings: Vec::new(),
+    };
+
+    cursor.prepare(&root).unwrap();
+
+    let expected =
+        "[Settings]\ngtk-cursor-theme-name=Bibata-Modern-Classic\ngtk-cursor-theme-size=24\n";
+    for version in ["gtk-3.0", "gtk-4.0"] {
+        assert_eq!(
+            fs::read_to_string(
+                root.join("run/host/freebsd-flatpak-cursor-config")
+                    .join(version)
+                    .join("settings.ini")
+            )
+            .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        cursor.config_dirs(),
+        vec![SANDBOX_CURSOR_CONFIG_ROOT.to_string()]
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn unsafe_cursor_theme_does_not_create_toolkit_settings() {
+    let root = std::env::temp_dir().join(format!(
+        "freebsd-flatpak-unsafe-cursor-settings-test-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let cursor = HostCursorTheme {
+        icon_theme: None,
+        xcursor_theme: Some("../escape".to_string()),
+        xcursor_size: Some("24".to_string()),
+        hyprcursor_theme: None,
+        hyprcursor_size: None,
+        mounts: Vec::new(),
+        warnings: Vec::new(),
+    };
+
+    cursor.prepare(&root).unwrap();
+
+    assert!(cursor.config_dirs().is_empty());
+    assert!(!root.join("run/host/freebsd-flatpak-cursor-config").exists());
+    let _ = fs::remove_dir_all(root);
+}

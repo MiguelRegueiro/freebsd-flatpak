@@ -167,6 +167,7 @@ impl ChrootNullfsBackend {
         )?;
         write_flatpak_info(&root, app, &instance_id)?;
         host_audio.prepare(&root)?;
+        host_cursor.prepare(&root)?;
         host_fonts.prepare(&root)?;
         let (run_record, deployment, extension_refs) = pending_run.commit();
         let mut instance = ChrootInstance::new(
