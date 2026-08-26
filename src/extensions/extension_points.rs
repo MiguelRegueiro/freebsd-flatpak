@@ -7,18 +7,22 @@ use std::path::Path;
 
 pub fn required_extension_refs(
     app_dir: &Path,
+    app_branch: &str,
     runtime_ref: &str,
     runtime_dir: &Path,
     installed_extension_refs: &BTreeSet<String>,
 ) -> Result<BTreeSet<String>> {
     let parts = split_runtime_ref(runtime_ref)?;
     let mut refs = BTreeSet::new();
-    for metadata_path in [app_dir.join("metadata"), runtime_dir.join("metadata")] {
+    for (metadata_path, default_branch) in [
+        (app_dir.join("metadata"), app_branch),
+        (runtime_dir.join("metadata"), parts.branch.as_str()),
+    ] {
         let Ok(metadata) = fs::read_to_string(&metadata_path) else {
             continue;
         };
         for section in sections_with_prefix(&metadata, "Extension ") {
-            let point = ExtensionPoint::from_metadata(&metadata, &section, &parts);
+            let point = ExtensionPoint::from_metadata(&metadata, &section, &parts, default_branch);
             refs.extend(
                 installed_extension_refs
                     .iter()
@@ -44,7 +48,12 @@ pub(super) struct ExtensionPoint {
 }
 
 impl ExtensionPoint {
-    pub(super) fn from_metadata(metadata: &str, section: &str, runtime: &RuntimeRefParts) -> Self {
+    pub(super) fn from_metadata(
+        metadata: &str,
+        section: &str,
+        runtime: &RuntimeRefParts,
+        default_branch: &str,
+    ) -> Self {
         let preferred_version = value(metadata, section, "version")
             .or_else(|| {
                 value(metadata, section, "versions").and_then(|versions| {
@@ -55,7 +64,7 @@ impl ExtensionPoint {
                         .map(ToOwned::to_owned)
                 })
             })
-            .unwrap_or_else(|| runtime.branch.clone());
+            .unwrap_or_else(|| default_branch.to_string());
         let versions = value(metadata, section, "version")
             .into_iter()
             .chain(
@@ -72,7 +81,7 @@ impl ExtensionPoint {
             )
             .collect::<BTreeSet<_>>();
         let versions = if versions.is_empty() {
-            BTreeSet::from([runtime.branch.clone()])
+            BTreeSet::from([default_branch.to_string()])
         } else {
             versions
         };

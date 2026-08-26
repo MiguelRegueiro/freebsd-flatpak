@@ -9,6 +9,7 @@ use super::sandbox_root::{
     app_allows_network, prepare_root, write_flatpak_info, FlatpakInfoExtension,
 };
 use crate::desktop_integration::DesktopSession;
+use crate::flatpak_metadata::value;
 use crate::host_resources::audio::HostAudio;
 use crate::host_resources::cursor_themes::HostCursorTheme;
 use crate::host_resources::fonts::HostFonts;
@@ -133,6 +134,7 @@ impl ChrootNullfsBackend {
         let mut pending_run = PendingRunRecord::new(&self.paths, app, &instance_id, &root)?;
         let metadata_path = app.app_dir.join("metadata");
         let network_enabled = app_allows_network(&metadata_path)?;
+        let x11_enabled = app_requests_socket(&metadata_path, "x11")?;
         let host_network = HostNetwork::prepare(&self.paths, network_enabled)?;
         let host_filesystem = HostFilesystem::from_metadata_file_for_user(
             &metadata_path,
@@ -147,7 +149,8 @@ impl ChrootNullfsBackend {
         let host_portal = HostPortal::prepare(&self.paths, app, &instance_id, desktop, uid, &root)?;
         let host_graphics = HostGraphics::prepare(&self.paths, app, &instance_id)?;
         let host_video = HostVideo::prepare(&self.paths, app)?;
-        let app_extensions = runtime::ensure_app_extensions(&self.paths, app)?;
+        let app_extensions =
+            runtime::ensure_app_extensions(&self.paths, app, &pending_run.deployment.branch)?;
         let mut extension_refs = host_graphics
             .extension_refs()
             .chain(host_video.extension_refs())
@@ -281,6 +284,12 @@ impl ChrootNullfsBackend {
             instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
         }
         instance.mount_nullfs(&desktop.xdg_runtime_dir, format!("run/user/{uid}"), false)?;
+        if x11_enabled && desktop.display.is_some() {
+            let x11_socket_dir = Path::new("/tmp/.X11-unix");
+            if x11_socket_dir.is_dir() {
+                instance.mount_nullfs(x11_socket_dir, "tmp/.X11-unix", true)?;
+            }
+        }
         if let Some(doc_dir) = instance.host_portal.doc_dir().map(Path::to_path_buf) {
             instance.mount_nullfs(&doc_dir, format!("run/user/{uid}/doc"), true)?;
             instance.host_portal.attach_sandbox()?;
@@ -296,6 +305,14 @@ impl ChrootNullfsBackend {
 
         Ok(instance)
     }
+}
+
+fn app_requests_socket(metadata_path: &Path, socket: &str) -> Result<bool> {
+    let metadata = fs::read_to_string(metadata_path)
+        .with_context(|| format!("read Flatpak metadata {}", metadata_path.display()))?;
+    Ok(value(&metadata, "Context", "sockets")
+        .map(|sockets| sockets.split(';').any(|entry| entry == socket))
+        .unwrap_or(false))
 }
 
 fn chroot_relative(path: &Path) -> Result<PathBuf> {

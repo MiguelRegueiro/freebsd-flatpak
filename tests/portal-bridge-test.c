@@ -435,6 +435,74 @@ static void test_directory_grant_persists_and_translates(void) {
   g_free(root);
 }
 
+static void test_missing_persistent_grant_is_pruned_independently(void) {
+  GError *error = NULL;
+  char *root = g_dir_make_tmp("freebsd-flatpak-doc-test-XXXXXX", &error);
+  g_assert_no_error(error);
+  char *valid_path = g_build_filename(root, "valid.txt", NULL);
+  char *missing_path = g_build_filename(root, "deleted.txt", NULL);
+  char *store = g_build_filename(root, "grants.ini", NULL);
+  g_assert_true(g_file_set_contents(valid_path, "valid", -1, &error));
+  g_assert_no_error(error);
+  g_assert_true(g_file_set_contents(missing_path, "deleted", -1, &error));
+  g_assert_no_error(error);
+
+  BridgeState first;
+  init_document_test_state(&first, root, store);
+  char **permissions = read_permissions();
+  DocumentGrant *valid = NULL;
+  DocumentGrant *missing = NULL;
+  g_assert_true(create_document_grant_from_path(
+      &first, valid_path, first.app_id, permissions, false, true, false,
+      &valid, &error));
+  g_assert_no_error(error);
+  g_assert_true(register_document_grant(&first, valid, &error));
+  g_assert_no_error(error);
+  g_assert_true(create_document_grant_from_path(
+      &first, missing_path, first.app_id, permissions, false, true, false,
+      &missing, &error));
+  g_assert_no_error(error);
+  g_assert_true(register_document_grant(&first, missing, &error));
+  g_assert_no_error(error);
+  char *valid_id = g_strdup(valid->doc_id);
+  char *missing_id = g_strdup(missing->doc_id);
+  g_strfreev(permissions);
+  cleanup_document_test_state(&first);
+  g_free(first.documents.doc_dir);
+  g_assert_cmpint(g_remove(missing_path), ==, 0);
+
+  BridgeState second;
+  init_document_test_state(&second, root, store);
+  g_assert_true(load_persistent_document_grants(&second, &error));
+  g_assert_no_error(error);
+  g_assert_cmpuint(second.documents.grants->len, ==, 1);
+  g_assert_nonnull(find_grant(&second, valid_id));
+  g_assert_null(find_grant(&second, missing_id));
+
+  GKeyFile *saved = g_key_file_new();
+  g_assert_true(
+      g_key_file_load_from_file(saved, store, G_KEY_FILE_NONE, &error));
+  g_assert_no_error(error);
+  g_assert_true(g_key_file_has_group(saved, valid_id));
+  g_assert_false(g_key_file_has_group(saved, missing_id));
+  g_key_file_unref(saved);
+
+  cleanup_document_test_state(&second);
+  g_free(second.documents.doc_dir);
+  g_assert_cmpint(g_remove(store), ==, 0);
+  g_assert_cmpint(g_remove(valid_path), ==, 0);
+  char *doc_dir = g_build_filename(root, "doc", NULL);
+  g_assert_cmpint(g_rmdir(doc_dir), ==, 0);
+  g_assert_cmpint(g_rmdir(root), ==, 0);
+  g_free(doc_dir);
+  g_free(missing_id);
+  g_free(valid_id);
+  g_free(store);
+  g_free(missing_path);
+  g_free(valid_path);
+  g_free(root);
+}
+
 static void test_ungrantable_filechooser_uri_is_not_leaked(void) {
   GError *error = NULL;
   char *root = g_dir_make_tmp("freebsd-flatpak-uri-test-XXXXXX", &error);
@@ -683,6 +751,7 @@ int main(void) {
   test_unix_fd_copy();
   test_grant_mount_order_is_direct_and_equivalent();
   test_directory_grant_persists_and_translates();
+  test_missing_persistent_grant_is_pruned_independently();
   test_ungrantable_filechooser_uri_is_not_leaked();
   test_screencast_source_tracking();
   test_pipewire_client_session_ownership();

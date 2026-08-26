@@ -8,7 +8,11 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
 
-pub fn ensure_app_extensions(paths: &Installation, app: &FlatpakApp) -> Result<Vec<AppExtension>> {
+pub fn ensure_app_extensions(
+    paths: &Installation,
+    app: &FlatpakApp,
+    app_branch: &str,
+) -> Result<Vec<AppExtension>> {
     let metadata_path = app.app_dir.join("metadata");
     let metadata = fs::read_to_string(&metadata_path)
         .with_context(|| format!("read app metadata {}", metadata_path.display()))?;
@@ -17,7 +21,7 @@ pub fn ensure_app_extensions(paths: &Installation, app: &FlatpakApp) -> Result<V
     let mut extensions = Vec::new();
 
     for section in sections_with_prefix(&metadata, "Extension ") {
-        let point = ExtensionPoint::from_metadata(&metadata, &section, &runtime_parts);
+        let point = ExtensionPoint::from_metadata(&metadata, &section, &runtime_parts, app_branch);
         let Some(directory) = point.directory.as_deref() else {
             continue;
         };

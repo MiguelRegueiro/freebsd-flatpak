@@ -128,18 +128,66 @@ pub(super) fn sandbox_bus_address(
 }
 
 pub(super) fn wait_for_portal_proxy(bus_address: &str, mountpoint: &str) -> Result<()> {
+    let mut readiness = bridge_readiness(bus_address, mountpoint);
     for _ in 0..40 {
-        if document_portal_ready(bus_address, mountpoint)
-            && desktop_portal_ready(bus_address)
-            && status_notifier_ready(bus_address)
-        {
+        if readiness.all_ready() {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
+        readiness = bridge_readiness(bus_address, mountpoint);
     }
-    bail!(
-        "compatibility bridges did not publish FileChooser, ScreenCast, StatusNotifierWatcher, and document mountpoint {mountpoint}"
-    );
+    bail!(readiness.failure_message(mountpoint));
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct BridgeReadiness {
+    file_chooser: bool,
+    screen_cast: bool,
+    status_notifier: bool,
+    document_portal: bool,
+}
+
+impl BridgeReadiness {
+    fn all_ready(&self) -> bool {
+        self.file_chooser && self.screen_cast && self.status_notifier && self.document_portal
+    }
+
+    fn failure_message(&self, mountpoint: &str) -> String {
+        let mut missing = Vec::new();
+        if !self.file_chooser {
+            missing.push("FileChooser".to_string());
+        }
+        if !self.screen_cast {
+            missing.push("ScreenCast".to_string());
+        }
+        if !self.status_notifier {
+            missing.push("StatusNotifierWatcher".to_string());
+        }
+        if !self.document_portal {
+            missing.push(format!("document mountpoint {mountpoint}"));
+        }
+        format!(
+            "compatibility bridges did not publish {}",
+            missing.join(", ")
+        )
+    }
+}
+
+fn bridge_readiness(bus_address: &str, mountpoint: &str) -> BridgeReadiness {
+    BridgeReadiness {
+        file_chooser: portal_property_ready(
+            bus_address,
+            "org.freedesktop.portal.FileChooser",
+            "version",
+        ),
+        screen_cast: portal_property_ready(
+            bus_address,
+            "org.freedesktop.portal.ScreenCast",
+            "AvailableSourceTypes",
+        ),
+        status_notifier: status_notifier_ready(bus_address),
+        document_portal: document_portal_ready(bus_address, mountpoint),
+    }
 }
 
 fn status_notifier_ready(bus_address: &str) -> bool {

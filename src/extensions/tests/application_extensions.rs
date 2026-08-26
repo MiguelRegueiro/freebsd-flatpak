@@ -47,7 +47,7 @@ fn installed_app_extensions_use_metadata_directories_and_subdirectories() {
         args: Vec::new(),
     };
 
-    let extensions = ensure_app_extensions(&paths, &app).unwrap();
+    let extensions = ensure_app_extensions(&paths, &app, "stable").unwrap();
     assert_eq!(extensions.len(), 2);
     assert!(extensions.iter().any(|extension| {
         extension.app_mount_relative == Path::new("lib/i386-linux-gnu")
@@ -89,6 +89,8 @@ fn missing_no_autodownload_extension_is_not_acquired() {
         command: "app".to_string(),
         args: Vec::new(),
     };
-    assert!(ensure_app_extensions(&paths, &app).unwrap().is_empty());
+    assert!(ensure_app_extensions(&paths, &app, "stable")
+        .unwrap()
+        .is_empty());
     let _ = fs::remove_dir_all(root);
 }

@@ -69,3 +69,32 @@ fn two_connections_on_shared_bus_observe_one_name_owner() {
     terminate_child(&mut child);
     let _ = fs::remove_dir_all(&bus_dir);
 }
+
+#[test]
+fn readiness_failure_only_names_missing_components() {
+    let readiness = BridgeReadiness {
+        file_chooser: false,
+        screen_cast: false,
+        status_notifier: true,
+        document_portal: false,
+    };
+
+    assert_eq!(
+        readiness.failure_message("/run/user/1001/doc"),
+        "compatibility bridges did not publish FileChooser, ScreenCast, document mountpoint /run/user/1001/doc"
+    );
+}
+
+#[test]
+fn readiness_requires_every_component() {
+    let mut readiness = BridgeReadiness {
+        file_chooser: true,
+        screen_cast: true,
+        status_notifier: true,
+        document_portal: true,
+    };
+    assert!(readiness.all_ready());
+
+    readiness.status_notifier = false;
+    assert!(!readiness.all_ready());
+}
