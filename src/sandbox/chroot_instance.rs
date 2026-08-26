@@ -136,6 +136,11 @@ impl ChrootInstance {
             self.host_graphics.ld_preload_paths(),
             self.host_graphics.zypak_ld_preload_paths(),
         );
+        prepend_env_paths(
+            &mut env,
+            "LD_PRELOAD",
+            vec!["/run/host/freebsd-flatpak/libsignalfd-compat.so".to_string()],
+        );
         prepend_env_paths(&mut env, "LD_PRELOAD", self.host_network.preload_paths());
         prepend_env_paths(
             &mut env,
@@ -154,6 +159,8 @@ impl ChrootInstance {
         );
         merge_env(&mut env, self.host_video.env());
         ensure_metadata_runtime_dirs(&env, &desktop.xdg_runtime_dir, self.uid, &app.app_id)?;
+        self.host_portal
+            .start_spawn_agent(self.uid, self.gid, &self.supplementary_gids, &env)?;
         let translated_args = self.host_filesystem.translate_args(&app.args)?;
         let app_args = launch_args(app, translated_args)?;
 

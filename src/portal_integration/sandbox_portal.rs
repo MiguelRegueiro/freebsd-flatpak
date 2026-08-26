@@ -1,6 +1,6 @@
 use super::portal_scope::{
     app_scope_name, ensure_bridge_helpers, lock_portal_scope, other_active_app_instances,
-    portal_control, shared_portal_dir, stop_shared_portal,
+    portal_control, portal_control_args, shared_portal_dir, stop_shared_portal,
 };
 use super::private_session_bus::{
     detach_shared_process, private_bus_config, sandbox_bus_address, shared_portal_ready,
@@ -9,16 +9,21 @@ use super::private_session_bus::{
 use crate::desktop_integration::DesktopSession;
 use crate::installation::installation_paths::Installation;
 use crate::installation::FlatpakApp;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Child;
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 #[derive(Debug)]
 pub struct HostPortal {
     proxy: Option<PortalProxy>,
     mode: PortalMode,
     warnings: Vec<String>,
+    spawn_agent: Option<Child>,
 }
 
 #[derive(Debug)]
@@ -29,6 +34,7 @@ pub(super) struct PortalProxy {
     pub(super) shared_dir: PathBuf,
     pub(super) doc_dir: PathBuf,
     pub(super) sandbox_doc_dir: PathBuf,
+    pub(super) sandbox_root: PathBuf,
     pub(super) private_bus_address: String,
     pub(super) sandbox_bus_address: String,
 }
@@ -56,6 +62,7 @@ impl HostPortal {
                 proxy: None,
                 mode: PortalMode::Disabled,
                 warnings,
+                spawn_agent: None,
             });
         };
 
@@ -180,11 +187,13 @@ impl HostPortal {
                 shared_dir,
                 doc_dir,
                 sandbox_doc_dir,
+                sandbox_root: sandbox_root.to_path_buf(),
                 private_bus_address: host_private_bus_address,
                 sandbox_bus_address,
             }),
             mode: PortalMode::PrivateProxy,
             warnings,
+            spawn_agent: None,
         })
     }
 
@@ -208,6 +217,76 @@ impl HostPortal {
             return Ok(());
         };
         portal_control(proxy, "AddSandbox")
+    }
+
+    pub fn start_spawn_agent(
+        &mut self,
+        uid: u32,
+        gid: u32,
+        supplementary_gids: &[u32],
+        env: &[(String, String)],
+    ) -> Result<()> {
+        let Some(proxy) = self.proxy.as_ref() else {
+            return Ok(());
+        };
+        let suffix = proxy
+            .instance_id
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect::<String>();
+        let agent_name = format!("org.freebsd.Flatpak.SpawnAgent.i_{suffix}");
+        let mut command = Command::new("doas");
+        command
+            .arg("chroot")
+            .arg("-u")
+            .arg(uid.to_string())
+            .arg("-g")
+            .arg(gid.to_string());
+        if !supplementary_gids.is_empty() {
+            command.arg("-G").arg(
+                supplementary_gids
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        }
+        command
+            .arg(&proxy.sandbox_root)
+            .arg("/usr/bin/env")
+            .arg("-i");
+        for (key, value) in env {
+            command.arg(format!("{key}={value}"));
+        }
+        command
+            .arg("/run/host/freebsd-flatpak/sandbox-spawn-agent-linux")
+            .arg(&agent_name)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .process_group(0);
+        let mut child = command.spawn().context("start sandbox spawn agent")?;
+        for _ in 0..40 {
+            if bus_name_has_owner(&proxy.private_bus_address, &agent_name) {
+                let result = portal_control_args(
+                    proxy,
+                    "AddSpawnAgent",
+                    &[proxy.sandbox_root.display().to_string(), agent_name.clone()],
+                );
+                if let Err(error) = result {
+                    terminate_child(&mut child);
+                    return Err(error);
+                }
+                self.spawn_agent = Some(child);
+                return Ok(());
+            }
+            if child.try_wait()?.is_some() {
+                anyhow::bail!("sandbox spawn agent exited before acquiring its bus name");
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        terminate_child(&mut child);
+        anyhow::bail!("sandbox spawn agent did not acquire {agent_name}")
     }
 
     pub fn describe(&self) -> Vec<String> {
@@ -243,7 +322,24 @@ impl HostPortal {
             return Ok(());
         };
 
-        portal_control(proxy, "RemoveSandbox")?;
+        let mut control_errors = Vec::new();
+        if self.spawn_agent.is_some() {
+            if let Err(error) = portal_control_args(
+                proxy,
+                "RemoveSpawnAgent",
+                &[proxy.sandbox_root.display().to_string()],
+            ) {
+                control_errors.push(format!("{error:#}"));
+            }
+        }
+        if let Some(agent) = self.spawn_agent.as_mut() {
+            terminate_child(agent);
+        }
+        self.spawn_agent = None;
+        if let Err(error) = portal_control(proxy, "RemoveSandbox") {
+            control_errors.push(format!("{error:#}"));
+        }
+        let mut stopped_shared_portal = false;
         if !other_active_app_instances(&proxy.paths, &proxy.app_id, &proxy.instance_id)? {
             let app_scope = app_scope_name(&proxy.app_id);
             let lock_path = proxy
@@ -254,9 +350,32 @@ impl HostPortal {
             let _lock = lock_portal_scope(&lock_path)?;
             if !other_active_app_instances(&proxy.paths, &proxy.app_id, &proxy.instance_id)? {
                 stop_shared_portal(&proxy.shared_dir)?;
+                stopped_shared_portal = true;
             }
+        }
+        if !stopped_shared_portal && !control_errors.is_empty() {
+            bail!("{}", control_errors.join("\n"));
         }
         self.proxy = None;
         Ok(())
     }
+}
+
+fn bus_name_has_owner(bus_address: &str, name: &str) -> bool {
+    let output = Command::new("gdbus")
+        .args([
+            "call",
+            "--address",
+            bus_address,
+            "--dest",
+            "org.freedesktop.DBus",
+            "--object-path",
+            "/org/freedesktop/DBus",
+            "--method",
+            "org.freedesktop.DBus.NameHasOwner",
+            name,
+        ])
+        .output();
+    matches!(output, Ok(output) if output.status.success()
+        && String::from_utf8_lossy(&output.stdout).contains("true"))
 }

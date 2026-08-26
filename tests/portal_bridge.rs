@@ -40,6 +40,7 @@ fn compatibility_bridge_contract() {
             "compatibility_helpers/portal_bridge/portal_request.c",
             "compatibility_helpers/portal_bridge/sandbox_document_registration.c",
             "compatibility_helpers/portal_bridge/screencast_portal.c",
+            "compatibility_helpers/portal_bridge/spawn_portal.c",
             "compatibility_helpers/status_notifier_bridge/dbusmenu_proxy.c",
             "compatibility_helpers/status_notifier_bridge/icon_resolver.c",
             "compatibility_helpers/status_notifier_bridge/status_notifier_item_proxy.c",

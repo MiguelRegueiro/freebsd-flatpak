@@ -12,6 +12,7 @@ pub(super) fn shared_portal_ready(bus_address: &str, mountpoint: &str) -> bool {
         .is_some_and(|path| Path::new(path).exists())
         && document_portal_ready(bus_address, mountpoint)
         && desktop_portal_ready(bus_address)
+        && flatpak_spawn_portal_ready(bus_address)
         && status_notifier_ready(bus_address)
 }
 
@@ -145,11 +146,16 @@ struct BridgeReadiness {
     screen_cast: bool,
     status_notifier: bool,
     document_portal: bool,
+    flatpak_spawn_portal: bool,
 }
 
 impl BridgeReadiness {
     fn all_ready(&self) -> bool {
-        self.file_chooser && self.screen_cast && self.status_notifier && self.document_portal
+        self.file_chooser
+            && self.screen_cast
+            && self.status_notifier
+            && self.document_portal
+            && self.flatpak_spawn_portal
     }
 
     fn failure_message(&self, mountpoint: &str) -> String {
@@ -165,6 +171,9 @@ impl BridgeReadiness {
         }
         if !self.document_portal {
             missing.push(format!("document mountpoint {mountpoint}"));
+        }
+        if !self.flatpak_spawn_portal {
+            missing.push("Flatpak spawn portal".to_string());
         }
         format!(
             "compatibility bridges did not publish {}",
@@ -187,7 +196,30 @@ fn bridge_readiness(bus_address: &str, mountpoint: &str) -> BridgeReadiness {
         ),
         status_notifier: status_notifier_ready(bus_address),
         document_portal: document_portal_ready(bus_address, mountpoint),
+        flatpak_spawn_portal: flatpak_spawn_portal_ready(bus_address),
     }
+}
+
+fn flatpak_spawn_portal_ready(bus_address: &str) -> bool {
+    let output = Command::new("gdbus")
+        .arg("call")
+        .arg("--session")
+        .arg("--dest")
+        .arg("org.freedesktop.portal.Flatpak")
+        .arg("--object-path")
+        .arg("/org/freedesktop/portal/Flatpak")
+        .arg("--method")
+        .arg("org.freedesktop.DBus.Properties.Get")
+        .arg("org.freedesktop.portal.Flatpak")
+        .arg("version")
+        .env("DBUS_SESSION_BUS_ADDRESS", bus_address)
+        .output();
+    // The bridge deliberately rejects host-side readiness callers at the
+    // property authorization layer. AccessDenied proves that the correctly
+    // named service, object and property handler are all ready.
+    matches!(output, Ok(output) if output.status.success()
+        || String::from_utf8_lossy(&output.stderr)
+            .contains("org.freedesktop.DBus.Error.AccessDenied"))
 }
 
 fn status_notifier_ready(bus_address: &str) -> bool {

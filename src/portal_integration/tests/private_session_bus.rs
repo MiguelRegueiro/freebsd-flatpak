@@ -77,11 +77,12 @@ fn readiness_failure_only_names_missing_components() {
         screen_cast: false,
         status_notifier: true,
         document_portal: false,
+        flatpak_spawn_portal: false,
     };
 
     assert_eq!(
         readiness.failure_message("/run/user/1001/doc"),
-        "compatibility bridges did not publish FileChooser, ScreenCast, document mountpoint /run/user/1001/doc"
+        "compatibility bridges did not publish FileChooser, ScreenCast, document mountpoint /run/user/1001/doc, Flatpak spawn portal"
     );
 }
 
@@ -92,6 +93,7 @@ fn readiness_requires_every_component() {
         screen_cast: true,
         status_notifier: true,
         document_portal: true,
+        flatpak_spawn_portal: true,
     };
     assert!(readiness.all_ready());
 

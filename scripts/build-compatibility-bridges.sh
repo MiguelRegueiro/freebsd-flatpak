@@ -33,6 +33,7 @@ cc -O2 -Wall -Wextra \
     compatibility_helpers/portal_bridge/portal_request.c \
     compatibility_helpers/portal_bridge/sandbox_document_registration.c \
     compatibility_helpers/portal_bridge/screencast_portal.c \
+    compatibility_helpers/portal_bridge/spawn_portal.c \
     -o "$OUTPUT_DIR/portal-bridge" \
     @"$PORTAL_RESPONSE"
 

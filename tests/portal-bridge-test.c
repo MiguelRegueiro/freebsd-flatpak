@@ -9,6 +9,7 @@
 #include "../compatibility_helpers/portal_bridge/portal_request.h"
 #include "../compatibility_helpers/portal_bridge/sandbox_document_registration.h"
 #include "../compatibility_helpers/portal_bridge/screencast_portal.h"
+#include "../compatibility_helpers/portal_bridge/spawn_portal.h"
 #include "../compatibility_helpers/status_notifier_bridge/status_notifier_watcher.h"
 #include "../compatibility_helpers/status_notifier_bridge/icon_resolver.h"
 #include <gdk-pixbuf/gdk-pixbuf.h>
@@ -86,7 +87,37 @@ static void test_introspection(void) {
       g_dbus_interface_info_lookup_method(control_interface, "AddSandbox"));
   g_assert_nonnull(
       g_dbus_interface_info_lookup_method(control_interface, "RemoveSandbox"));
+  g_assert_nonnull(g_dbus_interface_info_lookup_method(control_interface,
+                                                        "AddSpawnAgent"));
+  g_assert_nonnull(g_dbus_interface_info_lookup_method(control_interface,
+                                                        "RemoveSpawnAgent"));
   g_dbus_node_info_unref(control);
+
+  GDBusNodeInfo *flatpak =
+      g_dbus_node_info_new_for_xml(FLATPAK_PORTAL_XML, &error);
+  g_assert_no_error(error);
+  g_assert_nonnull(flatpak);
+  GDBusInterfaceInfo *flatpak_interface = g_dbus_node_info_lookup_interface(
+      flatpak, "org.freedesktop.portal.Flatpak");
+  g_assert_nonnull(flatpak_interface);
+  GDBusMethodInfo *spawn =
+      g_dbus_interface_info_lookup_method(flatpak_interface, "Spawn");
+  g_assert_nonnull(spawn);
+  g_assert_cmpstr(spawn->in_args[0]->signature, ==, "ay");
+  g_assert_cmpstr(spawn->in_args[1]->signature, ==, "aay");
+  g_assert_cmpstr(spawn->in_args[2]->signature, ==, "a{uh}");
+  g_assert_cmpstr(spawn->in_args[3]->signature, ==, "a{ss}");
+  g_assert_cmpstr(spawn->in_args[4]->signature, ==, "u");
+  g_assert_cmpstr(spawn->in_args[5]->signature, ==, "a{sv}");
+  g_assert_nonnull(
+      g_dbus_interface_info_lookup_method(flatpak_interface, "SpawnSignal"));
+  g_assert_nonnull(g_dbus_interface_info_lookup_signal(flatpak_interface,
+                                                        "SpawnExited"));
+  g_assert_nonnull(g_dbus_interface_info_lookup_property(flatpak_interface,
+                                                          "version"));
+  g_assert_nonnull(g_dbus_interface_info_lookup_property(flatpak_interface,
+                                                          "supports"));
+  g_dbus_node_info_unref(flatpak);
 
   GDBusNodeInfo *watcher =
       g_dbus_node_info_new_for_xml(STATUS_WATCHER_XML, &error);

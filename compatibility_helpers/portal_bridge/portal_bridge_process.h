@@ -26,6 +26,8 @@ typedef struct _DocumentGrant DocumentGrant;
 typedef struct _RequestRecord RequestRecord;
 typedef struct _SessionRecord SessionRecord;
 typedef struct _PipeWireCompat PipeWireCompat;
+typedef struct _SpawnSandbox SpawnSandbox;
+typedef struct _SpawnProcess SpawnProcess;
 typedef enum {
   REQUEST_FILECHOOSER,
   REQUEST_SCREENCAST_CREATE,
@@ -101,6 +103,10 @@ struct _PortalBridgeProcess {
   GDBusNodeInfo *request_node;
   GDBusNodeInfo *session_node;
   GDBusNodeInfo *control_node;
+  GDBusNodeInfo *flatpak_node;
+  GPtrArray *spawn_sandboxes;
+  GPtrArray *spawn_processes;
+  guint spawn_agent_signal_id;
   DocumentGrantStore documents;
   PortalRequestStore request_store;
   ScreenCastPortalState screencast;
@@ -110,6 +116,8 @@ struct _PortalBridgeProcess {
 void log_line(const char *fmt, ...);
 void portal_bridge_process_load_host_properties(BridgeState *state);
 void portal_bridge_process_cleanup_documents(BridgeState *state);
+bool portal_bridge_process_name_has_root(BridgeState *, const char *,
+                                         const char *);
 gboolean portal_bridge_process_handle_signal(gpointer user_data);
 void portal_bridge_process_on_bus_acquired(GDBusConnection *, const gchar *,
                                            gpointer);

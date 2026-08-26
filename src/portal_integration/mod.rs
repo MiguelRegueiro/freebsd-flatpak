@@ -5,3 +5,7 @@ mod stale_portal_recovery;
 
 pub(crate) use sandbox_portal::*;
 pub(crate) use stale_portal_recovery::recover_stale_portal_mounts;
+
+#[cfg(test)]
+#[path = "tests/signalfd_compat.rs"]
+mod signalfd_compat_tests;

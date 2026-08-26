@@ -251,9 +251,13 @@ impl ChrootNullfsBackend {
                 true,
             )?;
         }
+        instance.mount_nullfs(self.paths.libexec_root(), "run/host/freebsd-flatpak", true)?;
         let graphics_mounts = instance.host_graphics.runtime_mounts();
         let network_mount = instance.host_network.runtime_mount();
         for mount in &graphics_mounts {
+            if mount.sandbox_target_relative()? == Path::new("run/host/freebsd-flatpak") {
+                continue;
+            }
             instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
         }
         if let Some(mount) = network_mount {
