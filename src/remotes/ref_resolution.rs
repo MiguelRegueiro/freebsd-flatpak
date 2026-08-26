@@ -2,7 +2,8 @@ use super::appstream_metadata::fetch_appstream_replacements;
 use super::metadata_cache::load_arch_summary;
 use super::ostree_summary::parse_summary_refs;
 use super::{
-    trace_resolution, Remote, RemoteApp, RemoteMetadata, RemoteRef, RemoteRefInfo, SearchResult,
+    trace_resolution, Remote, RemoteApp, RemoteMetadata, RemoteRef, RemoteRefInfo, RemoteRuntime,
+    SearchResult,
 };
 use crate::installation::installation_paths::Installation;
 use crate::installation::metadata_value;
@@ -194,6 +195,46 @@ impl RemoteMetadata {
         };
         choose_app_ref(&self.refs, &app_id, &self.arch)
     }
+
+    fn resolve_runtime_ref(&self, requested: &str) -> Result<RemoteRuntime> {
+        let ref_name = normalize_runtime_ref(requested)?;
+        let remote_ref = self
+            .refs
+            .iter()
+            .find(|item| item.name == ref_name)
+            .with_context(|| format!("ref is not present in {}: {ref_name}", self.remote.name))?;
+        split_flatpak_ref(&remote_ref.name)?;
+        let is_extension = remote_ref
+            .metadata
+            .as_deref()
+            .is_some_and(|metadata| crate::flatpak_metadata::has_section(metadata, "ExtensionOf"));
+        Ok(RemoteRuntime {
+            origin: self.remote.name.clone(),
+            ref_name: remote_ref.name.clone(),
+            runtime_ref: remote_ref
+                .name
+                .strip_prefix("runtime/")
+                .expect("normalized runtime ref")
+                .to_string(),
+            commit: remote_ref.checksum.clone(),
+            is_extension,
+        })
+    }
+}
+
+fn normalize_runtime_ref(requested: &str) -> Result<String> {
+    let ref_name = if requested.starts_with("runtime/") {
+        requested.to_string()
+    } else if requested.split('/').count() == 3 {
+        format!("runtime/{requested}")
+    } else {
+        bail!("invalid runtime ref: {requested}");
+    };
+    let parts = ref_name.split('/').collect::<Vec<_>>();
+    if parts.len() != 4 || parts[0] != "runtime" || parts[1..].iter().any(|part| part.is_empty()) {
+        bail!("invalid runtime ref: {requested}");
+    }
+    Ok(ref_name)
 }
 
 pub fn inspect_refs(paths: &Installation, refs: &[String]) -> Result<()> {
@@ -264,6 +305,45 @@ pub fn resolve_remote_app(
     }
     bail!(
         "ref {app_id} was not found in an enabled remote ({})",
+        failures.join("; ")
+    )
+}
+
+pub fn resolve_remote_runtime(
+    paths: &Installation,
+    remote_name: Option<&str>,
+    requested: &str,
+) -> Result<RemoteRuntime> {
+    let candidates = if let Some(name) = remote_name {
+        let remote = super::get_remote(paths, name)?;
+        if !remote.enabled {
+            bail!("remote is disabled: {name}");
+        }
+        vec![remote]
+    } else {
+        let mut remotes = super::enabled_remotes(paths)?;
+        remotes.sort_by_key(|remote| (remote.name != super::DEFAULT_REMOTE, remote.name.clone()));
+        remotes
+    };
+    if candidates.is_empty() {
+        bail!("no enabled remotes are configured");
+    }
+    let mut failures = Vec::new();
+    for remote in candidates {
+        let metadata = match load_remote_metadata_for(paths, remote.clone()) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                failures.push(format!("{}: {error:#}", remote.name));
+                continue;
+            }
+        };
+        match metadata.resolve_runtime_ref(requested) {
+            Ok(runtime) => return Ok(runtime),
+            Err(error) => failures.push(format!("{}: {error:#}", remote.name)),
+        }
+    }
+    bail!(
+        "ref {requested} was not found in an enabled remote ({})",
         failures.join("; ")
     )
 }

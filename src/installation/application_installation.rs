@@ -1,5 +1,6 @@
 use super::installation_paths::Installation;
 use crate::extensions::{ensure_default_gl_extension_timed, runtime_checkout_dir};
+use crate::flatpak_compatibility::required_version_diagnostic;
 use crate::ostree::{Deployment, RemoteSource, Storage};
 use crate::remotes::{load_arch_summary, RemoteApp};
 use anyhow::{Context, Result};
@@ -136,6 +137,8 @@ fn checkout_remote_app(
     let installed_size = storage.installed_size(&remote.app_commit)?;
     let runtime_installed_size = storage.installed_size(&remote.runtime_commit)?;
     drop(storage);
+    report_compatibility(&app_dir, "Application", &remote.app_ref)?;
+    report_compatibility(&runtime_dir, "Runtime", &runtime_full_ref)?;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -180,6 +183,16 @@ fn checkout_remote_app(
             checkout: timings.checkout,
         },
     })
+}
+
+fn report_compatibility(checkout: &Path, group: &str, reference: &str) -> Result<()> {
+    let metadata_path = checkout.join("metadata");
+    let metadata = fs::read_to_string(&metadata_path)
+        .with_context(|| format!("read Flatpak metadata {}", metadata_path.display()))?;
+    if let Some(diagnostic) = required_version_diagnostic(&metadata, group, reference) {
+        eprintln!("compatibility warning: {diagnostic}");
+    }
+    Ok(())
 }
 
 fn generation_checkout_dir(base: &Path, commit: &str, force: bool) -> PathBuf {

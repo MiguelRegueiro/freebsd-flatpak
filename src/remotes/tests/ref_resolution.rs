@@ -75,6 +75,46 @@ fn named_remote_resolution_records_origin_and_accepts_full_refs() {
 }
 
 #[test]
+fn exact_runtime_refs_are_resolved_and_extensions_are_classified() {
+    let metadata = RemoteMetadata {
+        remote: Remote {
+            name: "example".to_string(),
+            url: "https://example.test/repo".to_string(),
+            title: None,
+            enabled: true,
+            gpg_verify: false,
+            gpg_key: None,
+        },
+        arch: "x86_64".to_string(),
+        refs: vec![RemoteRef {
+            name: "runtime/org.example.Platform.Compat/x86_64/25.08".to_string(),
+            checksum: "extension-commit".to_string(),
+            metadata: Some(
+                "[Runtime]\nname=org.example.Platform.Compat\n\n[ExtensionOf]\nref=runtime/org.example.Platform/x86_64/25.08\n"
+                    .to_string(),
+            ),
+            download_size: None,
+            installed_size: None,
+        }],
+        remote_dir: std::path::PathBuf::from("/dev/null"),
+        summary_path: std::path::PathBuf::from("/dev/null"),
+        collection_id: None,
+    };
+
+    let runtime = metadata
+        .resolve_runtime_ref("runtime/org.example.Platform.Compat/x86_64/25.08")
+        .unwrap();
+    assert!(runtime.is_extension);
+    assert_eq!(
+        runtime.runtime_ref,
+        "org.example.Platform.Compat/x86_64/25.08"
+    );
+    assert!(metadata
+        .resolve_runtime_ref("app/org.example.App/x86_64/stable")
+        .is_err());
+}
+
+#[test]
 fn cross_remote_runtime_origin_is_preserved() {
     let app = remote_app_from_metadata(
         RemoteRef {

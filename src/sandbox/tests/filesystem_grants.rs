@@ -1,6 +1,6 @@
 use super::{authorized_grant_paths, AccessMode, HostFilesystem, XdgUserDirs};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static TEST_ID: AtomicUsize = AtomicUsize::new(0);
@@ -209,8 +209,7 @@ fn home_expands_to_children_when_project_lives_under_home() {
     .unwrap();
 
     assert!(fs.grants().iter().any(|grant| {
-        grant.host_path() == docs.as_path()
-            && grant.sandbox_path() == Path::new("/home/user/Documents")
+        grant.host_path() == docs.as_path() && grant.sandbox_path() == docs.as_path()
     }));
     assert!(!fs
         .grants()
@@ -323,13 +322,10 @@ fn narrow_read_only_grant_projects_only_its_subordinate_mounts() {
 
     assert_eq!(fs.grants().len(), 2);
     assert_eq!(fs.grants()[0].host_path(), granted);
-    assert_eq!(fs.grants()[0].sandbox_path(), Path::new("/home/user/foo"));
+    assert_eq!(fs.grants()[0].sandbox_path(), granted.as_path());
     assert_eq!(fs.grants()[0].access(), AccessMode::ReadOnly);
     assert_eq!(fs.grants()[1].host_path(), nested);
-    assert_eq!(
-        fs.grants()[1].sandbox_path(),
-        Path::new("/home/user/foo/archive")
-    );
+    assert_eq!(fs.grants()[1].sandbox_path(), nested.as_path());
     assert_eq!(fs.grants()[1].access(), AccessMode::ReadOnly);
 }
 
@@ -349,11 +345,54 @@ fn overlapping_parent_and_child_grants_keep_explicit_access_and_mount_order() {
     .unwrap();
 
     assert_eq!(fs.grants().len(), 2);
-    assert_eq!(fs.grants()[0].sandbox_path(), Path::new("/home/user"));
+    assert_eq!(fs.grants()[0].sandbox_path(), home.as_path());
     assert_eq!(fs.grants()[0].access(), AccessMode::ReadWrite);
-    assert_eq!(
-        fs.grants()[1].sandbox_path(),
-        Path::new("/home/user/Documents")
-    );
+    assert_eq!(fs.grants()[1].sandbox_path(), documents.as_path());
     assert_eq!(fs.grants()[1].access(), AccessMode::ReadOnly);
+}
+
+#[test]
+fn persistent_paths_are_relative_normalized_and_parent_first() {
+    let tree = TestTree::new("persistent-paths");
+    let home = tree.path("var/home/user");
+    fs::create_dir_all(&home).unwrap();
+    let filesystem = HostFilesystem::from_metadata(
+        "[Context]\npersistent=games/saves;.;games;games/saves;\n",
+        "user",
+        &home,
+        &tree.path("project"),
+        &tree.path("project/runtime/chroots/org.example.App"),
+    )
+    .unwrap();
+
+    assert_eq!(filesystem.sandbox_home(), home);
+    assert_eq!(
+        filesystem.persistent_paths(),
+        [
+            PathBuf::from("."),
+            PathBuf::from("games"),
+            PathBuf::from("games/saves"),
+        ]
+    );
+}
+
+#[test]
+fn persistent_paths_reject_absolute_and_parent_traversal() {
+    let tree = TestTree::new("invalid-persistent-paths");
+    let home = tree.path("home/user");
+    fs::create_dir_all(&home).unwrap();
+
+    for persistent in ["/outside", "../outside", "inside/../../outside"] {
+        let error = HostFilesystem::from_metadata(
+            &format!("[Context]\npersistent={persistent};\n"),
+            "user",
+            &home,
+            &tree.path("project"),
+            &tree.path("project/runtime/chroots/org.example.App"),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("invalid Flatpak persistent path"));
+    }
 }

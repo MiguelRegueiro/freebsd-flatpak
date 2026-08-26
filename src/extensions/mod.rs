@@ -2,11 +2,11 @@ mod application_extensions;
 mod extension_points;
 mod runtime_extensions;
 
-pub(crate) use application_extensions::ensure_app_codec_extensions;
+pub(crate) use application_extensions::ensure_app_extensions;
 pub(crate) use extension_points::required_extension_refs;
 pub(crate) use runtime_extensions::{
     ensure_default_gl_extension, ensure_default_gl_extension_timed, ensure_intel_vaapi_extension,
-    runtime_checkout_dir,
+    extension_checkout_dir, runtime_checkout_dir,
 };
 
 use std::path::PathBuf;

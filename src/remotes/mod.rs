@@ -11,7 +11,8 @@ use std::path::PathBuf;
 pub(crate) use metadata_cache::load_arch_summary;
 pub(crate) use ostree_summary::ref_checksum;
 pub use ref_resolution::{
-    checkout_ref, inspect_refs, load_remote_metadata, resolve_remote_app, search_apps,
+    checkout_ref, inspect_refs, load_remote_metadata, resolve_remote_app, resolve_remote_runtime,
+    search_apps,
 };
 pub(crate) use remote_config::{
     add as add_remote, delete as delete_remote, from_location, initialize, modify as modify_remote,
@@ -59,6 +60,15 @@ pub struct RemoteApp {
     pub download_size: Option<u64>,
     pub installed_size: Option<u64>,
     pub command: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteRuntime {
+    pub origin: String,
+    pub ref_name: String,
+    pub runtime_ref: String,
+    pub commit: String,
+    pub is_extension: bool,
 }
 
 #[derive(Debug, Clone)]

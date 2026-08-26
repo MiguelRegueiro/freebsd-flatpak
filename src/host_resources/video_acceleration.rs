@@ -36,6 +36,12 @@ impl HostVideo {
         self.vaapi.iter().map(|vaapi| vaapi.ref_name())
     }
 
+    pub fn extension_deployments(&self) -> impl Iterator<Item = (&str, &Path)> {
+        self.vaapi
+            .iter()
+            .map(|vaapi| (vaapi.ref_name(), vaapi.checkout_dir.as_path()))
+    }
+
     pub fn runtime_mounts(&self) -> Vec<VideoMount> {
         self.vaapi
             .iter()

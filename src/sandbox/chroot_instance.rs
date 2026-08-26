@@ -112,12 +112,17 @@ impl ChrootInstance {
     ) -> Result<ExitStatus> {
         install_signal_handlers();
         let user = host_user(self.uid);
-        let mut env = launch_env(app, desktop, self.uid, &user);
-        env.retain(|(key, _)| key != "HOME");
-        env.push((
-            "HOME".to_string(),
-            self.host_filesystem.sandbox_home_env("/var/data"),
-        ));
+        let app_data = self.paths.app_data(&app.app_id)?;
+        let host_xdg_env = super::launch_environment::host_xdg_base_directory_env();
+        let mut env = launch_env(
+            app,
+            desktop,
+            self.uid,
+            &user,
+            self.host_filesystem.sandbox_home(),
+            &app_data,
+            &host_xdg_env,
+        );
         env.extend(self.host_filesystem.user_dir_env());
         env.extend(self.host_audio.env());
         env.extend(self.host_cursor.env());

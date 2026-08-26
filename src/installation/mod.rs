@@ -10,11 +10,12 @@ mod installed_sizes;
 mod record_storage;
 mod run_records;
 mod runtime_records;
+mod runtime_ref_installation;
 
 pub(crate) use crate::extensions::{
-    ensure_app_codec_extensions, ensure_default_gl_extension, ensure_intel_vaapi_extension,
-    required_extension_refs, runtime_checkout_dir, AppExtension, RuntimeGlExtension,
-    RuntimeVaapiExtension,
+    ensure_app_extensions, ensure_default_gl_extension, ensure_intel_vaapi_extension,
+    extension_checkout_dir, required_extension_refs, runtime_checkout_dir, AppExtension,
+    RuntimeGlExtension, RuntimeVaapiExtension,
 };
 pub(crate) use crate::flatpak_metadata::value as metadata_value;
 pub(crate) use crate::ostree::{prune_repo, recover_storage, remove_repo_refs, repair_repo};
@@ -29,6 +30,7 @@ pub(crate) use record_storage::ensure_layout;
 pub(crate) use record_storage::write_atomic as write_state_atomic;
 pub(crate) use run_records::*;
 pub(crate) use runtime_records::*;
+pub(crate) use runtime_ref_installation::*;
 
 use std::path::PathBuf;
 
