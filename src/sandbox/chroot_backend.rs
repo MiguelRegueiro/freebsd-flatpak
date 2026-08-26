@@ -1,3 +1,4 @@
+use super::app_data_mount_plan::AppDataMountPlan;
 use super::application_entrypoint::{
     host_user, numeric_id, numeric_ids, resolve_entry, sandbox_name,
 };
@@ -273,14 +274,28 @@ impl ChrootNullfsBackend {
         for mount in instance.host_video.runtime_mounts() {
             instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
         }
-        for grant in instance.host_filesystem.grants().to_vec() {
+        let app_data_mount_plan = AppDataMountPlan::build(&instance.host_filesystem, &app_data)?;
+        for grant in app_data_mount_plan.grants_before_app_data {
             instance.mount_nullfs(
                 grant.host_path(),
                 grant.sandbox_target_relative()?,
                 grant.access().is_read_only(),
             )?;
         }
+        if app_data_mount_plan.mask_app_data_root {
+            instance.mount_tmpfs(
+                chroot_relative(&app_data_mount_plan.app_data_root)?,
+                &format!("mode=0700,uid={uid},gid={gid}"),
+            )?;
+        }
         instance.mount_nullfs(&app_data, chroot_relative(&app_data)?, false)?;
+        for grant in app_data_mount_plan.grants_inside_app_data_root {
+            instance.mount_nullfs(
+                grant.host_path(),
+                grant.sandbox_target_relative()?,
+                grant.access().is_read_only(),
+            )?;
+        }
         for mount in instance.host_cursor.mounts().to_vec() {
             instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
         }
