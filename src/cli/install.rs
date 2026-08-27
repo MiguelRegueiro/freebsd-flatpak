@@ -2,6 +2,7 @@ use super::confirmation::{
     present_and_confirm, TransactionEntry, TransactionOperation, TransactionOptions,
 };
 use super::update::update_resolved;
+use crate::diagnostics::Diagnostics;
 use crate::installation as state;
 use crate::installation::{self as runtime, installation_paths::Installation};
 use crate::{desktop_integration, remotes};
@@ -42,7 +43,11 @@ pub(super) fn parse_install_args(args: Vec<String>) -> Result<InstallOptions> {
     })
 }
 
-pub(crate) fn cmd_install(paths: &Installation, args: Vec<String>) -> Result<()> {
+pub(crate) fn cmd_install(
+    paths: &Installation,
+    args: Vec<String>,
+    diagnostics: &Diagnostics,
+) -> Result<()> {
     let options = parse_install_args(args)?;
     let total_started = Instant::now();
     if !options.transaction.noninteractive {
@@ -58,7 +63,12 @@ pub(crate) fn cmd_install(paths: &Installation, args: Vec<String>) -> Result<()>
             println!("{} is already installed", remote.app_id);
             return Ok(());
         }
-        return update_resolved(paths, vec![(record, remote)], options.transaction);
+        return update_resolved(
+            paths,
+            vec![(record, remote)],
+            options.transaction,
+            diagnostics,
+        );
     }
 
     let runtime_record =

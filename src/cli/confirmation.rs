@@ -48,6 +48,12 @@ pub(crate) fn present_and_confirm(
     present_and_confirm_with(entries, options, &mut stdin.lock(), &mut stdout.lock())
 }
 
+pub(crate) fn confirm_after_preview(options: TransactionOptions) -> Result<bool> {
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    confirm_after_preview_with(options, &mut stdin.lock(), &mut stdout.lock())
+}
+
 pub(crate) fn present_and_confirm_with(
     entries: &[TransactionEntry],
     options: TransactionOptions,
@@ -77,7 +83,15 @@ pub(crate) fn present_and_confirm_with(
             entry.ref_name
         )?;
     }
-    if options.assumeyes {
+    confirm_after_preview_with(options, input, output)
+}
+
+fn confirm_after_preview_with(
+    options: TransactionOptions,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<bool> {
+    if options.assumeyes || options.noninteractive {
         return Ok(true);
     }
 

@@ -16,6 +16,7 @@ mod search;
 mod size_format;
 mod uninstall;
 mod update;
+mod update_output;
 use crate::diagnostics::{Detail, Diagnostics, Verbosity};
 
 use crate::installation::startup_recovery as startup;
@@ -98,7 +99,7 @@ pub(crate) fn run() -> Result<()> {
     }?;
     match command.as_deref() {
         Some("search") => search::cmd_search(&paths, args.collect()),
-        Some("install") => install::cmd_install(&paths, args.collect()),
+        Some("install") => install::cmd_install(&paths, args.collect(), &diagnostics),
         Some("info") => info::cmd_info(&paths, args.collect()),
         Some("list") => list::cmd_list(&paths, args.collect()),
         Some("permissions") => permissions::cmd_permissions(&paths, args.collect()),
@@ -113,7 +114,7 @@ pub(crate) fn run() -> Result<()> {
         Some("remote-modify") => remote_commands::cmd_remote_modify(&paths, args.collect()),
         Some("remote-ls") => remote_commands::cmd_remote_ls(&paths, args.collect()),
         Some("uninstall" | "remove") => uninstall::cmd_uninstall(&paths, args.collect()),
-        Some("update" | "upgrade") => update::cmd_update(&paths, args.collect()),
+        Some("update" | "upgrade") => update::cmd_update(&paths, args.collect(), &diagnostics),
         Some("checkout") => {
             let ref_name = args.next().context("missing ref")?;
             let dest = args.next().context("missing destination")?;

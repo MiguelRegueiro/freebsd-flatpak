@@ -1,6 +1,6 @@
-use super::confirmation::{
-    present_and_confirm, TransactionEntry, TransactionOperation, TransactionOptions,
-};
+use super::confirmation::{confirm_after_preview, TransactionOptions};
+use super::update_output::{render, short_change, UpdateRow};
+use crate::diagnostics::{Detail, Diagnostics};
 use crate::installation as state;
 use crate::installation::{self as runtime, installation_paths::Installation};
 use crate::{desktop_integration, remotes};
@@ -8,15 +8,25 @@ use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
 use std::path::Path;
 
-pub(crate) fn cmd_update(paths: &Installation, args: Vec<String>) -> Result<()> {
+pub(crate) fn cmd_update(
+    paths: &Installation,
+    args: Vec<String>,
+    diagnostics: &Diagnostics,
+) -> Result<()> {
     let options = parse_update_args(args)?;
     let installed = state::list_apps(paths)?;
+    diagnostics.message(Detail::Summary, || {
+        format!("update: found {} installed application(s)", installed.len())
+    });
     if installed.is_empty() {
         if let Some(app_id) = options.app_ids.first() {
             bail!("{app_id} is not installed");
         }
-        println!("No installed apps");
+        println!("No installed apps.");
         return Ok(());
+    }
+    if !options.transaction.noninteractive {
+        println!("Checking for updates…");
     }
     let targets = if options.app_ids.is_empty() {
         installed
@@ -65,34 +75,59 @@ pub(crate) fn cmd_update(paths: &Installation, args: Vec<String>) -> Result<()> 
         }
         targets
     };
+    diagnostics.message(Detail::Summary, || {
+        format!("update: considering {} application ref(s)", targets.len())
+    });
     let mut resolved = Vec::new();
     for target in targets {
-        let metadata =
-            remotes::load_remote_metadata(paths, &target.record.origin).with_context(|| {
+        diagnostics.message(Detail::Summary, || {
+            format!(
+                "update: refresh remote metadata {} for {}",
+                target.record.origin, target.record.app_id
+            )
+        });
+        let metadata = diagnostics
+            .measure(Detail::Detailed, "update", "load remote metadata", || {
+                remotes::load_remote_metadata(paths, &target.record.origin)
+            })
+            .with_context(|| {
                 format!(
                     "load origin {} for {}",
                     target.record.origin, target.record.app_id
                 )
             })?;
-        let remote = if let Some(commit) = options.commit.as_deref() {
-            metadata.resolve_app_commit(paths, &target.record.app_ref, commit)?
-        } else {
-            match target.remote {
-                Some(remote) => remote,
-                None => metadata
-                    .resolve_exact_ref_with_runtime(paths, &target.record.app_ref)
-                    .or_else(|_| {
-                        remotes::resolve_remote_app(
-                            paths,
-                            Some(&target.record.origin),
-                            &target.record.app_id,
-                        )
-                    })?,
-            }
-        };
+        let remote = diagnostics.measure(
+            Detail::Detailed,
+            "update",
+            "resolve application ref",
+            || {
+                if let Some(commit) = options.commit.as_deref() {
+                    metadata.resolve_app_commit(paths, &target.record.app_ref, commit)
+                } else {
+                    match target.remote {
+                        Some(remote) => Ok(remote),
+                        None => metadata
+                            .resolve_exact_ref_with_runtime(paths, &target.record.app_ref)
+                            .or_else(|_| {
+                                remotes::resolve_remote_app(
+                                    paths,
+                                    Some(&target.record.origin),
+                                    &target.record.app_id,
+                                )
+                            }),
+                    }
+                }
+            },
+        )?;
+        diagnostics.message(Detail::Detailed, || {
+            format!(
+                "update: resolved {} to {} (runtime runtime/{})",
+                remote.app_ref, remote.app_commit, remote.runtime_ref
+            )
+        });
         resolved.push((target.record, remote));
     }
-    update_resolved(paths, resolved, options.transaction)
+    update_resolved(paths, resolved, options.transaction, diagnostics)
 }
 
 #[derive(Debug)]
@@ -106,16 +141,41 @@ pub(super) fn update_resolved(
     paths: &Installation,
     resolved: Vec<(state::AppRecord, remotes::RemoteApp)>,
     options: TransactionOptions,
+    diagnostics: &Diagnostics,
 ) -> Result<()> {
     let mut plans = Vec::new();
     for (record, remote) in resolved {
         let status = update_status(paths, &record, &remote)?;
+        diagnostics.message(Detail::Detailed, || {
+            format!(
+                "update: status {} app_changed={} app_checkout_stale={} runtime_changed={} runtime_checkout_stale={}",
+                record.app_id,
+                status.app_changed,
+                status.app_checkout_stale,
+                status.runtime_changed,
+                status.runtime_checkout_stale
+            )
+        });
         if !status.app_changed && !status.runtime_changed {
-            if !options.noninteractive {
-                println!("{} is up to date", record.app_id);
-            }
+            diagnostics.message(Detail::Summary, || {
+                format!("update: keep {} (already current)", record.app_ref)
+            });
             continue;
         }
+        diagnostics.message(Detail::Summary, || {
+            let mut changes = Vec::new();
+            if status.app_changed {
+                changes.push("application");
+            }
+            if status.runtime_changed {
+                changes.push("runtime");
+            }
+            format!(
+                "update: select {} ({})",
+                record.app_ref,
+                changes.join(" and ")
+            )
+        });
         plans.push(ResolvedUpdate {
             record,
             remote,
@@ -123,18 +183,32 @@ pub(super) fn update_resolved(
         });
     }
     if plans.is_empty() {
+        if !options.noninteractive {
+            println!("Nothing to update.");
+        }
         return Ok(());
     }
 
-    let mut entries = Vec::new();
+    let mut rows = Vec::new();
     let mut runtime_entries = BTreeSet::new();
     for plan in &plans {
         if plan.status.app_changed {
-            entries.push(TransactionEntry {
-                operation: TransactionOperation::Update,
-                kind: "application",
-                ref_name: plan.remote.app_ref.clone(),
+            diagnostics.message(Detail::Summary, || {
+                format!(
+                    "update: plan update application {}",
+                    short_change(
+                        &plan.record.app_ref,
+                        &plan.remote.app_ref,
+                        &plan.record.app_commit,
+                        &plan.remote.app_commit,
+                    )
+                )
             });
+            rows.push(UpdateRow::application(
+                &plan.remote.app_id,
+                &plan.remote.branch,
+                &plan.remote.origin,
+            ));
         }
         if plan.status.runtime_changed
             && runtime_entries.insert(format!(
@@ -142,24 +216,48 @@ pub(super) fn update_resolved(
                 plan.remote.runtime_origin, plan.remote.runtime_ref
             ))
         {
-            entries.push(TransactionEntry {
-                operation: if state::get_runtime_from(
-                    paths,
-                    &plan.remote.runtime_origin,
-                    &plan.remote.runtime_ref,
-                )?
-                .is_some()
-                {
-                    TransactionOperation::Update
-                } else {
-                    TransactionOperation::Install
-                },
-                kind: "runtime",
-                ref_name: format!("runtime/{}", plan.remote.runtime_ref),
+            let operation = if state::get_runtime_from(
+                paths,
+                &plan.remote.runtime_origin,
+                &plan.remote.runtime_ref,
+            )?
+            .is_some()
+            {
+                "update"
+            } else {
+                "install"
+            };
+            diagnostics.message(Detail::Summary, || {
+                format!(
+                    "update: plan {operation} runtime {}",
+                    short_change(
+                        &format!("runtime/{}", plan.record.runtime_ref),
+                        &format!("runtime/{}", plan.remote.runtime_ref),
+                        plan.status
+                            .current_runtime_commit
+                            .as_deref()
+                            .unwrap_or("<none>"),
+                        &plan.remote.runtime_commit,
+                    )
+                )
             });
+            rows.push(UpdateRow::runtime(
+                &plan.remote.runtime_ref,
+                &plan.remote.runtime_origin,
+            ));
         }
     }
-    if !present_and_confirm(&entries, options)? {
+    diagnostics.message(Detail::Summary, || {
+        format!("update: planned {} transaction operation(s)", rows.len())
+    });
+    if options.noninteractive {
+        for row in &rows {
+            println!("Updating {}", row.id);
+        }
+    } else {
+        print!("{}", render(&rows));
+    }
+    if !confirm_after_preview(options)? {
         return Ok(());
     }
 
@@ -170,8 +268,25 @@ pub(super) fn update_resolved(
         let status = plan.status;
         let force_runtime = status.runtime_checkout_stale
             && touched_runtimes.insert(format!("{}:{}", remote.runtime_origin, remote.runtime_ref));
+        diagnostics.message(Detail::Summary, || {
+            format!(
+                "update: deploy {} (application={}, runtime={})",
+                remote.app_ref, status.app_checkout_stale, force_runtime
+            )
+        });
+        diagnostics.message(Detail::Detailed, || {
+            format!(
+                "update: commits {} -> {}; runtime {} -> {}",
+                record.app_commit,
+                remote.app_commit,
+                status.current_runtime_commit.as_deref().unwrap_or("<none>"),
+                remote.runtime_commit
+            )
+        });
         let installed =
-            runtime::update_app(paths, &remote, status.app_checkout_stale, force_runtime)?;
+            diagnostics.measure(Detail::Detailed, "update", "pull and deploy", || {
+                runtime::update_app(paths, &remote, status.app_checkout_stale, force_runtime)
+            })?;
         let installed_record = state::record_install(paths, &installed)?;
         state::reconcile_runtime_bindings(paths)?;
         if record.app_id != installed.app_id {
@@ -180,26 +295,10 @@ pub(super) fn update_resolved(
             state::safe_remove_dir(paths, &record.app_dir)?;
         }
         let export = desktop_integration::export_app(paths, &installed_record)?;
-        if !options.noninteractive {
-            println!("Updated {}", installed.app_id);
-            if record.app_id != installed.app_id {
-                println!("  app id: {} -> {}", record.app_id, installed.app_id);
-            }
-            if status.app_changed {
-                println!(
-                    "  app commit: {} -> {}",
-                    record.app_commit, installed.app_commit
-                );
-            }
-            if status.runtime_changed {
-                println!(
-                    "  runtime commit: {} -> {}",
-                    status.current_runtime_commit.as_deref().unwrap_or("<none>"),
-                    installed.runtime_commit
-                );
-            }
-            print_export_report(paths, &export);
-        }
+        diagnostics.message(Detail::Summary, || {
+            format!("update: activated {}", installed.app_id)
+        });
+        diagnostics.message(Detail::Detailed, || export_report(paths, &export));
 
         if record.runtime_ref != installed.runtime_ref
             && !state::runtime_is_required(paths, &record.runtime_ref)?
@@ -207,6 +306,10 @@ pub(super) fn update_resolved(
             state::remove_runtime_record(paths, &record.runtime_ref)?;
         }
         state::cleanup_retired_deployments(paths)?;
+    }
+
+    if !options.noninteractive {
+        println!("Update complete.");
     }
 
     Ok(())
@@ -386,11 +489,11 @@ pub(super) fn checkout_present(dir: &Path) -> bool {
     dir.join("metadata").is_file() && dir.join("files").is_dir()
 }
 
-fn print_export_report(paths: &Installation, export: &desktop_integration::ExportReport) {
-    println!("  exported files: {}", export.files);
-    println!("  desktop entries: {}", export.desktop_entries);
-    println!(
-        "  export data dir: {}",
+fn export_report(paths: &Installation, export: &desktop_integration::ExportReport) -> String {
+    let mut report = format!(
+        "update: exports files={} desktop_entries={} data_dir={}",
+        export.files,
+        export.desktop_entries,
         desktop_integration::export_data_dir(paths).display()
     );
     if !export.skipped.is_empty() {
@@ -400,7 +503,7 @@ fn print_export_report(paths: &Installation, export: &desktop_integration::Expor
             .map(|path| path.display().to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        println!("  skipped host-incompatible exports: {skipped}");
+        report.push_str(&format!(" skipped={skipped}"));
     }
     if !export.conflicts.is_empty() {
         let conflicts = export
@@ -409,8 +512,9 @@ fn print_export_report(paths: &Installation, export: &desktop_integration::Expor
             .map(|path| paths.data_home().join(path).display().to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        println!("  preserved conflicting user exports: {conflicts}");
+        report.push_str(&format!(" conflicts={conflicts}"));
     }
+    report
 }
 
 fn value_after_equals(arg: &str) -> &str {
