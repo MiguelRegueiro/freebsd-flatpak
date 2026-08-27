@@ -12,7 +12,6 @@ pub(super) fn shared_portal_ready(bus_address: &str, mountpoint: &str) -> bool {
         .is_some_and(|path| Path::new(path).exists())
         && document_portal_ready(bus_address, mountpoint)
         && desktop_portal_ready(bus_address)
-        && flatpak_spawn_portal_ready(bus_address)
         && status_notifier_ready(bus_address)
 }
 
@@ -129,97 +128,18 @@ pub(super) fn sandbox_bus_address(
 }
 
 pub(super) fn wait_for_portal_proxy(bus_address: &str, mountpoint: &str) -> Result<()> {
-    let mut readiness = bridge_readiness(bus_address, mountpoint);
     for _ in 0..40 {
-        if readiness.all_ready() {
+        if document_portal_ready(bus_address, mountpoint)
+            && desktop_portal_ready(bus_address)
+            && status_notifier_ready(bus_address)
+        {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
-        readiness = bridge_readiness(bus_address, mountpoint);
     }
-    bail!(readiness.failure_message(mountpoint));
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct BridgeReadiness {
-    file_chooser: bool,
-    screen_cast: bool,
-    status_notifier: bool,
-    document_portal: bool,
-    flatpak_spawn_portal: bool,
-}
-
-impl BridgeReadiness {
-    fn all_ready(&self) -> bool {
-        self.file_chooser
-            && self.screen_cast
-            && self.status_notifier
-            && self.document_portal
-            && self.flatpak_spawn_portal
-    }
-
-    fn failure_message(&self, mountpoint: &str) -> String {
-        let mut missing = Vec::new();
-        if !self.file_chooser {
-            missing.push("FileChooser".to_string());
-        }
-        if !self.screen_cast {
-            missing.push("ScreenCast".to_string());
-        }
-        if !self.status_notifier {
-            missing.push("StatusNotifierWatcher".to_string());
-        }
-        if !self.document_portal {
-            missing.push(format!("document mountpoint {mountpoint}"));
-        }
-        if !self.flatpak_spawn_portal {
-            missing.push("Flatpak spawn portal".to_string());
-        }
-        format!(
-            "compatibility bridges did not publish {}",
-            missing.join(", ")
-        )
-    }
-}
-
-fn bridge_readiness(bus_address: &str, mountpoint: &str) -> BridgeReadiness {
-    BridgeReadiness {
-        file_chooser: portal_property_ready(
-            bus_address,
-            "org.freedesktop.portal.FileChooser",
-            "version",
-        ),
-        screen_cast: portal_property_ready(
-            bus_address,
-            "org.freedesktop.portal.ScreenCast",
-            "AvailableSourceTypes",
-        ),
-        status_notifier: status_notifier_ready(bus_address),
-        document_portal: document_portal_ready(bus_address, mountpoint),
-        flatpak_spawn_portal: flatpak_spawn_portal_ready(bus_address),
-    }
-}
-
-fn flatpak_spawn_portal_ready(bus_address: &str) -> bool {
-    let output = Command::new("gdbus")
-        .arg("call")
-        .arg("--session")
-        .arg("--dest")
-        .arg("org.freedesktop.portal.Flatpak")
-        .arg("--object-path")
-        .arg("/org/freedesktop/portal/Flatpak")
-        .arg("--method")
-        .arg("org.freedesktop.DBus.Properties.Get")
-        .arg("org.freedesktop.portal.Flatpak")
-        .arg("version")
-        .env("DBUS_SESSION_BUS_ADDRESS", bus_address)
-        .output();
-    // The bridge deliberately rejects host-side readiness callers at the
-    // property authorization layer. AccessDenied proves that the correctly
-    // named service, object and property handler are all ready.
-    matches!(output, Ok(output) if output.status.success()
-        || String::from_utf8_lossy(&output.stderr)
-            .contains("org.freedesktop.DBus.Error.AccessDenied"))
+    bail!(
+        "compatibility bridges did not publish FileChooser, ScreenCast, StatusNotifierWatcher, and document mountpoint {mountpoint}"
+    );
 }
 
 fn status_notifier_ready(bus_address: &str) -> bool {

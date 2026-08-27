@@ -22,15 +22,3 @@ fn named_remote_and_full_ref_parse() {
     assert_eq!(install.remote.as_deref(), Some("flathub"));
     assert_eq!(install.app_id, "app/org.example.App/x86_64/stable");
 }
-
-#[test]
-fn runtime_ref_is_preserved_for_resolution() {
-    let install = parse_install_args(vec![
-        "runtime/org.example.Platform.Extension/x86_64/24.08".to_string()
-    ])
-    .unwrap();
-    assert_eq!(
-        install.app_id,
-        "runtime/org.example.Platform.Extension/x86_64/24.08"
-    );
-}

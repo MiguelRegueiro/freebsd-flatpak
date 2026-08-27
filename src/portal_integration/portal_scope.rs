@@ -26,18 +26,6 @@ pub(super) fn app_scope_name(app_id: &str) -> String {
 }
 
 pub(super) fn portal_control(proxy: &PortalProxy, method: &str) -> Result<()> {
-    portal_control_args(
-        proxy,
-        method,
-        &[proxy.sandbox_doc_dir.display().to_string()],
-    )
-}
-
-pub(super) fn portal_control_args(
-    proxy: &PortalProxy,
-    method: &str,
-    args: &[String],
-) -> Result<()> {
     let output = Command::new("gdbus")
         .arg("call")
         .arg("--address")
@@ -48,7 +36,7 @@ pub(super) fn portal_control_args(
         .arg("/org/freebsd/Flatpak/PortalBridge")
         .arg("--method")
         .arg(format!("org.freebsd.Flatpak.PortalBridge.{method}"))
-        .args(args)
+        .arg(proxy.sandbox_doc_dir.display().to_string())
         .output()
         .with_context(|| format!("call shared portal {method}"))?;
     if !output.status.success() {
@@ -147,9 +135,7 @@ pub(super) fn app_has_active_run(
 pub(super) fn ensure_bridge_helpers(paths: &Installation) -> Result<(PathBuf, PathBuf)> {
     let portal = paths.libexec_root().join("portal-bridge");
     let status_notifier = paths.libexec_root().join("status-notifier-bridge");
-    let spawn_agent = paths.libexec_root().join("sandbox-spawn-agent-linux");
-    let signalfd_compat = paths.libexec_root().join("libsignalfd-compat.so");
-    for output in [&portal, &status_notifier, &spawn_agent, &signalfd_compat] {
+    for output in [&portal, &status_notifier] {
         if !output.is_file() {
             bail!(
                 "installed compatibility helper is missing: {}",

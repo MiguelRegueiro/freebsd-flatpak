@@ -1,4 +1,3 @@
-mod app_data_mount_plan;
 pub(crate) mod application_entrypoint;
 pub(crate) mod apply_extra;
 mod chroot_backend;

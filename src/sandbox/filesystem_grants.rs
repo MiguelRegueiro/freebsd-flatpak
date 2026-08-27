@@ -6,7 +6,6 @@ use super::file_argument_translation::{
 use super::filesystem_permissions::{
     parse_filesystem_permissions, AccessMode, FilesystemPermission,
 };
-use crate::flatpak_metadata::value;
 use anyhow::{bail, Context, Result};
 use std::env;
 #[cfg(target_os = "freebsd")]
@@ -94,10 +93,6 @@ impl HostPathGrant {
         None
     }
 
-    pub(super) fn maps_host_path_to_same_sandbox_path(&self, host_path: &Path) -> bool {
-        self.map_host_path(host_path).as_deref() == Some(host_path)
-    }
-
     fn same_mount(&self, host_path: &Path, sandbox_path: &Path) -> bool {
         (self.host_path == host_path || self.canonical_host_path == host_path)
             && self.sandbox_path == sandbox_path
@@ -110,7 +105,6 @@ pub struct HostFilesystem {
     grants: Vec<HostPathGrant>,
     warnings: Vec<String>,
     sandbox_home: PathBuf,
-    persistent_paths: Vec<PathBuf>,
     xdg_dirs: XdgUserDirs,
 }
 
@@ -167,7 +161,7 @@ impl HostFilesystem {
 
     fn from_metadata_with_xdg_dirs(
         metadata: &str,
-        _user: &str,
+        user: &str,
         home: &Path,
         project_root: &Path,
         sandbox_root: &Path,
@@ -175,8 +169,7 @@ impl HostFilesystem {
         xdg_dirs: XdgUserDirs,
     ) -> Result<Self> {
         let permissions = parse_filesystem_permissions(metadata)?;
-        let persistent_paths = parse_persistent_paths(metadata)?;
-        let sandbox_home = home.to_path_buf();
+        let sandbox_home = PathBuf::from("/home").join(user);
         let mut builder = GrantBuilder {
             grants: Vec::new(),
             warnings: Vec::new(),
@@ -199,7 +192,6 @@ impl HostFilesystem {
             grants: builder.grants,
             warnings: builder.warnings,
             sandbox_home: builder.sandbox_home,
-            persistent_paths,
             xdg_dirs: builder.xdg_dirs,
         })
     }
@@ -211,7 +203,6 @@ impl HostFilesystem {
             grants,
             warnings: Vec::new(),
             sandbox_home: PathBuf::from("/home/user"),
-            persistent_paths: Vec::new(),
             xdg_dirs: XdgUserDirs::defaults(Path::new("/home/user")),
         }
     }
@@ -271,20 +262,16 @@ impl HostFilesystem {
         env
     }
 
-    pub fn sandbox_home(&self) -> &Path {
-        &self.sandbox_home
-    }
-
-    pub fn persistent_paths(&self) -> &[PathBuf] {
-        &self.persistent_paths
-    }
-
-    pub fn has_home_access(&self) -> bool {
-        self.grants.iter().any(|grant| {
+    pub fn sandbox_home_env(&self, fallback: &str) -> String {
+        if self.grants.iter().any(|grant| {
             grant.sandbox_path == self.sandbox_home
                 || grant.sandbox_path.starts_with(&self.sandbox_home)
                     && (grant.label == "home" || grant.source_permission == "host")
-        })
+        }) {
+            self.sandbox_home.display().to_string()
+        } else {
+            fallback.to_string()
+        }
     }
 
     fn translate_file_uri(&self, arg: &str) -> Result<String> {
@@ -346,43 +333,6 @@ impl HostFilesystem {
             })
             .max_by_key(|(specificity, _)| *specificity)
             .map(|(_, sandbox_path)| sandbox_path)
-    }
-}
-
-fn parse_persistent_paths(metadata: &str) -> Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    if let Some(list) = value(metadata, "Context", "persistent") {
-        for path in list
-            .split(';')
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-        {
-            paths.push(normalize_persistent_path(path)?);
-        }
-    }
-    paths.sort_by(|left, right| {
-        left.components()
-            .count()
-            .cmp(&right.components().count())
-            .then_with(|| left.cmp(right))
-    });
-    paths.dedup();
-    Ok(paths)
-}
-
-fn normalize_persistent_path(path: &str) -> Result<PathBuf> {
-    let mut normalized = PathBuf::new();
-    for component in Path::new(path).components() {
-        match component {
-            Component::CurDir => {}
-            Component::Normal(component) => normalized.push(component),
-            _ => bail!("invalid Flatpak persistent path {path:?}"),
-        }
-    }
-    if normalized.as_os_str().is_empty() {
-        Ok(PathBuf::from("."))
-    } else {
-        Ok(normalized)
     }
 }
 

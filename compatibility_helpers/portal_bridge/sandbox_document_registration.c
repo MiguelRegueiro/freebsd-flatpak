@@ -1,7 +1,6 @@
 #include "sandbox_document_registration.h"
 #include "document_mounts.h"
 #include "portal_bridge_process.h"
-#include "spawn_portal.h"
 const char *CONTROL_XML =
     "<node>"
     "  <interface name='org.freebsd.Flatpak.PortalBridge'>"
@@ -10,13 +9,6 @@ const char *CONTROL_XML =
     "    </method>"
     "    <method name='RemoveSandbox'>"
     "      <arg type='s' name='sandbox_doc_dir' direction='in'/>"
-    "    </method>"
-    "    <method name='AddSpawnAgent'>"
-    "      <arg type='s' name='sandbox_root' direction='in'/>"
-    "      <arg type='s' name='agent_name' direction='in'/>"
-    "    </method>"
-    "    <method name='RemoveSpawnAgent'>"
-    "      <arg type='s' name='sandbox_root' direction='in'/>"
     "    </method>"
     "  </interface>"
     "</node>";
@@ -76,31 +68,6 @@ void handle_control_method(GDBusConnection *connection, const gchar *sender,
   (void)object_path;
   (void)interface_name;
   BridgeState *state = user_data;
-  if (!portal_bridge_process_name_has_root(state, sender, "/")) {
-    g_dbus_method_invocation_return_error(
-        invocation, G_DBUS_ERROR, G_DBUS_ERROR_ACCESS_DENIED,
-        "sandbox clients cannot modify portal registrations");
-    return;
-  }
-  if (g_strcmp0(method_name, "AddSpawnAgent") == 0) {
-    const char *root = NULL;
-    const char *agent_name = NULL;
-    g_variant_get(parameters, "(&s&s)", &root, &agent_name);
-    GError *error = NULL;
-    if (!spawn_portal_add_sandbox(state, root, agent_name, &error)) {
-      g_dbus_method_invocation_take_error(invocation, error);
-      return;
-    }
-    g_dbus_method_invocation_return_value(invocation, NULL);
-    return;
-  }
-  if (g_strcmp0(method_name, "RemoveSpawnAgent") == 0) {
-    const char *root = NULL;
-    g_variant_get(parameters, "(&s)", &root);
-    spawn_portal_remove_sandbox(state, root);
-    g_dbus_method_invocation_return_value(invocation, NULL);
-    return;
-  }
   const char *sandbox_doc_dir = NULL;
   g_variant_get(parameters, "(&s)", &sandbox_doc_dir);
   if (g_strcmp0(method_name, "AddSandbox") == 0) {

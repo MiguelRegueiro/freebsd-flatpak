@@ -97,7 +97,7 @@ fn remove_managed_path(paths: &Installation, path: &Path) -> Result<()> {
     }
 }
 
-pub(crate) fn deployment_marker(path: &Path) -> Result<Option<(String, String)>> {
+pub(super) fn deployment_marker(path: &Path) -> Result<Option<(String, String)>> {
     let marker_path = path.join(".ostree-commit");
     if !marker_path.is_file() {
         return Ok(None);

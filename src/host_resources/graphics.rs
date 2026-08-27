@@ -117,12 +117,6 @@ impl HostGraphics {
         self.gl.iter().map(|gl| gl.ref_name())
     }
 
-    pub fn extension_deployments(&self) -> impl Iterator<Item = (&str, &Path)> {
-        self.gl
-            .iter()
-            .map(|gl| (gl.ref_name(), gl.checkout_dir.as_path()))
-    }
-
     pub fn runtime_mounts(&self) -> Vec<GraphicsMount> {
         let mut mounts: Vec<GraphicsMount> = self
             .gl

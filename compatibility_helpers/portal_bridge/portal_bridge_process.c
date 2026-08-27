@@ -7,7 +7,6 @@
 #include "portal_request.h"
 #include "sandbox_document_registration.h"
 #include "screencast_portal.h"
-#include "spawn_portal.h"
 void log_line(const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
@@ -22,58 +21,6 @@ void portal_bridge_process_cleanup_documents(BridgeState *state) {
     cleanup_grant(g_ptr_array_index(state->documents.grants, i));
   }
   g_ptr_array_set_size(state->documents.grants, 0);
-}
-
-bool portal_bridge_process_name_has_root(BridgeState *state, const char *name,
-                                         const char *expected_root) {
-  GError *error = NULL;
-  GVariant *reply = g_dbus_connection_call_sync(
-      state->local_bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
-      "org.freedesktop.DBus", "GetConnectionUnixProcessID",
-      g_variant_new("(s)", name), G_VARIANT_TYPE("(u)"),
-      G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
-  if (reply == NULL) {
-    if (error != NULL)
-      g_error_free(error);
-    return false;
-  }
-
-  guint32 pid = 0;
-  g_variant_get(reply, "(u)", &pid);
-  g_variant_unref(reply);
-  char *pid_text = g_strdup_printf("%u", pid);
-  const char *argv[] = {"/usr/bin/procstat", "-f", pid_text, NULL};
-  char *stdout_text = NULL;
-  int wait_status = 0;
-  bool matched = false;
-  if (g_spawn_sync(NULL, (char **)argv, NULL, G_SPAWN_STDERR_TO_DEV_NULL, NULL,
-                   NULL, &stdout_text, NULL, &wait_status, &error) &&
-      g_spawn_check_wait_status(wait_status, NULL)) {
-    char **lines = g_strsplit(stdout_text, "\n", -1);
-    for (guint i = 0; lines[i] != NULL && !matched; i++) {
-      char **fields = g_strsplit_set(lines[i], " \t", -1);
-      GPtrArray *nonempty = g_ptr_array_new();
-      for (guint j = 0; fields[j] != NULL; j++) {
-        if (fields[j][0] != '\0')
-          g_ptr_array_add(nonempty, fields[j]);
-      }
-      if (nonempty->len >= 4) {
-        const char *kind = g_ptr_array_index(nonempty, 2);
-        const char *path = g_ptr_array_index(nonempty, nonempty->len - 1);
-        matched = (g_strcmp0(kind, "root") == 0 ||
-                   g_strcmp0(kind, "jail") == 0) &&
-                  g_strcmp0(path, expected_root) == 0;
-      }
-      g_ptr_array_free(nonempty, TRUE);
-      g_strfreev(fields);
-    }
-    g_strfreev(lines);
-  }
-  if (error != NULL)
-    g_error_free(error);
-  g_free(stdout_text);
-  g_free(pid_text);
-  return matched;
 }
 
 gboolean portal_bridge_process_handle_signal(gpointer user_data) {
@@ -114,7 +61,6 @@ void portal_bridge_process_load_host_properties(BridgeState *state) {
 
 void portal_bridge_process_close_client_resources(BridgeState *state,
                                                   const char *client_sender) {
-  spawn_portal_close_client(state, client_sender);
   for (guint i = 0; i < state->request_store.requests->len; i++) {
     RequestRecord *request =
         g_ptr_array_index(state->request_store.requests, i);
@@ -214,15 +160,6 @@ void portal_bridge_process_on_bus_acquired(GDBusConnection *connection,
     g_main_loop_quit(state->loop);
     return;
   }
-  if (!portal_bridge_process_register_interfaces(
-          connection, FLATPAK_PORTAL_PATH, state->flatpak_node,
-          &FLATPAK_PORTAL_VTABLE, state, &error)) {
-    log_line("register Flatpak spawn portal failed: %s", error->message);
-    g_error_free(error);
-    g_main_loop_quit(state->loop);
-    return;
-  }
-  spawn_portal_subscribe_agent_signals(state);
   state->local_objects_registered = true;
 }
 

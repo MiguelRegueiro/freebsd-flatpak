@@ -7,7 +7,6 @@
 #include "portal_request.h"
 #include "sandbox_document_registration.h"
 #include "screencast_portal.h"
-#include "spawn_portal.h"
 const char *arg_value(int argc, char **argv, const char *name) {
   for (int i = 1; i + 1 < argc; i++) {
     if (strcmp(argv[i], name) == 0) {
@@ -85,7 +84,6 @@ int main(int argc, char **argv) {
       .request_node = NULL,
       .session_node = NULL,
       .control_node = NULL,
-      .flatpak_node = NULL,
   };
   if (state.host_bus == NULL || state.desktop_node == NULL) {
     fprintf(stderr, "portal bridge setup failed: %s\n", error->message);
@@ -102,17 +100,13 @@ int main(int argc, char **argv) {
   state.request_node = g_dbus_node_info_new_for_xml(REQUEST_XML, &error);
   state.session_node = g_dbus_node_info_new_for_xml(SESSION_XML, &error);
   state.control_node = g_dbus_node_info_new_for_xml(CONTROL_XML, &error);
-  state.flatpak_node =
-      g_dbus_node_info_new_for_xml(FLATPAK_PORTAL_XML, &error);
   if (state.documents_node == NULL || state.request_node == NULL ||
-      state.session_node == NULL || state.control_node == NULL ||
-      state.flatpak_node == NULL) {
+      state.session_node == NULL || state.control_node == NULL) {
     fprintf(stderr, "portal bridge introspection failed: %s\n", error->message);
     g_error_free(error);
     return 1;
   }
   portal_bridge_process_load_host_properties(&state);
-  spawn_portal_initialize(&state);
   state.screencast.pipewire = new_pipewire_compat(&state);
   if (state.screencast.pipewire == NULL) {
     log_line("PipeWire compatibility linking unavailable; ScreenCast "
@@ -130,12 +124,6 @@ int main(int argc, char **argv) {
       portal_bridge_process_on_name_lost, &state, NULL);
   guint documents_owner_id = g_bus_own_name(
       G_BUS_TYPE_SESSION, "org.freedesktop.portal.Documents",
-      G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT | G_BUS_NAME_OWNER_FLAGS_REPLACE,
-      portal_bridge_process_on_bus_acquired,
-      portal_bridge_process_on_name_acquired,
-      portal_bridge_process_on_name_lost, &state, NULL);
-  guint flatpak_owner_id = g_bus_own_name(
-      G_BUS_TYPE_SESSION, FLATPAK_PORTAL_BUS_NAME,
       G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT | G_BUS_NAME_OWNER_FLAGS_REPLACE,
       portal_bridge_process_on_bus_acquired,
       portal_bridge_process_on_name_acquired,
@@ -169,8 +157,6 @@ int main(int argc, char **argv) {
   state.screencast.sessions = NULL;
   g_ptr_array_free(state.request_store.requests, TRUE);
   state.request_store.requests = NULL;
-  spawn_portal_cleanup(&state);
-  g_bus_unown_name(flatpak_owner_id);
   g_bus_unown_name(documents_owner_id);
   g_bus_unown_name(desktop_owner_id);
   if (state.local_bus != NULL) {
@@ -184,7 +170,6 @@ int main(int argc, char **argv) {
   g_dbus_node_info_unref(state.request_node);
   g_dbus_node_info_unref(state.session_node);
   g_dbus_node_info_unref(state.control_node);
-  g_dbus_node_info_unref(state.flatpak_node);
   g_main_loop_unref(state.loop);
   g_ptr_array_free(state.documents.grants, TRUE);
   g_ptr_array_free(state.documents.sandbox_doc_dirs, TRUE);

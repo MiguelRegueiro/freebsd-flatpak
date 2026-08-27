@@ -1,4 +1,3 @@
-use crate::flatpak_compatibility::required_version_diagnostic;
 use crate::flatpak_metadata::value;
 use crate::installation::installation_paths::Installation;
 use crate::installation::runtime_checkout_dir;
@@ -47,7 +46,6 @@ pub fn resolve_app(
     if metadata_app_id != app_id {
         bail!("metadata app id mismatch: requested {app_id}, checkout contains {metadata_app_id}");
     }
-    report_required_version(&metadata, "Application", &format!("app/{app_id}"))?;
 
     let runtime_ref = value(&metadata, "Application", "runtime").with_context(|| {
         format!(
@@ -74,18 +72,6 @@ pub fn resolve_app(
 
     validate_checkout_dir("app", &app_dir)?;
     validate_checkout_dir("runtime", &runtime_dir)?;
-    let runtime_metadata_path = runtime_dir.join("metadata");
-    let runtime_metadata = fs::read_to_string(&runtime_metadata_path).with_context(|| {
-        format!(
-            "read Flatpak runtime metadata {}",
-            runtime_metadata_path.display()
-        )
-    })?;
-    report_required_version(
-        &runtime_metadata,
-        "Runtime",
-        &format!("runtime/{runtime_ref}"),
-    )?;
 
     Ok(FlatpakApp {
         app_id: app_id.to_string(),
@@ -95,13 +81,6 @@ pub fn resolve_app(
         command,
         args: options.args,
     })
-}
-
-fn report_required_version(metadata: &str, group: &str, reference: &str) -> Result<()> {
-    if let Some(diagnostic) = required_version_diagnostic(metadata, group, reference) {
-        eprintln!("compatibility warning: {diagnostic}");
-    }
-    Ok(())
 }
 
 fn validate_checkout_dir(kind: &str, dir: &Path) -> Result<()> {

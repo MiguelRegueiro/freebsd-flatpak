@@ -42,29 +42,3 @@ fn concurrent_instances_get_distinct_roots_and_cleanup_isolation() {
     assert!(!first_root.exists());
     assert!(second_root.join(".flatpak-info").is_file());
 }
-
-#[test]
-fn persistent_directory_creates_canonical_path_for_new_data() {
-    let dir = test_dir("persistent-canonical");
-    let app_data = dir.join("app-data");
-    fs::create_dir_all(&app_data).unwrap();
-    let expected = app_data.join(".example/profile");
-
-    assert_eq!(
-        ensure_persistent_directory(&app_data, Path::new(".example/profile")).unwrap(),
-        expected
-    );
-    assert!(expected.is_dir());
-}
-
-#[test]
-fn x11_socket_access_follows_flatpak_metadata() {
-    let dir = test_dir("x11-socket-metadata");
-    let metadata = dir.join("metadata");
-
-    fs::write(&metadata, "[Context]\nsockets=wayland;x11;pulseaudio;\n").unwrap();
-    assert!(app_requests_socket(&metadata, "x11").unwrap());
-
-    fs::write(&metadata, "[Context]\nsockets=wayland;pulseaudio;\n").unwrap();
-    assert!(!app_requests_socket(&metadata, "x11").unwrap());
-}

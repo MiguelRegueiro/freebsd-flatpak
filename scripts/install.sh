@@ -451,8 +451,6 @@ print_install_tree() {
         "    ├── $install_libexec_branch" \
         '    │   ├── libostree-1.so.1' \
         '    │   ├── portal-bridge' \
-        '    │   ├── sandbox-spawn-agent-linux' \
-        '    │   ├── libsignalfd-compat.so' \
         '    │   ├── status-notifier-bridge' \
         '    │   ├── libwayland-drm-devt-shim.so' \
         '    │   ├── libgtk3-wayland-geometry-shim.so' \
@@ -510,8 +508,6 @@ if [ "$DRY_RUN" -eq 1 ]; then
     ui_heading "Building compatibility helpers"
     ui_progress "Portal bridge"
     dry_command "su '$BUILD_USER' -c \"/bin/sh ./scripts/build-compatibility-bridges.sh '$HELPER_BUILD_DIR'\""
-    dry_command "su '$BUILD_USER' -c \"env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -O2 -Wall -Wextra -I/usr/local/include/glib-2.0 -I/usr/local/lib/glib-2.0/include compatibility_helpers/portal_bridge/spawn_agent.c compatibility_helpers/portal_bridge/spawn_agent_main.c -o '$HELPER_BUILD_DIR/sandbox-spawn-agent-linux' /compat/linux/usr/lib64/libgio-2.0.so.0 /compat/linux/usr/lib64/libgobject-2.0.so.0 /compat/linux/usr/lib64/libglib-2.0.so.0 -pthread\""
-    dry_command "su '$BUILD_USER' -c \"env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/signalfd-compat.c -o '$HELPER_BUILD_DIR/libsignalfd-compat.so' -pthread\""
     ui_progress "Status notifier bridge"
     ui_progress "Compatibility shims"
     dry_command "su '$BUILD_USER' -c \"env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/wayland-drm-devt-shim.c -o '$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so' -ldl\""
@@ -526,7 +522,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     dry_command "install -o root -g wheel -m 755 '$OSTREE_PREFIX/lib/libostree-1.so.1.0.0' '$INSTALL_LIBEXEC/libostree-1.so.1'"
     dry_command "install -o root -g wheel -m 644 LICENSE '$INSTALL_LICENSES/BSD-2-Clause.txt'"
     dry_command "install -o root -g wheel -m 644 LICENSES/LGPL-2.0-or-later.txt LICENSES/MIT-ostree-rs.txt '$INSTALL_LICENSES/'"
-    dry_command "install -o root -g wheel -m 755 '$HELPER_BUILD_DIR/portal-bridge' '$HELPER_BUILD_DIR/sandbox-spawn-agent-linux' '$HELPER_BUILD_DIR/libsignalfd-compat.so' '$HELPER_BUILD_DIR/status-notifier-bridge' '$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so' '$HELPER_BUILD_DIR/libgtk3-wayland-geometry-shim.so' '$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so' '$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so' '$HELPER_BUILD_DIR/libnetlink-route-flags-shim.so' '$INSTALL_LIBEXEC/'"
+    dry_command "install -o root -g wheel -m 755 '$HELPER_BUILD_DIR/portal-bridge' '$HELPER_BUILD_DIR/status-notifier-bridge' '$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so' '$HELPER_BUILD_DIR/libgtk3-wayland-geometry-shim.so' '$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so' '$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so' '$HELPER_BUILD_DIR/libnetlink-route-flags-shim.so' '$INSTALL_LIBEXEC/'"
     dry_command "ldd '$INSTALL_BIN/flatpak'  # verify shared-library dependencies"
     ui_heading "Installation complete (dry run)"
     exit 0
@@ -596,10 +592,6 @@ run_logged "Helper build-directory creation" su "$BUILD_USER" -c \
     "mkdir -p '$HELPER_BUILD_DIR'"
 run_logged "Compatibility bridge build" su "$BUILD_USER" -c \
     "env INSTALL_PROGRESS_FD=3 INSTALL_SUPPRESS_PROGRESS=1 /bin/sh ./scripts/build-compatibility-bridges.sh '$HELPER_BUILD_DIR'"
-run_logged "Linux sandbox spawn agent build" su "$BUILD_USER" -c \
-    "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -O2 -Wall -Wextra -I/usr/local/include/glib-2.0 -I/usr/local/lib/glib-2.0/include compatibility_helpers/portal_bridge/spawn_agent.c compatibility_helpers/portal_bridge/spawn_agent_main.c -o '$HELPER_BUILD_DIR/sandbox-spawn-agent-linux' /compat/linux/usr/lib64/libgio-2.0.so.0 /compat/linux/usr/lib64/libgobject-2.0.so.0 /compat/linux/usr/lib64/libglib-2.0.so.0 -pthread"
-run_logged "signalfd compatibility shim build" su "$BUILD_USER" -c \
-    "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/signalfd-compat.c -o '$HELPER_BUILD_DIR/libsignalfd-compat.so' -pthread"
 run_logged "Wayland DRM compatibility shim build" su "$BUILD_USER" -c \
     "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/wayland-drm-devt-shim.c -o '$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so' -ldl"
 run_logged "GTK3 Wayland geometry compatibility shim build" su "$BUILD_USER" -c \
@@ -615,8 +607,6 @@ for artifact in \
     target/release/flatpak \
     "$OSTREE_PREFIX/lib/libostree-1.so.1.0.0" \
     "$HELPER_BUILD_DIR/portal-bridge" \
-    "$HELPER_BUILD_DIR/sandbox-spawn-agent-linux" \
-    "$HELPER_BUILD_DIR/libsignalfd-compat.so" \
     "$HELPER_BUILD_DIR/status-notifier-bridge" \
     "$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so" \
     "$HELPER_BUILD_DIR/libgtk3-wayland-geometry-shim.so" \
@@ -643,8 +633,6 @@ run_logged "Third-party license installation" install -o root -g wheel -m 644 \
     "$INSTALL_LICENSES/"
 run_logged "Compatibility helper installation" install -o root -g wheel -m 755 \
     "$HELPER_BUILD_DIR/portal-bridge" \
-    "$HELPER_BUILD_DIR/sandbox-spawn-agent-linux" \
-    "$HELPER_BUILD_DIR/libsignalfd-compat.so" \
     "$HELPER_BUILD_DIR/status-notifier-bridge" \
     "$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so" \
     "$HELPER_BUILD_DIR/libgtk3-wayland-geometry-shim.so" \

@@ -44,9 +44,6 @@ pub(super) fn parse_install_args(args: Vec<String>) -> Result<InstallOptions> {
 
 pub(crate) fn cmd_install(paths: &Installation, args: Vec<String>) -> Result<()> {
     let options = parse_install_args(args)?;
-    if options.app_id.starts_with("runtime/") {
-        return install_runtime(paths, &options);
-    }
     let total_started = Instant::now();
     if !options.transaction.noninteractive {
         println!("==> Resolving {}", options.app_id);
@@ -160,49 +157,6 @@ pub(crate) fn cmd_install(paths: &Installation, args: Vec<String>) -> Result<()>
         );
         println!("  desktop export: {:.3}s", export_elapsed.as_secs_f64());
         println!("  total: {:.3}s", total_started.elapsed().as_secs_f64());
-    }
-    Ok(())
-}
-
-fn install_runtime(paths: &Installation, options: &InstallOptions) -> Result<()> {
-    if !options.transaction.noninteractive {
-        println!("==> Resolving {}", options.app_id);
-    }
-    let remote =
-        remotes::resolve_remote_runtime(paths, options.remote.as_deref(), &options.app_id)?;
-    let installed = if remote.is_extension {
-        state::list_extensions(paths)?.into_iter().any(|extension| {
-            extension.ref_name == remote.ref_name && extension.commit == remote.commit
-        })
-    } else {
-        state::get_runtime_from(paths, &remote.origin, &remote.runtime_ref)?
-            .is_some_and(|runtime| runtime.runtime_commit == remote.commit)
-    };
-    if installed && !options.or_update {
-        println!("{} is already installed", remote.ref_name);
-        return Ok(());
-    }
-    let entries = [TransactionEntry {
-        operation: if installed {
-            TransactionOperation::Update
-        } else {
-            TransactionOperation::Install
-        },
-        kind: if remote.is_extension {
-            "extension"
-        } else {
-            "runtime"
-        },
-        ref_name: remote.ref_name.clone(),
-    }];
-    if !present_and_confirm(&entries, options.transaction)? {
-        return Ok(());
-    }
-    let installed_ref = state::install_runtime_ref(paths, &remote)?;
-    if !options.transaction.noninteractive {
-        println!("\n==> Installed {}", remote.ref_name);
-        println!("    Location: {}", installed_ref.checkout_dir.display());
-        println!("    Installed size: {} bytes", installed_ref.installed_size);
     }
     Ok(())
 }

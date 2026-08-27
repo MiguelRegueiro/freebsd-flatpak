@@ -1,7 +1,7 @@
 use super::*;
 use crate::sandbox::launch_application::FlatpakApp;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static TEST_ID: AtomicUsize = AtomicUsize::new(0);
@@ -61,86 +61,13 @@ fn launch_data_dirs_include_projected_host_icon_themes() {
         dbus_session_bus_address: None,
     };
 
-    let env = launch_env(
-        &app,
-        &desktop,
-        1001,
-        "user",
-        Path::new("/var/home/user"),
-        Path::new("/var/home/user/.var/app/org.example.App"),
-        &[],
-    );
+    let env = launch_env(&app, &desktop, 1001, "user");
 
     assert_eq!(
         env.iter()
             .find(|(key, _)| key == "XDG_DATA_DIRS")
             .map(|(_, value)| value.as_str()),
         Some("/app/share:/usr/share:/usr/share/runtime/share:/run/host/share")
-    );
-}
-
-#[test]
-fn launch_uses_upstream_home_and_per_app_xdg_paths() {
-    let app = app_with_metadata("[Application]\nname=org.example.App\n");
-    let desktop = DesktopSession {
-        xdg_runtime_dir: PathBuf::from("/run/host-user"),
-        wayland_display: "wayland-0".into(),
-        display: None,
-        dbus_session_bus_address: None,
-    };
-    let host_xdg = vec![
-        ("HOST_XDG_CONFIG_HOME".into(), "/host/config".into()),
-        ("HOST_XDG_DATA_HOME".into(), "/host/data".into()),
-        ("HOST_XDG_CACHE_HOME".into(), "/host/cache".into()),
-    ];
-
-    let env = launch_env(
-        &app,
-        &desktop,
-        1001,
-        "user",
-        Path::new("/var/home/user"),
-        Path::new("/var/home/user/.var/app/org.example.App"),
-        &host_xdg,
-    );
-    let value = |key: &str| {
-        env.iter()
-            .find(|(candidate, _)| candidate == key)
-            .map(|(_, value)| value.as_str())
-    };
-
-    assert_eq!(value("HOME"), Some("/var/home/user"));
-    assert_eq!(
-        value("XDG_CONFIG_HOME"),
-        Some("/var/home/user/.var/app/org.example.App/config")
-    );
-    assert_eq!(
-        value("XDG_DATA_HOME"),
-        Some("/var/home/user/.var/app/org.example.App/data")
-    );
-    assert_eq!(
-        value("XDG_CACHE_HOME"),
-        Some("/var/home/user/.var/app/org.example.App/cache")
-    );
-    assert_eq!(value("HOST_XDG_CONFIG_HOME"), Some("/host/config"));
-    assert_eq!(value("HOST_XDG_DATA_HOME"), Some("/host/data"));
-    assert_eq!(value("HOST_XDG_CACHE_HOME"), Some("/host/cache"));
-}
-
-#[test]
-fn host_xdg_paths_are_only_exported_when_set_on_the_host() {
-    let env = host_xdg_base_directory_env_with(|key| match key {
-        "XDG_CONFIG_HOME" => Some("/custom/config".into()),
-        "XDG_CACHE_HOME" => Some("/custom/cache".into()),
-        _ => None,
-    });
-
-    assert_eq!(
-        env,
-        vec![
-            ("HOST_XDG_CONFIG_HOME".into(), "/custom/config".into()),
-            ("HOST_XDG_CACHE_HOME".into(), "/custom/cache".into()),
-        ]
     );
 }
 

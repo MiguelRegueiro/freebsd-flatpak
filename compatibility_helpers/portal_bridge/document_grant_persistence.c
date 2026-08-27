@@ -67,7 +67,6 @@ bool load_persistent_document_grants(BridgeState *state, GError **error) {
 
   gsize group_count = 0;
   char **groups = g_key_file_get_groups(key_file, &group_count);
-  bool removed_stale_grant = false;
   for (gsize i = 0; i < group_count; i++) {
     GError *field_error = NULL;
     char *path =
@@ -98,29 +97,13 @@ bool load_persistent_document_grants(BridgeState *state, GError **error) {
     }
 
     DocumentGrant *grant = NULL;
-    GError *restore_error = NULL;
     if (!restore_document_grant(state, groups[i], path, app_id, permissions,
-                                directory, &grant, &restore_error)) {
-      if (g_error_matches(restore_error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND) ||
-          g_error_matches(restore_error, G_IO_ERROR,
-                          G_IO_ERROR_NOT_DIRECTORY)) {
-        log_line("discarding stale persistent document grant %s for missing "
-                 "path %s",
-                 groups[i], path);
-        g_key_file_remove_group(key_file, groups[i], NULL);
-        removed_stale_grant = true;
-        g_error_free(restore_error);
-        g_free(path);
-        g_free(app_id);
-        g_strfreev(permissions);
-        continue;
-      }
+                                directory, &grant, error)) {
       g_free(path);
       g_free(app_id);
       g_strfreev(permissions);
       g_strfreev(groups);
       g_key_file_unref(key_file);
-      g_propagate_error(error, restore_error);
       return false;
     }
     g_ptr_array_add(state->documents.grants, grant);
@@ -130,9 +113,5 @@ bool load_persistent_document_grants(BridgeState *state, GError **error) {
   }
   g_strfreev(groups);
   g_key_file_unref(key_file);
-  if (removed_stale_grant &&
-      !save_persistent_document_grants(state, error)) {
-    return false;
-  }
   return true;
 }

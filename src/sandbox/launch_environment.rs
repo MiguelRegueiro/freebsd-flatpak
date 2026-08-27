@@ -3,7 +3,6 @@ use crate::desktop_integration::DesktopSession;
 use crate::flatpak_metadata::section_entries;
 use crate::installation as runtime;
 use anyhow::{Context, Result};
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,14 +11,9 @@ pub(super) fn launch_env(
     desktop: &DesktopSession,
     uid: u32,
     user: &str,
-    home: &Path,
-    app_data: &Path,
-    host_xdg_env: &[(String, String)],
 ) -> Vec<(String, String)> {
-    let home = home.display().to_string();
-    let app_data = app_data.display().to_string();
     let mut env = vec![
-        ("HOME".to_string(), home),
+        ("HOME".to_string(), "/var/data".to_string()),
         ("USER".to_string(), user.to_string()),
         ("LOGNAME".to_string(), user.to_string()),
         ("SHELL".to_string(), "/bin/sh".to_string()),
@@ -32,18 +26,9 @@ pub(super) fn launch_env(
         ("LC_ALL".to_string(), "C.UTF-8".to_string()),
         ("GDK_BACKEND".to_string(), "wayland".to_string()),
         ("GSK_RENDERER".to_string(), "cairo".to_string()),
-        (
-            "XDG_DATA_HOME".to_string(),
-            format!("{app_data}/data"),
-        ),
-        (
-            "XDG_CONFIG_HOME".to_string(),
-            format!("{app_data}/config"),
-        ),
-        (
-            "XDG_CACHE_HOME".to_string(),
-            format!("{app_data}/cache"),
-        ),
+        ("XDG_DATA_HOME".to_string(), "/var/data".to_string()),
+        ("XDG_CONFIG_HOME".to_string(), "/var/config".to_string()),
+        ("XDG_CACHE_HOME".to_string(), "/var/cache".to_string()),
         ("XDG_CONFIG_DIRS".to_string(), "/app/etc/xdg:/etc/xdg".to_string()),
         (
             "XDG_DATA_DIRS".to_string(),
@@ -60,7 +45,6 @@ pub(super) fn launch_env(
         ),
         ("PATH".to_string(), "/app/bin:/usr/bin:/bin".to_string()),
     ];
-    env.extend_from_slice(host_xdg_env);
 
     if let Some(display) = &desktop.display {
         env.push(("DISPLAY".to_string(), display.clone()));
@@ -73,25 +57,6 @@ pub(super) fn launch_env(
     }
 
     env
-}
-
-pub(super) fn host_xdg_base_directory_env() -> Vec<(String, String)> {
-    host_xdg_base_directory_env_with(|key| env::var_os(key))
-}
-
-fn host_xdg_base_directory_env_with(
-    mut lookup: impl FnMut(&str) -> Option<std::ffi::OsString>,
-) -> Vec<(String, String)> {
-    ["CONFIG", "DATA", "CACHE"]
-        .into_iter()
-        .filter_map(|name| {
-            let value = lookup(&format!("XDG_{name}_HOME"))?;
-            Some((
-                format!("HOST_XDG_{name}_HOME"),
-                value.to_string_lossy().into_owned(),
-            ))
-        })
-        .collect()
 }
 
 fn push_host_env(env: &mut Vec<(String, String)>, key: &str) {

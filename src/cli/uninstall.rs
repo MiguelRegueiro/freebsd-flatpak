@@ -187,7 +187,6 @@ pub(super) fn plan_unused_deployment_checkouts(paths: &Installation) -> Result<V
             .unwrap_or_else(|| state::absolute(paths, &app.runtime_dir));
         required_extensions.extend(runtime::required_extension_refs(
             &state::absolute(paths, &app.app_dir),
-            &app.branch,
             &app.runtime_ref,
             &runtime_dir,
             &installed_extension_refs,

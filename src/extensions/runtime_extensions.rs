@@ -47,7 +47,10 @@ pub(crate) fn ensure_default_gl_extension_timed(
         "runtime/org.freedesktop.Platform.GL.default/{}/{}",
         parts.arch, extension_branch
     );
-    let checkout_dir = extension_checkout_dir(paths, &ref_name)?;
+    let checkout_dir = paths.extensions().join(format!(
+        "org.freedesktop.Platform.GL.default-{}",
+        safe_dir_fragment(&extension_branch)
+    ));
     let timings = checkout_if_missing(paths, "extension", &ref_name, None, &checkout_dir, false)?;
 
     Ok((
@@ -95,7 +98,10 @@ pub fn ensure_intel_vaapi_extension(
         "runtime/org.freedesktop.Platform.VAAPI.Intel/{}/{}",
         parts.arch, extension_branch
     );
-    let checkout_dir = extension_checkout_dir(paths, &ref_name)?;
+    let checkout_dir = paths.extensions().join(format!(
+        "org.freedesktop.Platform.VAAPI.Intel-{}",
+        safe_dir_fragment(&extension_branch)
+    ));
     checkout_if_missing(paths, "extension", &ref_name, None, &checkout_dir, false)?;
 
     let ld_library_relative = value(&metadata, section, "add-ld-path")
@@ -157,16 +163,6 @@ pub fn runtime_checkout_dir(runtime_ref: &str) -> String {
     let _arch = parts.next();
     let branch = parts.next().unwrap_or("stable");
     format!("{name}-{}", branch.replace('/', "_"))
-}
-
-pub fn extension_checkout_dir(paths: &Installation, ref_name: &str) -> Result<PathBuf> {
-    let parts = parse_runtime_ref(ref_name).context("extension ref must be a runtime ref")?;
-    Ok(paths.extensions().join(format!(
-        "{}-{}-{}",
-        safe_dir_fragment(&parts.name),
-        safe_dir_fragment(&parts.arch),
-        safe_dir_fragment(&parts.branch)
-    )))
 }
 
 pub(super) fn parse_runtime_ref(ref_name: &str) -> Option<RuntimeRefParts> {

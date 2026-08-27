@@ -112,17 +112,12 @@ impl ChrootInstance {
     ) -> Result<ExitStatus> {
         install_signal_handlers();
         let user = host_user(self.uid);
-        let app_data = self.paths.app_data(&app.app_id)?;
-        let host_xdg_env = super::launch_environment::host_xdg_base_directory_env();
-        let mut env = launch_env(
-            app,
-            desktop,
-            self.uid,
-            &user,
-            self.host_filesystem.sandbox_home(),
-            &app_data,
-            &host_xdg_env,
-        );
+        let mut env = launch_env(app, desktop, self.uid, &user);
+        env.retain(|(key, _)| key != "HOME");
+        env.push((
+            "HOME".to_string(),
+            self.host_filesystem.sandbox_home_env("/var/data"),
+        ));
         env.extend(self.host_filesystem.user_dir_env());
         env.extend(self.host_audio.env());
         env.extend(self.host_cursor.env());
@@ -135,11 +130,6 @@ impl ChrootInstance {
             &mut env,
             self.host_graphics.ld_preload_paths(),
             self.host_graphics.zypak_ld_preload_paths(),
-        );
-        prepend_env_paths(
-            &mut env,
-            "LD_PRELOAD",
-            vec!["/run/host/freebsd-flatpak/libsignalfd-compat.so".to_string()],
         );
         prepend_env_paths(&mut env, "LD_PRELOAD", self.host_network.preload_paths());
         prepend_env_paths(
@@ -159,8 +149,6 @@ impl ChrootInstance {
         );
         merge_env(&mut env, self.host_video.env());
         ensure_metadata_runtime_dirs(&env, &desktop.xdg_runtime_dir, self.uid, &app.app_id)?;
-        self.host_portal
-            .start_spawn_agent(self.uid, self.gid, &self.supplementary_gids, &env)?;
         let translated_args = self.host_filesystem.translate_args(&app.args)?;
         let app_args = launch_args(app, translated_args)?;
 

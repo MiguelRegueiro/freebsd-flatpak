@@ -80,19 +80,6 @@ for signed remote metadata, `$XDG_RUNTIME_DIR/freebsd-flatpak` for transient
 run state, and `~/.var/app/<app-id>` for persistent application data. Standard
 XDG defaults are used when the data or cache variables are unset.
 
-## Flatpak compatibility version
-
-The freebsd-flatpak release version and the upstream Flatpak compatibility
-version exposed to applications are independent. The release version describes
-this project; `src/flatpak_compatibility.rs` defines the targeted upstream
-ecosystem generation and is reported as `flatpak-version` in
-`/.flatpak-info`.
-
-Application and runtime `required-flatpak` metadata is parsed against this
-compatibility level. A newer declaration produces a diagnostic but does not
-blanket-reject the application: unsupported behavior is reported when a
-concrete feature boundary is reached.
-
 ## Current limitations
 
 - The project provides a focused compatibility layer rather than the complete upstream Flatpak sandbox model.
