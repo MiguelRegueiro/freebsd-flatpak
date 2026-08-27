@@ -88,14 +88,11 @@ pub(crate) fn run() -> Result<()> {
     }
 
     let paths = if command.as_deref() == Some("run") {
-        diagnostics.measure(
-            Detail::Summary,
-            "run",
-            "installation startup",
-            startup::initialize,
-        )
+        diagnostics.measure(Detail::Summary, "run", "installation startup", || {
+            startup::initialize_for_run(&diagnostics)
+        })
     } else {
-        startup::initialize()
+        startup::initialize(&diagnostics)
     }?;
     match command.as_deref() {
         Some("search") => search::cmd_search(&paths, args.collect()),

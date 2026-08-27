@@ -13,8 +13,8 @@ pub use ref_resolution::{
     checkout_ref, inspect_refs, load_remote_metadata, resolve_remote_app, search_apps,
 };
 pub(crate) use remote_config::{
-    add as add_remote, delete as delete_remote, from_location, initialize, modify as modify_remote,
-    read_gpg_key, Remote, DEFAULT_REMOTE,
+    add as add_remote, delete as delete_remote, from_location, initialize_detailed,
+    modify as modify_remote, read_gpg_key, Remote, DEFAULT_REMOTE,
 };
 pub use remote_config::{enabled as enabled_remotes, get as get_remote, list as list_remotes};
 

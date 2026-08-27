@@ -30,11 +30,11 @@ fn flathub_is_bootstrapped_once_and_deletion_is_persistent() {
     ));
     let paths = Installation::for_test(&root);
     paths.ensure().unwrap();
-    initialize(&paths).unwrap();
+    initialize_detailed(&paths, &Diagnostics::new(Default::default())).unwrap();
     assert_eq!(list(&paths).unwrap()[0].name, DEFAULT_REMOTE);
 
     delete(&paths, DEFAULT_REMOTE).unwrap();
-    initialize(&paths).unwrap();
+    initialize_detailed(&paths, &Diagnostics::new(Default::default())).unwrap();
     assert!(list(&paths).unwrap().is_empty());
     let _ = std::fs::remove_dir_all(root);
 }

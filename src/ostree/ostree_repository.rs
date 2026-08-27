@@ -76,6 +76,14 @@ impl Storage {
     }
 
     pub fn configure_remote(&self, remote: &crate::remotes::Remote) -> Result<()> {
+        self.configure_remote_definition(remote)?;
+        self.import_remote_gpg_key(remote)
+    }
+
+    pub(crate) fn configure_remote_definition(
+        &self,
+        remote: &crate::remotes::Remote,
+    ) -> Result<()> {
         let options = VariantDict::new(None);
         options.insert("gpg-verify", remote.gpg_verify);
         options.insert("gpg-verify-summary", remote.gpg_verify);
@@ -89,7 +97,10 @@ impl Storage {
                 Some(&options.end()),
                 gio::Cancellable::NONE,
             )
-            .with_context(|| format!("configure private OSTree remote {}", remote.name))?;
+            .with_context(|| format!("configure private OSTree remote {}", remote.name))
+    }
+
+    pub(crate) fn import_remote_gpg_key(&self, remote: &crate::remotes::Remote) -> Result<()> {
         if let Some(encoded) = &remote.gpg_key {
             let key = base64::decode(encoded.trim())
                 .with_context(|| format!("decode GPG key for remote {}", remote.name))?;

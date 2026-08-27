@@ -1,3 +1,4 @@
+use crate::diagnostics::{Detail, Diagnostics};
 use crate::installation::installation_paths::Installation;
 use crate::ostree::Storage;
 use anyhow::{bail, Context, Result};
@@ -35,7 +36,7 @@ impl Remote {
     }
 }
 
-pub fn initialize(paths: &Installation) -> Result<()> {
+pub(crate) fn initialize_detailed(paths: &Installation, diagnostics: &Diagnostics) -> Result<()> {
     fs::create_dir_all(paths.remote_configs()).context("create remote configuration directory")?;
     let marker = paths.remote_configs().join(BOOTSTRAP_MARKER);
     if !marker.exists() {
@@ -44,10 +45,31 @@ pub fn initialize(paths: &Installation) -> Result<()> {
         }
         fs::write(&marker, b"1\n").with_context(|| format!("write {}", marker.display()))?;
     }
-    let remotes = list(paths)?;
-    let storage = Storage::open(paths)?;
+    let remotes = diagnostics.measure(
+        Detail::Detailed,
+        "installation",
+        "load remote configs",
+        || list(paths),
+    )?;
+    let storage = diagnostics.measure(
+        Detail::Detailed,
+        "installation",
+        "open OSTree for remotes",
+        || Storage::open(paths),
+    )?;
     for remote in &remotes {
-        storage.configure_remote(remote)?;
+        diagnostics.measure(
+            Detail::Detailed,
+            "installation",
+            "configure OSTree remote",
+            || storage.configure_remote_definition(remote),
+        )?;
+        diagnostics.measure(
+            Detail::Detailed,
+            "installation",
+            "import remote GPG key",
+            || storage.import_remote_gpg_key(remote),
+        )?;
     }
     Ok(())
 }

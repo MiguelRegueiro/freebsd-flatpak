@@ -1,18 +1,77 @@
+use crate::diagnostics::{Detail, Diagnostics};
 use crate::host_resources::graphics;
 use crate::installation as state;
 use crate::installation::{self as runtime, installation_paths::Installation};
 use crate::{portal_integration, remotes, sandbox};
 use anyhow::Result;
 
-pub(crate) fn initialize() -> Result<Installation> {
-    let paths = Installation::from_env()?;
-    state::ensure_layout(&paths)?;
-    remotes::initialize(&paths)?;
-    sandbox::recover_stale_mounts(&paths)?;
-    portal_integration::recover_stale_portal_mounts(&paths)?;
-    graphics::recover_stale_graphics_dirs(&paths)?;
-    runtime::recover_storage(&paths)?;
-    state::reconcile_runtime_bindings(&paths)?;
-    state::cleanup_retired_deployments(&paths)?;
+pub(crate) fn initialize(diagnostics: &Diagnostics) -> Result<Installation> {
+    initialize_inner(diagnostics, true)
+}
+
+// `run` resolves already-installed deployments from local state and never uses
+// OSTree remotes. Keep crash and transient-resource recovery below, but avoid
+// rewriting remote configuration and importing trust keys on every launch.
+pub(crate) fn initialize_for_run(diagnostics: &Diagnostics) -> Result<Installation> {
+    initialize_inner(diagnostics, false)
+}
+
+fn initialize_inner(diagnostics: &Diagnostics, initialize_remotes: bool) -> Result<Installation> {
+    let paths = diagnostics.measure(
+        Detail::Detailed,
+        "installation",
+        "resolve paths",
+        Installation::from_env,
+    )?;
+    diagnostics.measure(
+        Detail::Detailed,
+        "installation",
+        "ensure state layout",
+        || state::ensure_layout(&paths),
+    )?;
+    if initialize_remotes {
+        diagnostics.measure(
+            Detail::Detailed,
+            "installation",
+            "initialize remotes",
+            || remotes::initialize_detailed(&paths, diagnostics),
+        )?;
+    }
+    diagnostics.measure(
+        Detail::Detailed,
+        "installation",
+        "recover sandbox mounts",
+        || sandbox::recover_stale_mounts(&paths),
+    )?;
+    diagnostics.measure(
+        Detail::Detailed,
+        "installation",
+        "recover portal state",
+        || portal_integration::recover_stale_portal_mounts(&paths),
+    )?;
+    diagnostics.measure(
+        Detail::Detailed,
+        "installation",
+        "recover graphics state",
+        || graphics::recover_stale_graphics_dirs(&paths),
+    )?;
+    diagnostics.measure(
+        Detail::Detailed,
+        "installation",
+        "recover OSTree storage",
+        || runtime::recover_storage(&paths),
+    )?;
+    diagnostics.measure(
+        Detail::Detailed,
+        "installation",
+        "reconcile runtime bindings",
+        || state::reconcile_runtime_bindings(&paths),
+    )?;
+    diagnostics.measure(
+        Detail::Detailed,
+        "installation",
+        "cleanup retired deployments",
+        || state::cleanup_retired_deployments(&paths),
+    )?;
     Ok(paths)
 }
