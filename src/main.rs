@@ -9,6 +9,8 @@ mod ostree;
 mod portal_integration;
 mod remotes;
 mod sandbox;
+#[allow(dead_code)]
+mod secure_mount;
 
 fn main() -> anyhow::Result<()> {
     cli::run_at_process_boundary()

@@ -3,6 +3,7 @@ use super::application_entrypoint::{
 };
 use super::chroot_instance::ChrootInstance;
 use super::filesystem_grants::HostFilesystem;
+use super::flatpak_data_mount_plan::FlatpakDataMountPlan;
 use super::launch_application::FlatpakApp;
 use super::process_signals::install_signal_handlers;
 use super::sandbox_root::{app_allows_network, prepare_root, write_flatpak_info};
@@ -244,7 +245,11 @@ impl ChrootNullfsBackend {
             .host_filesystem
             .write_xdg_user_dirs_config(&app_data.join("config"))?;
         for name in ["data", "config", "cache"] {
-            instance.mount_nullfs(&app_data.join(name), PathBuf::from("var").join(name), false)?;
+            instance.mount_nullfs_secure(
+                &app_data.join(name),
+                PathBuf::from("var").join(name),
+                false,
+            )?;
         }
         for extension in instance.app_extensions.clone() {
             instance.mount_nullfs(
@@ -271,13 +276,49 @@ impl ChrootNullfsBackend {
         for mount in instance.host_video.runtime_mounts() {
             instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
         }
-        for grant in instance.host_filesystem.grants().to_vec() {
-            instance.mount_nullfs(
+        let reserved_data_roots = [
+            self.paths.data_home().join("flatpak"),
+            self.paths.data_root().to_path_buf(),
+        ]
+        .into_iter()
+        .filter(|root| root.is_dir())
+        .collect::<Vec<_>>();
+        let flatpak_data_plan = FlatpakDataMountPlan::build(
+            &instance.host_filesystem,
+            &app_data,
+            &reserved_data_roots,
+        )?;
+        for grant in flatpak_data_plan.grants_before_mask {
+            instance.mount_nullfs_secure(
                 grant.host_path(),
                 grant.sandbox_target_relative()?,
                 grant.access().is_read_only(),
             )?;
         }
+        for root in &flatpak_data_plan.reserved_roots_to_mask {
+            instance.mount_tmpfs_secure(
+                absolute_to_chroot_relative(root)?,
+                &format!("mode=0700,uid={uid},gid={gid}"),
+            )?;
+        }
+        if flatpak_data_plan.mask_app_data_root {
+            instance.mount_tmpfs_secure(
+                absolute_to_chroot_relative(&flatpak_data_plan.app_data_root)?,
+                &format!("mode=0700,uid={uid},gid={gid}"),
+            )?;
+        }
+        for grant in flatpak_data_plan.grants_after_mask {
+            instance.mount_nullfs_secure(
+                grant.host_path(),
+                grant.sandbox_target_relative()?,
+                grant.access().is_read_only(),
+            )?;
+        }
+        instance.mount_nullfs_secure(
+            &flatpak_data_plan.app_data,
+            absolute_to_chroot_relative(&flatpak_data_plan.app_data)?,
+            false,
+        )?;
         for mount in instance.host_cursor.mounts().to_vec() {
             instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
         }
@@ -286,7 +327,7 @@ impl ChrootNullfsBackend {
         }
         instance.mount_nullfs(&desktop.xdg_runtime_dir, format!("run/user/{uid}"), false)?;
         if let Some(doc_dir) = instance.host_portal.doc_dir().map(Path::to_path_buf) {
-            instance.mount_nullfs(&doc_dir, format!("run/user/{uid}/doc"), true)?;
+            instance.mount_nullfs_secure(&doc_dir, format!("run/user/{uid}/doc"), true)?;
             instance.host_portal.attach_sandbox()?;
         }
         instance.mount_nullfs(Path::new("/tmp"), "tmp", false)?;
@@ -304,6 +345,16 @@ impl ChrootNullfsBackend {
 
         Ok(instance)
     }
+}
+
+fn absolute_to_chroot_relative(path: &Path) -> Result<PathBuf> {
+    let relative = path
+        .strip_prefix(Path::new("/"))
+        .with_context(|| format!("make sandbox path relative: {}", path.display()))?;
+    if relative.as_os_str().is_empty() {
+        bail!("sandbox path must not be the root directory");
+    }
+    Ok(relative.to_path_buf())
 }
 
 impl SandboxBackend for ChrootNullfsBackend {

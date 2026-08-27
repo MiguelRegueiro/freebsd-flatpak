@@ -357,3 +357,75 @@ fn overlapping_parent_and_child_grants_keep_explicit_access_and_mount_order() {
     );
     assert_eq!(fs.grants()[1].access(), AccessMode::ReadOnly);
 }
+
+#[test]
+fn create_permission_materializes_missing_protected_subtree_and_keeps_mode() {
+    let tree = TestTree::new("protected-create");
+    let home = tree.path("home/user");
+    fs::create_dir_all(&home).unwrap();
+    let created = home.join(".local/share/flatpak/repo/objects");
+    let filesystem = HostFilesystem::from_metadata(
+        &metadata("~/.local/share/flatpak/repo/objects:create;"),
+        "user",
+        &home,
+        &tree.path("project"),
+        &tree.path("sandbox"),
+    )
+    .unwrap();
+
+    assert!(created.is_dir());
+    assert_eq!(filesystem.grants().len(), 1);
+    assert_eq!(
+        filesystem.grants()[0].sandbox_path(),
+        Path::new("/home/user/.local/share/flatpak/repo/objects")
+    );
+    assert_eq!(filesystem.grants()[0].access(), AccessMode::ReadWrite);
+    assert_eq!(
+        filesystem.grants()[0].source_permission(),
+        "~/.local/share/flatpak/repo/objects:create"
+    );
+}
+
+#[test]
+fn missing_protected_subtree_without_create_is_not_granted() {
+    let tree = TestTree::new("protected-missing");
+    let home = tree.path("home/user");
+    fs::create_dir_all(&home).unwrap();
+    let filesystem = HostFilesystem::from_metadata(
+        &metadata("~/.local/share/flatpak/missing:ro;"),
+        "user",
+        &home,
+        &tree.path("project"),
+        &tree.path("sandbox"),
+    )
+    .unwrap();
+
+    assert!(filesystem.grants().is_empty());
+    assert!(filesystem
+        .warnings()
+        .iter()
+        .any(|warning| warning.contains("skipping missing host path")));
+}
+
+#[test]
+fn read_only_parent_and_writable_child_keep_explicit_precedence() {
+    let tree = TestTree::new("parent-ro-child-rw");
+    let home = tree.path("home/user");
+    let child = home.join(".var/app/org.example.Other/data");
+    fs::create_dir_all(&child).unwrap();
+    let filesystem = HostFilesystem::from_metadata(
+        &metadata("~/.var/app/org.example.Other:ro;~/.var/app/org.example.Other/data:rw;"),
+        "user",
+        &home,
+        &tree.path("project"),
+        &tree.path("sandbox"),
+    )
+    .unwrap();
+
+    assert_eq!(filesystem.grants().len(), 2);
+    assert_eq!(filesystem.grants()[0].access(), AccessMode::ReadOnly);
+    assert_eq!(filesystem.grants()[1].access(), AccessMode::ReadWrite);
+    assert!(filesystem.grants()[1]
+        .sandbox_path()
+        .starts_with(filesystem.grants()[0].sandbox_path()));
+}

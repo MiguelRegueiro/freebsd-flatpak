@@ -51,12 +51,21 @@ pub(super) struct ChrootInstance {
     deployment: state::AppRecord,
     extension_refs: Vec<String>,
     cleaned: bool,
+    pub(super) nullfs_mounts: Vec<NullfsMapping>,
+    pub(super) mount_staging_ready: bool,
+    pub(super) next_mount_staging_id: usize,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct OwnedMount {
     pub(super) path: PathBuf,
     pub(super) read_only: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct NullfsMapping {
+    pub(super) source: PathBuf,
+    pub(super) target: PathBuf,
 }
 
 impl ChrootInstance {
@@ -102,6 +111,9 @@ impl ChrootInstance {
             deployment,
             extension_refs,
             cleaned: false,
+            nullfs_mounts: Vec::new(),
+            mount_staging_ready: false,
+            next_mount_staging_id: 0,
         }
     }
 

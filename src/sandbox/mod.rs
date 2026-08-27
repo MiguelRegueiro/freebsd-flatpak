@@ -5,6 +5,7 @@ mod chroot_instance;
 mod file_argument_translation;
 pub(crate) mod filesystem_grants;
 mod filesystem_permissions;
+mod flatpak_data_mount_plan;
 mod launch_application;
 mod launch_environment;
 mod mount_operations;

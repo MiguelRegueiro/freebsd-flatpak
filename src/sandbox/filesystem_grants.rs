@@ -93,6 +93,10 @@ impl HostPathGrant {
         None
     }
 
+    pub(super) fn maps_host_path_to_same_sandbox_path(&self, host_path: &Path) -> bool {
+        self.map_host_path(host_path).as_deref() == Some(host_path)
+    }
+
     fn same_mount(&self, host_path: &Path, sandbox_path: &Path) -> bool {
         (self.host_path == host_path || self.canonical_host_path == host_path)
             && self.sandbox_path == sandbox_path
