@@ -16,6 +16,7 @@ mod search;
 mod size_format;
 mod uninstall;
 mod update;
+use crate::diagnostics::{Detail, Diagnostics, Verbosity};
 
 use crate::installation::startup_recovery as startup;
 use crate::remotes;
@@ -49,7 +50,9 @@ fn is_stdout_broken_pipe(payload: &(dyn std::any::Any + Send)) -> bool {
 }
 
 pub(crate) fn run() -> Result<()> {
-    let all_args = std::env::args().skip(1).collect::<Vec<_>>();
+    let raw_args = std::env::args().skip(1).collect::<Vec<_>>();
+    let (verbosity, all_args) = parse_global_options(raw_args);
+    let diagnostics = Diagnostics::new(verbosity);
     let mut args = all_args.clone().into_iter();
     let command = args.next();
     if matches!(command.as_deref(), Some("-h" | "--help")) {
@@ -83,7 +86,16 @@ pub(crate) fn run() -> Result<()> {
         }
     }
 
-    let paths = startup::initialize()?;
+    let paths = if command.as_deref() == Some("run") {
+        diagnostics.measure(
+            Detail::Summary,
+            "run",
+            "installation startup",
+            startup::initialize,
+        )
+    } else {
+        startup::initialize()
+    }?;
     match command.as_deref() {
         Some("search") => search::cmd_search(&paths, args.collect()),
         Some("install") => install::cmd_install(&paths, args.collect()),
@@ -93,7 +105,7 @@ pub(crate) fn run() -> Result<()> {
         Some("ps") => ps::cmd_ps(&paths, args.collect()),
         Some("prune") => prune::cmd_prune(&paths, args.collect()),
         Some("repair") => repair::cmd_repair(&paths, args.collect()),
-        Some("run") => run::cmd_run(&paths, args.collect()),
+        Some("run") => run::cmd_run(&paths, args.collect(), &diagnostics),
         Some("remote-info") => remote_info::cmd_remote_info(&paths, args.collect()),
         Some("remotes") => remote_commands::cmd_remotes(&paths, args.collect()),
         Some("remote-add") => remote_commands::cmd_remote_add(&paths, args.collect()),
@@ -119,6 +131,33 @@ pub(crate) fn run() -> Result<()> {
     }
 }
 
+fn parse_global_options(args: Vec<String>) -> (Verbosity, Vec<String>) {
+    let mut verbosity = Verbosity::default();
+    let mut remaining = args.into_iter();
+    let mut parsed = Vec::new();
+
+    for arg in remaining.by_ref() {
+        let count = match arg.as_str() {
+            "--verbose" => 1,
+            _ if arg.starts_with('-')
+                && arg.len() > 1
+                && arg[1..].chars().all(|flag| flag == 'v') =>
+            {
+                arg.len() - 1
+            }
+            _ => {
+                parsed.push(arg);
+                break;
+            }
+        };
+        for _ in 0..count {
+            verbosity.increment();
+        }
+    }
+    parsed.extend(remaining);
+    (verbosity, parsed)
+}
+
 #[cfg(test)]
 #[path = "tests/support.rs"]
 mod test_support;
@@ -138,3 +177,7 @@ mod boundary_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "tests/verbosity.rs"]
+mod verbosity_tests;

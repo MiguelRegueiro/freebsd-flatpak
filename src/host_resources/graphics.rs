@@ -3,6 +3,7 @@ use super::graphics_shims::{
     ChromiumZygoteDrmPreload, DrmSyncobjErrnoShim, Gtk3WaylandGeometryShim, WaylandDrmDevtShim,
 };
 use super::linux_drm_sysfs::{linux_drm_dev_t, DrmSysfsBridge};
+use crate::diagnostics::{Detail, Diagnostics};
 use crate::installation::installation_paths::Installation;
 use crate::installation::{self as runtime, FlatpakApp, RuntimeGlExtension};
 use anyhow::{Context, Result};
@@ -34,9 +35,17 @@ pub struct GraphicsMount {
 }
 
 impl HostGraphics {
-    pub fn prepare(paths: &Installation, app: &FlatpakApp, instance_id: &str) -> Result<Self> {
+    pub fn prepare(
+        paths: &Installation,
+        app: &FlatpakApp,
+        instance_id: &str,
+        diagnostics: &Diagnostics,
+    ) -> Result<Self> {
         let mut warnings = Vec::new();
+        let gl_extension = diagnostics.timer(Detail::Detailed);
         let gl = runtime::ensure_default_gl_extension(paths, &app.runtime_ref, &app.runtime_dir)?;
+        gl_extension.finish("graphics", "resolve GL extension");
+        let drm_setup = diagnostics.timer(Detail::Detailed);
         let drm = if gl.is_some() {
             match DrmDevice::detect() {
                 Ok(device) => Some(DrmSysfsBridge::prepare(
@@ -54,6 +63,8 @@ impl HostGraphics {
             None
         };
 
+        drm_setup.finish("graphics", "detect DRM and prepare sysfs");
+        let wayland_devt = diagnostics.timer(Detail::Detailed);
         let wayland_drm_devt_shim = if let Some(drm) = &drm {
             match WaylandDrmDevtShim::prepare(paths, &drm.device) {
                 Ok(shim) => Some(shim),
@@ -66,6 +77,8 @@ impl HostGraphics {
             None
         };
 
+        wayland_devt.finish("graphics", "prepare Wayland dev_t shim");
+        let gtk = diagnostics.timer(Detail::Detailed);
         let gtk3_wayland_geometry_shim = if gl.is_some() {
             match Gtk3WaylandGeometryShim::prepare(paths) {
                 Ok(shim) => Some(shim),
@@ -78,6 +91,8 @@ impl HostGraphics {
             None
         };
 
+        gtk.finish("graphics", "prepare GTK Wayland shim");
+        let syncobj = diagnostics.timer(Detail::Detailed);
         let drm_syncobj_errno_shim = if drm.is_some() {
             match DrmSyncobjErrnoShim::prepare(paths) {
                 Ok(shim) => Some(shim),
@@ -90,6 +105,8 @@ impl HostGraphics {
             None
         };
 
+        syncobj.finish("graphics", "prepare syncobj shim");
+        let chromium = diagnostics.timer(Detail::Detailed);
         let chromium_zygote_drm_preload = if drm_syncobj_errno_shim.is_some() {
             match ChromiumZygoteDrmPreload::prepare(paths) {
                 Ok(shim) => Some(shim),
@@ -102,6 +119,7 @@ impl HostGraphics {
             None
         };
 
+        chromium.finish("graphics", "prepare Chromium preload");
         Ok(Self {
             gl,
             drm,

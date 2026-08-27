@@ -7,6 +7,7 @@ use super::launch_application::FlatpakApp;
 use super::process_signals::install_signal_handlers;
 use super::sandbox_root::{app_allows_network, prepare_root, write_flatpak_info};
 use crate::desktop_integration::DesktopSession;
+use crate::diagnostics::{Detail, Diagnostics};
 use crate::host_resources::audio::HostAudio;
 use crate::host_resources::cursor_themes::HostCursorTheme;
 use crate::host_resources::fonts::HostFonts;
@@ -27,7 +28,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 static INSTANCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub trait SandboxBackend {
-    fn run(&self, app: &FlatpakApp, desktop: &DesktopSession) -> Result<ExitStatus>;
+    fn run(
+        &self,
+        app: &FlatpakApp,
+        desktop: &DesktopSession,
+        diagnostics: &Diagnostics,
+    ) -> Result<ExitStatus>;
 }
 
 fn new_instance_id() -> String {
@@ -116,7 +122,14 @@ impl ChrootNullfsBackend {
         Self { paths }
     }
 
-    fn prepare(&self, app: &FlatpakApp, desktop: &DesktopSession) -> Result<ChrootInstance> {
+    fn prepare(
+        &self,
+        app: &FlatpakApp,
+        desktop: &DesktopSession,
+        diagnostics: &Diagnostics,
+    ) -> Result<ChrootInstance> {
+        let host_resources = diagnostics.timer(Detail::Summary);
+        let identity = diagnostics.timer(Detail::Detailed);
         let uid = numeric_id("id", "-u")?;
         let gid = numeric_id("id", "-g")?;
         let supplementary_gids = numeric_ids("id", "-G")?;
@@ -128,6 +141,8 @@ impl ChrootNullfsBackend {
             .join(sandbox_name(&app.app_id))
             .join(&instance_id);
         let mut pending_run = PendingRunRecord::new(&self.paths, app, &instance_id, &root)?;
+        identity.finish("sandbox", "identity and instance paths");
+        let metadata = diagnostics.timer(Detail::Detailed);
         let metadata_path = app.app_dir.join("metadata");
         let network_enabled = app_allows_network(&metadata_path)?;
         let host_network = HostNetwork::prepare(&self.paths, network_enabled)?;
@@ -141,9 +156,28 @@ impl ChrootNullfsBackend {
             HostAudio::from_metadata_file(&metadata_path, &desktop.xdg_runtime_dir, uid)?;
         let host_cursor = HostCursorTheme::from_host(desktop);
         let host_fonts = HostFonts::from_host();
-        let host_portal = HostPortal::prepare(&self.paths, app, &instance_id, desktop, uid, &root)?;
-        let host_graphics = HostGraphics::prepare(&self.paths, app, &instance_id)?;
-        let host_video = HostVideo::prepare(&self.paths, app)?;
+        metadata.finish("sandbox", "metadata and host resources");
+        host_resources.finish("run", "host resource discovery");
+
+        let host_portal = diagnostics.measure(Detail::Summary, "run", "portal setup", || {
+            HostPortal::prepare(
+                &self.paths,
+                app,
+                &instance_id,
+                desktop,
+                uid,
+                &root,
+                diagnostics,
+            )
+        })?;
+        let graphics = diagnostics.timer(Detail::Summary);
+        let host_graphics = HostGraphics::prepare(&self.paths, app, &instance_id, diagnostics)?;
+        let host_video = diagnostics.measure(
+            Detail::Detailed,
+            "graphics",
+            "resolve VAAPI extension",
+            || HostVideo::prepare(&self.paths, app),
+        )?;
         let app_extensions = runtime::ensure_app_codec_extensions(&self.paths, app)?;
         let mut extension_refs = host_graphics
             .extension_refs()
@@ -159,6 +193,10 @@ impl ChrootNullfsBackend {
         extension_refs.dedup();
         pending_run.set_extensions(&self.paths, extension_refs)?;
 
+        graphics.finish("run", "graphics and extensions");
+
+        let filesystem = diagnostics.timer(Detail::Summary);
+        let root_layout = diagnostics.timer(Detail::Detailed);
         prepare_root(
             &root,
             uid,
@@ -190,6 +228,9 @@ impl ChrootNullfsBackend {
             deployment,
             extension_refs,
         );
+
+        root_layout.finish("sandbox", "root layout and metadata");
+        let mounts = diagnostics.timer(Detail::Detailed);
 
         instance.mount_nullfs(&app.runtime_dir.join("files"), "usr", true)?;
         instance.mount_nullfs(&app.app_dir.join("files"), "app", true)?;
@@ -258,12 +299,20 @@ impl ChrootNullfsBackend {
             instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
         }
 
+        mounts.finish("sandbox", "filesystem mounts");
+        filesystem.finish("run", "sandbox filesystem");
+
         Ok(instance)
     }
 }
 
 impl SandboxBackend for ChrootNullfsBackend {
-    fn run(&self, app: &FlatpakApp, desktop: &DesktopSession) -> Result<ExitStatus> {
+    fn run(
+        &self,
+        app: &FlatpakApp,
+        desktop: &DesktopSession,
+        diagnostics: &Diagnostics,
+    ) -> Result<ExitStatus> {
         install_signal_handlers();
         if !desktop.wayland_socket().exists() {
             bail!(
@@ -273,8 +322,8 @@ impl SandboxBackend for ChrootNullfsBackend {
         }
 
         let entry = resolve_entry(app)?;
-        let mut instance = self.prepare(app, desktop)?;
-        let status = instance.launch(app, desktop, &entry)?;
+        let mut instance = self.prepare(app, desktop, diagnostics)?;
+        let status = instance.launch(app, desktop, &entry, diagnostics)?;
         instance.cleanup()?;
         Ok(status)
     }

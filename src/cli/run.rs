@@ -1,3 +1,4 @@
+use crate::diagnostics::{Detail, Diagnostics};
 use crate::installation as state;
 use crate::installation::{self as runtime, installation_paths::Installation};
 use crate::{desktop_integration, sandbox};
@@ -5,20 +6,29 @@ use anyhow::{Context, Result};
 use sandbox::SandboxBackend;
 use std::path::{Path, PathBuf};
 
-pub(crate) fn cmd_run(paths: &Installation, args: Vec<String>) -> Result<()> {
+pub(crate) fn cmd_run(
+    paths: &Installation,
+    args: Vec<String>,
+    diagnostics: &Diagnostics,
+) -> Result<()> {
     let (app_id, mut options) = parse_run_args(args)?;
-    if options.app_dir.is_none() && options.runtime_dir.is_none() && options.entry.is_none() {
-        let record = state::get_app(paths, &app_id)?;
-        options.app_dir = Some(state::absolute(paths, &record.app_dir));
-        options.runtime_dir = Some(state::absolute(paths, &record.runtime_dir));
-        options.entry = Some(record.command);
-    }
+    let app = diagnostics.measure(Detail::Summary, "run", "resolve app and runtime", || {
+        if options.app_dir.is_none() && options.runtime_dir.is_none() && options.entry.is_none() {
+            let record = state::get_app(paths, &app_id)?;
+            options.app_dir = Some(state::absolute(paths, &record.app_dir));
+            options.runtime_dir = Some(state::absolute(paths, &record.runtime_dir));
+            options.entry = Some(record.command);
+        }
 
-    let app = runtime::resolve_app(paths, &app_id, options)?;
-    let desktop = desktop_integration::DesktopSession::from_env()
-        .context("XDG_RUNTIME_DIR and WAYLAND_DISPLAY must be set")?;
+        runtime::resolve_app(paths, &app_id, options)
+    })?;
+
+    let desktop = diagnostics.measure(Detail::Summary, "run", "desktop session", || {
+        desktop_integration::DesktopSession::from_env()
+            .context("XDG_RUNTIME_DIR and WAYLAND_DISPLAY must be set")
+    })?;
     let backend = sandbox::ChrootNullfsBackend::new(paths.clone());
-    let status = backend.run(&app, &desktop)?;
+    let status = backend.run(&app, &desktop, diagnostics)?;
     if !status.success() {
         anyhow::bail!("{} exited with status {}", app.app_id, status);
     }

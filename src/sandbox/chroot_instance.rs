@@ -12,6 +12,7 @@ use super::stale_sandbox_recovery::{
     remove_instance_root, terminate_chroot_processes, unmount_mountpoint,
 };
 use crate::desktop_integration::DesktopSession;
+use crate::diagnostics::{Detail, Diagnostics};
 use crate::host_resources::audio::HostAudio;
 use crate::host_resources::cursor_themes::HostCursorTheme;
 use crate::host_resources::fonts::HostFonts;
@@ -109,7 +110,10 @@ impl ChrootInstance {
         app: &FlatpakApp,
         desktop: &DesktopSession,
         entry: &EntryLaunch,
+        diagnostics: &Diagnostics,
     ) -> Result<ExitStatus> {
+        let launch = diagnostics.timer(Detail::Summary);
+        let launch_configuration = diagnostics.timer(Detail::Detailed);
         install_signal_handlers();
         let user = host_user(self.uid);
         let mut env = launch_env(app, desktop, self.uid, &user);
@@ -151,72 +155,78 @@ impl ChrootInstance {
         ensure_metadata_runtime_dirs(&env, &desktop.xdg_runtime_dir, self.uid, &app.app_id)?;
         let translated_args = self.host_filesystem.translate_args(&app.args)?;
         let app_args = launch_args(app, translated_args)?;
+        launch_configuration.finish("launch", "environment and arguments");
 
-        eprintln!("launching {} from {}", app.app_id, self.root.display());
-        eprintln!(
-            "  runtime: {} ({})",
-            app.runtime_ref,
-            app.runtime_dir.display()
-        );
-        eprintln!("  app: {}", app.app_dir.display());
-        for grant in self.host_filesystem.grants() {
+        diagnostics.message(Detail::Detailed, || {
+            format!("launching {} from {}", app.app_id, self.root.display())
+        });
+        if diagnostics.enabled(Detail::Detailed) {
             eprintln!(
-                "  host fs: {} -> {} ({}, from {})",
-                grant.host_path().display(),
-                grant.sandbox_path().display(),
-                grant.access().label(),
-                grant.source_permission()
+                "  runtime: {} ({})",
+                app.runtime_ref,
+                app.runtime_dir.display()
             );
+            eprintln!("  app: {}", app.app_dir.display());
+            for grant in self.host_filesystem.grants() {
+                eprintln!(
+                    "  host fs: {} -> {} ({}, from {})",
+                    grant.host_path().display(),
+                    grant.sandbox_path().display(),
+                    grant.access().label(),
+                    grant.source_permission()
+                );
+            }
+            for warning in self.host_filesystem.warnings() {
+                eprintln!("  host fs warning: {warning}");
+            }
+            for line in self.host_audio.describe() {
+                eprintln!("  audio: {line}");
+            }
+            for warning in self.host_audio.warnings() {
+                eprintln!("  audio warning: {warning}");
+            }
+            for line in self.host_cursor.describe() {
+                eprintln!("  desktop theme: {line}");
+            }
+            for warning in self.host_cursor.warnings() {
+                eprintln!("  desktop theme warning: {warning}");
+            }
+            for line in self.host_fonts.describe() {
+                eprintln!("  fonts: {line}");
+            }
+            for warning in self.host_fonts.warnings() {
+                eprintln!("  fonts warning: {warning}");
+            }
+            for line in self.host_portal.describe() {
+                eprintln!("  portal: {line}");
+            }
+            for warning in self.host_portal.warnings() {
+                eprintln!("  portal warning: {warning}");
+            }
+            for line in self.host_graphics.describe() {
+                eprintln!("  graphics: {line}");
+            }
+            for warning in self.host_graphics.warnings() {
+                eprintln!("  graphics warning: {warning}");
+            }
+            for line in self.host_video.describe() {
+                eprintln!("  video: {line}");
+            }
+            for warning in self.host_video.warnings() {
+                eprintln!("  video warning: {warning}");
+            }
+            for extension in &self.app_extensions {
+                eprintln!(
+                    "  app extension: {} ({}) -> /app/{}",
+                    extension.name,
+                    extension.ref_name,
+                    extension.app_mount_relative.display()
+                );
+            }
+            eprintln!("  entry: {}", entry.display(&app_args));
         }
-        for warning in self.host_filesystem.warnings() {
-            eprintln!("  host fs warning: {warning}");
-        }
-        for line in self.host_audio.describe() {
-            eprintln!("  audio: {line}");
-        }
-        for warning in self.host_audio.warnings() {
-            eprintln!("  audio warning: {warning}");
-        }
-        for line in self.host_cursor.describe() {
-            eprintln!("  desktop theme: {line}");
-        }
-        for warning in self.host_cursor.warnings() {
-            eprintln!("  desktop theme warning: {warning}");
-        }
-        for line in self.host_fonts.describe() {
-            eprintln!("  fonts: {line}");
-        }
-        for warning in self.host_fonts.warnings() {
-            eprintln!("  fonts warning: {warning}");
-        }
-        for line in self.host_portal.describe() {
-            eprintln!("  portal: {line}");
-        }
-        for warning in self.host_portal.warnings() {
-            eprintln!("  portal warning: {warning}");
-        }
-        for line in self.host_graphics.describe() {
-            eprintln!("  graphics: {line}");
-        }
-        for warning in self.host_graphics.warnings() {
-            eprintln!("  graphics warning: {warning}");
-        }
-        for line in self.host_video.describe() {
-            eprintln!("  video: {line}");
-        }
-        for warning in self.host_video.warnings() {
-            eprintln!("  video warning: {warning}");
-        }
-        for extension in &self.app_extensions {
-            eprintln!(
-                "  app extension: {} ({}) -> /app/{}",
-                extension.name,
-                extension.ref_name,
-                extension.app_mount_relative.display()
-            );
-        }
-        eprintln!("  entry: {}", entry.display(&app_args));
 
+        let spawn = diagnostics.timer(Detail::Detailed);
         let mut command = Command::new("doas");
         command
             .arg("chroot")
@@ -242,6 +252,9 @@ impl ChrootInstance {
 
         LAST_SIGNAL.store(0, Ordering::SeqCst);
         let mut child = command.spawn().context("launch app through chroot")?;
+        spawn.finish("launch", "build command and spawn");
+        launch.finish("run", "application spawn");
+        diagnostics.startup_complete();
         // Launchers may exit after backgrounding the real application. Its
         // processes inherit this group, so keep the sandbox until they exit.
         let process_group = child.id() as i32;

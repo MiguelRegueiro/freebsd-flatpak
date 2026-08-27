@@ -1,5 +1,6 @@
 mod cli;
 mod desktop_integration;
+mod diagnostics;
 mod extensions;
 mod flatpak_metadata;
 mod host_resources;

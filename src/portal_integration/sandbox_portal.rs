@@ -7,6 +7,7 @@ use super::private_session_bus::{
     start_private_bus, terminate_child, wait_for_portal_proxy,
 };
 use crate::desktop_integration::DesktopSession;
+use crate::diagnostics::{Detail, Diagnostics};
 use crate::installation::installation_paths::Installation;
 use crate::installation::FlatpakApp;
 use anyhow::{Context, Result};
@@ -47,6 +48,7 @@ impl HostPortal {
         desktop: &DesktopSession,
         uid: u32,
         sandbox_root: &Path,
+        diagnostics: &Diagnostics,
     ) -> Result<Self> {
         let app_id = &app.app_id;
         let mut warnings = Vec::new();
@@ -84,7 +86,11 @@ impl HostPortal {
         let host_private_bus_address = format!("unix:path={}", bus_socket.display());
         let mountpoint = format!("/run/user/{uid}/doc");
         let grant_store = paths.portal_documents().join(format!("{app_scope}.ini"));
-        if !shared_portal_ready(&host_private_bus_address, &mountpoint) {
+        let ready = diagnostics.measure(Detail::Detailed, "portal", "check shared portal", || {
+            shared_portal_ready(&host_private_bus_address, &mountpoint)
+        });
+        if !ready {
+            let reset = diagnostics.timer(Detail::Detailed);
             stop_shared_portal(&shared_dir)?;
             fs::create_dir_all(&doc_dir)
                 .with_context(|| format!("create {}", doc_dir.display()))?;
@@ -96,7 +102,13 @@ impl HostPortal {
             fs::write(&bus_config, private_bus_config(&bus_socket))
                 .with_context(|| format!("write {}", bus_config.display()))?;
 
+            reset.finish("portal", "reset shared portal");
+
+            let private_bus = diagnostics.timer(Detail::Detailed);
             let (mut bus_child, address) = start_private_bus(&bus_config)?;
+            private_bus.finish("portal", "start private bus");
+
+            let portal_bridge = diagnostics.timer(Detail::Detailed);
             fs::write(shared_dir.join("bus.pid"), bus_child.id().to_string())
                 .context("write private bus pid")?;
             let app_sandbox_root = paths.chroots().join(app_scope_name(app_id));
@@ -126,6 +138,9 @@ impl HostPortal {
                 bridge_child.id().to_string(),
             )
             .context("write portal bridge pid")?;
+            portal_bridge.finish("portal", "start portal bridge");
+
+            let status_notifier = diagnostics.timer(Detail::Detailed);
             let mut status_command = Command::new(&status_notifier_helper);
             status_command
                 .arg("--app-id")
@@ -156,7 +171,12 @@ impl HostPortal {
                 status_child.id().to_string(),
             )
             .context("write status notifier bridge pid")?;
-            if let Err(error) = wait_for_portal_proxy(&address, &mountpoint) {
+            status_notifier.finish("portal", "start status notifier");
+            if let Err(error) =
+                diagnostics.measure(Detail::Detailed, "portal", "wait for readiness", || {
+                    wait_for_portal_proxy(&address, &mountpoint)
+                })
+            {
                 terminate_child(&mut status_child);
                 terminate_child(&mut bridge_child);
                 terminate_child(&mut bus_child);

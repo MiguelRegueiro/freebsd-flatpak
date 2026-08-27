@@ -25,6 +25,7 @@ Commands:
   prune         Remove unused stored data
 
 Options:
+  -v, --verbose  Show startup diagnostics; use -vv for detailed diagnostics
   -h, --help    Show help
 "#;
 
@@ -207,4 +208,22 @@ fn closed_stdout_is_a_successful_quiet_exit() {
 
     assert!(output.status.success(), "broken stdout failed: {output:?}");
     assert!(output.stderr.is_empty(), "broken stdout was noisy");
+}
+
+#[test]
+fn verbosity_flags_are_global_and_do_not_change_help_behavior() {
+    for args in [
+        &["-v", "--help"][..],
+        &["-vv", "--help"][..],
+        &["-v", "--verbose", "--help"][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_flatpak"))
+            .args(args)
+            .env_remove("HOME")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?} failed: {output:?}");
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), EXPECTED_HELP);
+        assert!(output.stderr.is_empty());
+    }
 }
