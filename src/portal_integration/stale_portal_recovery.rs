@@ -217,12 +217,40 @@ pub(super) fn terminate_process(pid: i32) {
         libc::kill(pid, libc::SIGTERM);
     }
     for _ in 0..20 {
-        if !process_alive(pid) {
+        if reap_exited_child(pid) || !process_alive(pid) {
             return;
         }
         thread::sleep(Duration::from_millis(100));
     }
     unsafe {
         libc::kill(pid, libc::SIGKILL);
+    }
+}
+
+fn reap_exited_child(pid: i32) -> bool {
+    let mut status = 0;
+    unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) == pid }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use std::time::Instant;
+
+    #[test]
+    fn terminating_a_direct_child_reaps_it_without_polling_to_the_deadline() {
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as i32;
+        let started = Instant::now();
+
+        terminate_process(pid);
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "terminated child was not reaped promptly"
+        );
+        assert!(!process_alive(pid));
+        drop(child);
     }
 }

@@ -7,7 +7,7 @@ use super::launch_environment::{
 };
 use super::mount_operations::owned_mount_teardown_order;
 use super::process_signals::{install_signal_handlers, ACTIVE_PROCESS_GROUP, LAST_SIGNAL};
-use super::process_supervision::wait_for_sandbox_process_group;
+use super::process_supervision::wait_for_sandbox_processes;
 use super::stale_sandbox_recovery::{
     remove_instance_root, terminate_chroot_processes, unmount_mountpoint,
 };
@@ -270,7 +270,7 @@ impl ChrootInstance {
                 &self.extension_refs,
             )?;
             let status = child.wait().context("wait for app process")?;
-            wait_for_sandbox_process_group(&self.root, process_group, || {
+            wait_for_sandbox_processes(&self.root, process_group, || {
                 matches!(
                     LAST_SIGNAL.load(Ordering::SeqCst),
                     libc::SIGINT | libc::SIGTERM

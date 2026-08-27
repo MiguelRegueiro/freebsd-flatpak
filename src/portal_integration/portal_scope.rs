@@ -118,6 +118,7 @@ pub(super) fn app_has_active_run(
             || excluded_instance.is_some_and(|excluded| {
                 record.get("instance_id").map(String::as_str) == Some(excluded)
             })
+            || record.get("portal_active").map(String::as_str) == Some("false")
         {
             continue;
         }

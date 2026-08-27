@@ -188,6 +188,20 @@ pub fn remove_run_record(path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn mark_run_record_portal_inactive(path: &Path) -> Result<()> {
+    let data = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let mut updated = String::with_capacity(data.len() + 24);
+    for line in data.lines() {
+        if !line.starts_with("portal_active=") {
+            updated.push_str(line);
+            updated.push('\n');
+        }
+    }
+    updated.push_str("portal_active=false\n");
+    write_atomic(path, updated.as_bytes())
+        .with_context(|| format!("mark portal inactive in {}", path.display()))
+}
+
 pub fn read_run_records(paths: &Installation) -> Result<Vec<BTreeMap<String, String>>> {
     ensure_layout(paths)?;
     let mut records = Vec::new();

@@ -11,6 +11,22 @@ fn process_group_parser_selects_only_matching_processes() {
         vec![100, 101]
     );
 }
+#[test]
+fn sandbox_root_parser_selects_processes_independent_of_process_group() {
+    let processes = concat!(
+        "  PID COMM              FD T V FLAGS REF OFFSET PRO NAME\n",
+        "  100 launcher          root v d r----   -      -   - /sandbox/one\n",
+        "  101 reparented        root v d r----   -      -   - /sandbox/one\n",
+        "  101 reparented        cwd  v d r----   -      -   - /sandbox/one/tmp\n",
+        "  200 portal            root v d r----   -      -   - /\n",
+        "  300 other             root v d r----   -      -   - /sandbox/two\n",
+    );
+
+    assert_eq!(
+        sandbox_root_pids(processes, Path::new("/sandbox/one")).collect::<Vec<_>>(),
+        vec![100, 101]
+    );
+}
 
 #[test]
 fn supervision_waits_until_the_process_group_is_empty() {

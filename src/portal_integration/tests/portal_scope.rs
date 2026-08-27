@@ -58,6 +58,8 @@ fn shared_portal_survives_either_non_final_instance_and_stops_after_last() {
     assert!(other_active_app_instances(&paths, "org.example.App", "first").unwrap());
     assert!(other_active_app_instances(&paths, "org.example.App", "second").unwrap());
 
+    crate::installation::mark_run_record_portal_inactive(&first_record).unwrap();
+    assert!(!other_active_app_instances(&paths, "org.example.App", "second").unwrap());
     crate::installation::remove_run_record(&first_record).unwrap();
     assert!(!other_active_app_instances(&paths, "org.example.App", "second").unwrap());
     crate::installation::write_run_record(

@@ -77,7 +77,9 @@ impl HostPortal {
             .portal()
             .join("locks")
             .join(format!("{app_scope}.lock"));
-        let lock = lock_portal_scope(&lock_path)?;
+        let lock = diagnostics.measure(Detail::Detailed, "portal", "acquire app lock", || {
+            lock_portal_scope(&lock_path)
+        })?;
         fs::create_dir_all(&doc_dir).with_context(|| format!("create {}", doc_dir.display()))?;
         fs::create_dir_all(&bus_dir).with_context(|| format!("create {}", bus_dir.display()))?;
         fs::write(shared_dir.join("app-id"), app_id)
@@ -90,8 +92,10 @@ impl HostPortal {
             shared_portal_ready(&host_private_bus_address, &mountpoint)
         });
         if !ready {
+            diagnostics.measure(Detail::Detailed, "portal", "stop unready portal", || {
+                stop_shared_portal(&shared_dir)
+            })?;
             let reset = diagnostics.timer(Detail::Detailed);
-            stop_shared_portal(&shared_dir)?;
             fs::create_dir_all(&doc_dir)
                 .with_context(|| format!("create {}", doc_dir.display()))?;
             fs::create_dir_all(&bus_dir)
@@ -102,7 +106,7 @@ impl HostPortal {
             fs::write(&bus_config, private_bus_config(&bus_socket))
                 .with_context(|| format!("write {}", bus_config.display()))?;
 
-            reset.finish("portal", "reset shared portal");
+            reset.finish("portal", "initialize shared portal");
 
             let private_bus = diagnostics.timer(Detail::Detailed);
             let (mut bus_child, address) = start_private_bus(&bus_config)?;
@@ -264,17 +268,18 @@ impl HostPortal {
         };
 
         portal_control(proxy, "RemoveSandbox")?;
+        let app_scope = app_scope_name(&proxy.app_id);
+        let lock_path = proxy
+            .paths
+            .portal()
+            .join("locks")
+            .join(format!("{app_scope}.lock"));
+        let _lock = lock_portal_scope(&lock_path)?;
+        let run_record =
+            crate::installation::run_record_path(&proxy.paths, &proxy.app_id, &proxy.instance_id)?;
+        crate::installation::mark_run_record_portal_inactive(&run_record)?;
         if !other_active_app_instances(&proxy.paths, &proxy.app_id, &proxy.instance_id)? {
-            let app_scope = app_scope_name(&proxy.app_id);
-            let lock_path = proxy
-                .paths
-                .portal()
-                .join("locks")
-                .join(format!("{app_scope}.lock"));
-            let _lock = lock_portal_scope(&lock_path)?;
-            if !other_active_app_instances(&proxy.paths, &proxy.app_id, &proxy.instance_id)? {
-                stop_shared_portal(&proxy.shared_dir)?;
-            }
+            stop_shared_portal(&proxy.shared_dir)?;
         }
         self.proxy = None;
         Ok(())
