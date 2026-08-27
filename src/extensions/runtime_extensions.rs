@@ -1,31 +1,21 @@
 use super::{RuntimeGlExtension, RuntimeVaapiExtension};
 use crate::flatpak_metadata::{has_section, value};
 use crate::installation::installation_paths::Installation;
-use crate::ostree::{Deployment, Storage, StorageTimings};
-use crate::remotes::{load_arch_summary, ref_checksum};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub fn ensure_default_gl_extension(
+pub fn activate_default_gl_extension(
     paths: &Installation,
     runtime_ref: &str,
     runtime_dir: &Path,
 ) -> Result<Option<RuntimeGlExtension>> {
-    Ok(ensure_default_gl_extension_timed(paths, runtime_ref, runtime_dir)?.0)
-}
-
-pub(crate) fn ensure_default_gl_extension_timed(
-    paths: &Installation,
-    runtime_ref: &str,
-    runtime_dir: &Path,
-) -> Result<(Option<RuntimeGlExtension>, StorageTimings)> {
     let metadata_path = runtime_dir.join("metadata");
     let metadata = fs::read_to_string(&metadata_path)
         .with_context(|| format!("read runtime metadata {}", metadata_path.display()))?;
     let section = "Extension org.freedesktop.Platform.GL";
     if !has_section(&metadata, section) {
-        return Ok((None, Default::default()));
+        return Ok(None);
     }
 
     let parts = split_runtime_ref(runtime_ref)?;
@@ -36,12 +26,7 @@ pub(crate) fn ensure_default_gl_extension_timed(
         .unwrap_or_else(|| "lib/x86_64-linux-gnu/GL".to_string());
     let runtime_mount_relative = PathBuf::from(directory).join("default");
     let runtime_mountpoint = runtime_dir.join("files").join(&runtime_mount_relative);
-    fs::create_dir_all(&runtime_mountpoint).with_context(|| {
-        format!(
-            "create GL extension mountpoint {}",
-            runtime_mountpoint.display()
-        )
-    })?;
+    validate_mountpoint("GL", &runtime_mountpoint)?;
 
     let ref_name = format!(
         "runtime/org.freedesktop.Platform.GL.default/{}/{}",
@@ -51,19 +36,16 @@ pub(crate) fn ensure_default_gl_extension_timed(
         "org.freedesktop.Platform.GL.default-{}",
         safe_dir_fragment(&extension_branch)
     ));
-    let timings = checkout_if_missing(paths, "extension", &ref_name, None, &checkout_dir, false)?;
+    validate_extension_checkout(&ref_name, &checkout_dir)?;
 
-    Ok((
-        Some(RuntimeGlExtension {
-            ref_name,
-            checkout_dir,
-            runtime_mount_relative,
-        }),
-        timings,
-    ))
+    Ok(Some(RuntimeGlExtension {
+        ref_name,
+        checkout_dir,
+        runtime_mount_relative,
+    }))
 }
 
-pub fn ensure_intel_vaapi_extension(
+pub fn activate_intel_vaapi_extension(
     paths: &Installation,
     runtime_ref: &str,
     runtime_dir: &Path,
@@ -87,12 +69,7 @@ pub fn ensure_intel_vaapi_extension(
         .unwrap_or_else(|| "lib/x86_64-linux-gnu/dri/intel-vaapi-driver".to_string());
     let runtime_mount_relative = PathBuf::from(directory);
     let runtime_mountpoint = runtime_dir.join("files").join(&runtime_mount_relative);
-    fs::create_dir_all(&runtime_mountpoint).with_context(|| {
-        format!(
-            "create VAAPI extension mountpoint {}",
-            runtime_mountpoint.display()
-        )
-    })?;
+    validate_mountpoint("VAAPI", &runtime_mountpoint)?;
 
     let ref_name = format!(
         "runtime/org.freedesktop.Platform.VAAPI.Intel/{}/{}",
@@ -102,7 +79,7 @@ pub fn ensure_intel_vaapi_extension(
         "org.freedesktop.Platform.VAAPI.Intel-{}",
         safe_dir_fragment(&extension_branch)
     ));
-    checkout_if_missing(paths, "extension", &ref_name, None, &checkout_dir, false)?;
+    validate_extension_checkout(&ref_name, &checkout_dir)?;
 
     let ld_library_relative = value(&metadata, section, "add-ld-path")
         .filter(|path| !path.is_empty())
@@ -116,45 +93,65 @@ pub fn ensure_intel_vaapi_extension(
     }))
 }
 
-pub(super) fn checkout_if_missing(
-    paths: &Installation,
-    kind: &str,
-    ref_name: &str,
-    expected_checksum: Option<&str>,
-    dest: &Path,
-    force: bool,
-) -> Result<StorageTimings> {
-    let mut remotes = crate::remotes::enabled_remotes(paths)?;
-    remotes.sort_by_key(|remote| {
-        (
-            remote.name != crate::remotes::DEFAULT_REMOTE,
-            remote.name.clone(),
+pub(super) fn validate_extension_checkout(ref_name: &str, checkout_dir: &Path) -> Result<()> {
+    let validation = || -> Result<()> {
+        if !checkout_dir.is_dir() {
+            bail!("checkout directory does not exist")
+        }
+        let marker_path = checkout_dir.join(".ostree-commit");
+        let marker = fs::read_to_string(&marker_path)
+            .with_context(|| format!("read deployment marker {}", marker_path.display()))?;
+        let mut lines = marker.lines();
+        let installed_ref = lines.next().context("deployment marker missing ref")?;
+        if installed_ref != ref_name {
+            bail!("deployment marker contains ref {installed_ref}, expected {ref_name}")
+        }
+        if lines.next().filter(|commit| !commit.is_empty()).is_none() {
+            bail!("deployment marker missing commit")
+        }
+        lines
+            .next()
+            .context("deployment marker missing installed size")?
+            .parse::<u64>()
+            .context("deployment marker has invalid installed size")?;
+        if lines.next().filter(|origin| !origin.is_empty()).is_none() {
+            bail!("deployment marker missing origin")
+        }
+        let metadata_path = checkout_dir.join("metadata");
+        let metadata = fs::read_to_string(&metadata_path)
+            .with_context(|| format!("read extension metadata {}", metadata_path.display()))?;
+        let expected_name = ref_name
+            .strip_prefix("runtime/")
+            .and_then(|value| value.split('/').next())
+            .context("extension ref is not a runtime ref")?;
+        let installed_name = value(&metadata, "Runtime", "name")
+            .context("extension metadata is missing Runtime/name")?;
+        if installed_name != expected_name {
+            bail!("extension metadata contains name {installed_name}, expected {expected_name}")
+        }
+        let files_path = checkout_dir.join("files");
+        if !files_path.is_dir() {
+            bail!("files directory is missing: {}", files_path.display())
+        }
+        Ok(())
+    };
+
+    validation().with_context(|| {
+        format!(
+            "required extension {ref_name} is missing or corrupt at {}; run `flatpak update` or `flatpak repair`",
+            checkout_dir.display()
         )
-    });
-    for remote in remotes {
-        let (_, summary_path, _) = load_arch_summary(paths, &remote)?;
-        let resolved_checksum = match expected_checksum {
-            Some(checksum) => checksum.to_string(),
-            None => match ref_checksum(&summary_path, ref_name) {
-                Ok(checksum) => checksum,
-                Err(_) => continue,
-            },
-        };
-        let summary =
-            fs::read(&summary_path).with_context(|| format!("read {}", summary_path.display()))?;
-        return Storage::open(paths)?.deploy(
-            &summary,
-            &[Deployment {
-                remote: &remote.name,
-                kind,
-                ref_name,
-                checksum: &resolved_checksum,
-                destination: dest,
-                force,
-            }],
-        );
+    })
+}
+
+fn validate_mountpoint(kind: &str, mountpoint: &Path) -> Result<()> {
+    if !mountpoint.is_dir() {
+        bail!(
+            "required {kind} extension mountpoint is missing at {}; run `flatpak update` or `flatpak repair`",
+            mountpoint.display()
+        )
     }
-    anyhow::bail!("ref is not present in an enabled remote: {ref_name}")
+    Ok(())
 }
 
 pub fn runtime_checkout_dir(runtime_ref: &str) -> String {
@@ -208,3 +205,7 @@ pub(super) fn safe_dir_fragment(value: &str) -> String {
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "tests/runtime_extensions.rs"]
+mod tests;

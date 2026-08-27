@@ -175,10 +175,10 @@ impl ChrootNullfsBackend {
         let host_video = diagnostics.measure(
             Detail::Detailed,
             "graphics",
-            "resolve VAAPI extension",
+            "activate local VAAPI extension",
             || HostVideo::prepare(&self.paths, app),
         )?;
-        let app_extensions = runtime::ensure_app_codec_extensions(&self.paths, app)?;
+        let app_extensions = runtime::activate_app_codec_extensions(&self.paths, app)?;
         let mut extension_refs = host_graphics
             .extension_refs()
             .chain(host_video.extension_refs())

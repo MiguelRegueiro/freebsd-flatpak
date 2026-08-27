@@ -12,7 +12,7 @@ mod run_records;
 mod runtime_records;
 
 pub(crate) use crate::extensions::{
-    ensure_app_codec_extensions, ensure_default_gl_extension, ensure_intel_vaapi_extension,
+    activate_app_codec_extensions, activate_default_gl_extension, activate_intel_vaapi_extension,
     reconcile_extensions, reconcile_extensions_with_metadata, required_extension_refs,
     runtime_checkout_dir, AppExtension, RuntimeGlExtension, RuntimeVaapiExtension,
 };

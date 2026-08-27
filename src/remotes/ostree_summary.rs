@@ -12,14 +12,6 @@ pub(super) fn summary_digest_matches(data: &[u8], expected: &str) -> Result<bool
         .is_some_and(|actual| actual.eq_ignore_ascii_case(expected)))
 }
 
-pub(crate) fn ref_checksum(path: &Path, ref_name: &str) -> Result<String> {
-    parse_summary_refs(path)?
-        .into_iter()
-        .find(|candidate| candidate.name == ref_name)
-        .map(|candidate| candidate.checksum)
-        .with_context(|| format!("ref is not present in the remote: {ref_name}"))
-}
-
 pub(super) fn parse_summary_refs(path: &Path) -> Result<Vec<RemoteRef>> {
     let data = fs::read(path).with_context(|| format!("read {}", path.display()))?;
     parse_summary_refs_bytes(data)

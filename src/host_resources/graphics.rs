@@ -43,8 +43,8 @@ impl HostGraphics {
     ) -> Result<Self> {
         let mut warnings = Vec::new();
         let gl_extension = diagnostics.timer(Detail::Detailed);
-        let gl = runtime::ensure_default_gl_extension(paths, &app.runtime_ref, &app.runtime_dir)?;
-        gl_extension.finish("graphics", "resolve GL extension");
+        let gl = runtime::activate_default_gl_extension(paths, &app.runtime_ref, &app.runtime_dir)?;
+        gl_extension.finish("graphics", "activate local GL extension");
         let drm_setup = diagnostics.timer(Detail::Detailed);
         let drm = if gl.is_some() {
             match DrmDevice::detect() {

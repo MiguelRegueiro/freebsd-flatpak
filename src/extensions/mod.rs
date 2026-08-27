@@ -3,11 +3,11 @@ mod extension_points;
 mod reconciliation;
 mod runtime_extensions;
 
-pub(crate) use application_extensions::ensure_app_codec_extensions;
+pub(crate) use application_extensions::activate_app_codec_extensions;
 pub(crate) use extension_points::required_extension_refs;
 pub(crate) use reconciliation::{reconcile_extensions, reconcile_extensions_with_metadata};
 pub(crate) use runtime_extensions::{
-    ensure_default_gl_extension, ensure_intel_vaapi_extension, runtime_checkout_dir,
+    activate_default_gl_extension, activate_intel_vaapi_extension, runtime_checkout_dir,
 };
 
 use std::path::PathBuf;

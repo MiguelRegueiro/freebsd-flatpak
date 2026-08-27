@@ -21,7 +21,7 @@ impl HostVideo {
     pub fn prepare(paths: &Installation, app: &FlatpakApp) -> Result<Self> {
         let mut warnings = Vec::new();
         let vaapi = if host_has_intel_drm_device() {
-            runtime::ensure_intel_vaapi_extension(paths, &app.runtime_ref, &app.runtime_dir)?
+            runtime::activate_intel_vaapi_extension(paths, &app.runtime_ref, &app.runtime_dir)?
         } else {
             warnings.push(
                 "Intel VAAPI extension disabled: no Intel DRM render node detected".to_string(),

@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::path::PathBuf;
 
 pub(crate) use metadata_cache::load_arch_summary;
-pub(crate) use ostree_summary::ref_checksum;
 pub use ref_resolution::{
     checkout_ref, inspect_refs, load_remote_metadata, resolve_remote_app, search_apps,
 };

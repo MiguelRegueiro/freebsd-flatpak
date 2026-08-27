@@ -1,5 +1,5 @@
 use super::runtime_extensions::{
-    checkout_if_missing, first_extension_version, safe_dir_fragment, split_runtime_ref,
+    first_extension_version, safe_dir_fragment, split_runtime_ref, validate_extension_checkout,
 };
 use super::AppExtension;
 use crate::flatpak_metadata::{sections_with_prefix, value};
@@ -15,7 +15,7 @@ pub(super) fn is_supported_app_extension(name: &str) -> bool {
     SUPPORTED_APP_EXTENSIONS.contains(&name)
 }
 
-pub fn ensure_app_codec_extensions(
+pub fn activate_app_codec_extensions(
     paths: &Installation,
     app: &FlatpakApp,
 ) -> Result<Vec<AppExtension>> {
@@ -42,12 +42,12 @@ pub fn ensure_app_codec_extensions(
             .unwrap_or_else(|| runtime_parts.branch.clone());
         let app_mount_relative = PathBuf::from(directory);
         let app_mountpoint = app.app_dir.join("files").join(&app_mount_relative);
-        fs::create_dir_all(&app_mountpoint).with_context(|| {
-            format!(
-                "create app extension mountpoint {}",
+        if !app_mountpoint.is_dir() {
+            anyhow::bail!(
+                "required app extension mountpoint is missing at {}; run `flatpak update` or `flatpak repair`",
                 app_mountpoint.display()
-            )
-        })?;
+            );
+        }
 
         let ref_name = format!(
             "runtime/{}/{}/{}",
@@ -58,7 +58,7 @@ pub fn ensure_app_codec_extensions(
             safe_dir_fragment(name),
             safe_dir_fragment(&extension_branch)
         ));
-        checkout_if_missing(paths, "extension", &ref_name, None, &checkout_dir, false)?;
+        validate_extension_checkout(&ref_name, &checkout_dir)?;
         let ld_library_relative = value(&metadata, &section, "add-ld-path")
             .filter(|path| !path.is_empty())
             .map(PathBuf::from);
@@ -74,3 +74,7 @@ pub fn ensure_app_codec_extensions(
 
     Ok(extensions)
 }
+
+#[cfg(test)]
+#[path = "tests/application_extensions.rs"]
+mod tests;
