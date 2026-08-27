@@ -80,6 +80,22 @@ impl RemoteMetadata {
         self.collection_id.as_deref()
     }
 
+    pub(crate) fn remote_name(&self) -> &str {
+        &self.remote.name
+    }
+
+    pub(crate) fn ref_checksum(&self, ref_name: &str) -> Option<&str> {
+        self.refs
+            .iter()
+            .find(|item| item.name == ref_name)
+            .map(|item| item.checksum.as_str())
+    }
+
+    pub(crate) fn summary_bytes(&self) -> Result<Vec<u8>> {
+        fs::read(&self.summary_path)
+            .with_context(|| format!("read {}", self.summary_path.display()))
+    }
+
     pub fn list_refs(&self) -> Vec<RemoteRefInfo> {
         let mut refs = self
             .refs

@@ -41,6 +41,15 @@ impl Storage {
         sources: &[RemoteSource<'_>],
         deployments: &[Deployment<'_>],
     ) -> Result<StorageTimings> {
+        self.deploy_from_sources_with_reuse_output(sources, deployments, true)
+    }
+
+    pub fn deploy_from_sources_with_reuse_output(
+        &self,
+        sources: &[RemoteSource<'_>],
+        deployments: &[Deployment<'_>],
+        show_reused: bool,
+    ) -> Result<StorageTimings> {
         let pending = deployments
             .iter()
             .filter(|deployment| {
@@ -48,9 +57,11 @@ impl Storage {
             })
             .collect::<Vec<_>>();
 
-        for deployment in deployments {
-            if !pending.iter().any(|item| std::ptr::eq(*item, deployment)) {
-                println!("  Reusing {} {}", deployment.kind, deployment.ref_name);
+        if show_reused {
+            for deployment in deployments {
+                if !pending.iter().any(|item| std::ptr::eq(*item, deployment)) {
+                    println!("  Reusing {} {}", deployment.kind, deployment.ref_name);
+                }
             }
         }
         if pending.is_empty() {

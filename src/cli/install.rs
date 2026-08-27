@@ -60,6 +60,7 @@ pub(crate) fn cmd_install(
         state::get_app(paths, &options.app_id).or_else(|_| state::get_app(paths, &remote.app_id))
     {
         if !options.or_update {
+            runtime::reconcile_extensions(paths, std::slice::from_ref(&record), false)?;
             println!("{} is already installed", remote.app_id);
             return Ok(());
         }
@@ -68,6 +69,7 @@ pub(crate) fn cmd_install(
             vec![(record, remote)],
             options.transaction,
             diagnostics,
+            Vec::new(),
         );
     }
 
@@ -110,6 +112,16 @@ pub(crate) fn cmd_install(
     let mut installed = runtime::update_app(paths, &remote, true, runtime_changed)?;
     installed.timings.resolution = resolution;
     let record = state::record_install(paths, &installed)?;
+    let extension_timings =
+        match runtime::reconcile_extensions(paths, std::slice::from_ref(&record), false) {
+            Ok(timings) => timings,
+            Err(error) => {
+                let _ = state::remove_app_record(paths, &record.app_id);
+                return Err(error).context("reconcile required extensions");
+            }
+        };
+    installed.timings.pull += extension_timings.pull;
+    installed.timings.checkout += extension_timings.checkout;
     if !options.transaction.noninteractive {
         println!("\n==> Publishing desktop integration");
     }

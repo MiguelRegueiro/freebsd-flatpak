@@ -126,7 +126,7 @@ impl VideoMount {
     }
 }
 
-fn host_has_intel_drm_device() -> bool {
+pub(crate) fn host_has_intel_drm_device() -> bool {
     drm_render_minors()
         .into_iter()
         .any(|minor| drm_pci_id(minor).is_some_and(|pci_id| pci_id.starts_with("8086:")))

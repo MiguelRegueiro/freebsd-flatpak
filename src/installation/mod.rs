@@ -13,8 +13,8 @@ mod runtime_records;
 
 pub(crate) use crate::extensions::{
     ensure_app_codec_extensions, ensure_default_gl_extension, ensure_intel_vaapi_extension,
-    required_extension_refs, runtime_checkout_dir, AppExtension, RuntimeGlExtension,
-    RuntimeVaapiExtension,
+    reconcile_extensions, reconcile_extensions_with_metadata, required_extension_refs,
+    runtime_checkout_dir, AppExtension, RuntimeGlExtension, RuntimeVaapiExtension,
 };
 pub(crate) use crate::flatpak_metadata::value as metadata_value;
 pub(crate) use crate::ostree::{prune_repo, recover_storage, remove_repo_refs, repair_repo};

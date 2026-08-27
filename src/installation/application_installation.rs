@@ -1,5 +1,5 @@
 use super::installation_paths::Installation;
-use crate::extensions::{ensure_default_gl_extension_timed, runtime_checkout_dir};
+use crate::extensions::runtime_checkout_dir;
 use crate::ostree::{Deployment, RemoteSource, Storage};
 use crate::remotes::{load_arch_summary, RemoteApp};
 use anyhow::{Context, Result};
@@ -75,7 +75,7 @@ fn checkout_remote_app(
         fs::read(&summary_path).with_context(|| format!("read {}", summary_path.display()))?;
     let runtime_full_ref = format!("runtime/{}", remote.runtime_ref);
     let storage = Storage::open(paths)?;
-    let mut timings = if remote.origin == remote.runtime_origin {
+    let timings = if remote.origin == remote.runtime_origin {
         storage.deploy(
             &summary,
             &[
@@ -154,11 +154,6 @@ fn checkout_remote_app(
     let unpin_result = super::remove_run_record(&pin);
     extra_result?;
     unpin_result?;
-    let (_, extension_timings) =
-        ensure_default_gl_extension_timed(paths, &remote.runtime_ref, &runtime_dir)?;
-    timings.pull += extension_timings.pull;
-    timings.checkout += extension_timings.checkout;
-
     Ok(InstalledApp {
         origin: remote.origin.clone(),
         runtime_origin: remote.runtime_origin.clone(),

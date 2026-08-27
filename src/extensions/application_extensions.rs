@@ -9,6 +9,12 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
 
+const SUPPORTED_APP_EXTENSIONS: &[&str] = &["org.freedesktop.Platform.ffmpeg-full"];
+
+pub(super) fn is_supported_app_extension(name: &str) -> bool {
+    SUPPORTED_APP_EXTENSIONS.contains(&name)
+}
+
 pub fn ensure_app_codec_extensions(
     paths: &Installation,
     app: &FlatpakApp,
@@ -21,7 +27,7 @@ pub fn ensure_app_codec_extensions(
 
     for section in sections_with_prefix(&metadata, "Extension ") {
         let name = section.trim_start_matches("Extension ");
-        if name != "org.freedesktop.Platform.ffmpeg-full" {
+        if !is_supported_app_extension(name) {
             continue;
         }
 

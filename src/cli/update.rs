@@ -5,7 +5,7 @@ use crate::installation as state;
 use crate::installation::{self as runtime, installation_paths::Installation};
 use crate::{desktop_integration, remotes};
 use anyhow::{bail, Context, Result};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 pub(crate) fn cmd_update(
@@ -79,6 +79,7 @@ pub(crate) fn cmd_update(
         format!("update: considering {} application ref(s)", targets.len())
     });
     let mut resolved = Vec::new();
+    let mut transaction_metadata = BTreeMap::new();
     for target in targets {
         diagnostics.message(Detail::Summary, || {
             format!(
@@ -86,16 +87,22 @@ pub(crate) fn cmd_update(
                 target.record.origin, target.record.app_id
             )
         });
-        let metadata = diagnostics
-            .measure(Detail::Detailed, "update", "load remote metadata", || {
-                remotes::load_remote_metadata(paths, &target.record.origin)
-            })
-            .with_context(|| {
-                format!(
-                    "load origin {} for {}",
-                    target.record.origin, target.record.app_id
-                )
-            })?;
+        if !transaction_metadata.contains_key(&target.record.origin) {
+            let metadata = diagnostics
+                .measure(Detail::Detailed, "update", "load remote metadata", || {
+                    remotes::load_remote_metadata(paths, &target.record.origin)
+                })
+                .with_context(|| {
+                    format!(
+                        "load origin {} for {}",
+                        target.record.origin, target.record.app_id
+                    )
+                })?;
+            transaction_metadata.insert(target.record.origin.clone(), metadata);
+        }
+        let metadata = transaction_metadata
+            .get(&target.record.origin)
+            .expect("inserted transaction metadata");
         let remote = diagnostics.measure(
             Detail::Detailed,
             "update",
@@ -127,7 +134,13 @@ pub(crate) fn cmd_update(
         });
         resolved.push((target.record, remote));
     }
-    update_resolved(paths, resolved, options.transaction, diagnostics)
+    update_resolved(
+        paths,
+        resolved,
+        options.transaction,
+        diagnostics,
+        transaction_metadata.into_values().collect(),
+    )
 }
 
 #[derive(Debug)]
@@ -142,8 +155,10 @@ pub(super) fn update_resolved(
     resolved: Vec<(state::AppRecord, remotes::RemoteApp)>,
     options: TransactionOptions,
     diagnostics: &Diagnostics,
+    remote_metadata: Vec<remotes::RemoteMetadata>,
 ) -> Result<()> {
     let mut plans = Vec::new();
+    let mut selected_apps = Vec::new();
     for (record, remote) in resolved {
         let status = update_status(paths, &record, &remote)?;
         diagnostics.message(Detail::Detailed, || {
@@ -160,6 +175,7 @@ pub(super) fn update_resolved(
             diagnostics.message(Detail::Summary, || {
                 format!("update: keep {} (already current)", record.app_ref)
             });
+            selected_apps.push(record);
             continue;
         }
         diagnostics.message(Detail::Summary, || {
@@ -183,8 +199,19 @@ pub(super) fn update_resolved(
         });
     }
     if plans.is_empty() {
+        let extension_timings = runtime::reconcile_extensions_with_metadata(
+            paths,
+            &selected_apps,
+            false,
+            remote_metadata,
+            diagnostics.enabled(Detail::Summary),
+        )?;
         if !options.noninteractive {
-            println!("Nothing to update.");
+            if extension_timings.checkout.is_zero() {
+                println!("Nothing to update.");
+            } else {
+                println!("Extension update complete.");
+            }
         }
         return Ok(());
     }
@@ -288,6 +315,7 @@ pub(super) fn update_resolved(
                 runtime::update_app(paths, &remote, status.app_checkout_stale, force_runtime)
             })?;
         let installed_record = state::record_install(paths, &installed)?;
+        selected_apps.push(installed_record.clone());
         state::reconcile_runtime_bindings(paths)?;
         if record.app_id != installed.app_id {
             desktop_integration::remove_export(paths, &record.app_id)?;
@@ -307,6 +335,16 @@ pub(super) fn update_resolved(
         }
         state::cleanup_retired_deployments(paths)?;
     }
+
+    diagnostics.measure(Detail::Detailed, "update", "reconcile extensions", || {
+        runtime::reconcile_extensions_with_metadata(
+            paths,
+            &selected_apps,
+            false,
+            remote_metadata,
+            diagnostics.enabled(Detail::Summary),
+        )
+    })?;
 
     if !options.noninteractive {
         println!("Update complete.");

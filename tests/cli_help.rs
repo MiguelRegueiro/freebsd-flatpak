@@ -25,7 +25,7 @@ Commands:
   prune         Remove unused stored data
 
 Options:
-  -v, --verbose  Show startup diagnostics; use -vv for detailed diagnostics
+  -v, --verbose Show diagnostics; use -vv for detailed diagnostics
   -h, --help    Show help
 "#;
 
