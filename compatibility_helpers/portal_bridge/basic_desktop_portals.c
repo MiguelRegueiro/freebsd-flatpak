@@ -46,7 +46,6 @@ const char *DESKTOP_XML =
     "    <property name='version' type='u' access='read'/>"
     "    <method name='Lookup'>"
     "      <arg type='s' name='uri' direction='in'/>"
-    "      <arg type='a{sv}' name='options' direction='in'/>"
     "      <arg type='as' name='proxies' direction='out'/>"
     "    </method>"
     "  </interface>"
@@ -134,11 +133,13 @@ void return_immediate_empty_request(BridgeState *state,
 
 void forward_desktop_method(BridgeState *state, const char *interface_name,
                             const char *method_name, GVariant *parameters,
+                            const GVariantType *reply_type,
                             GDBusMethodInvocation *invocation) {
   g_dbus_connection_call(state->host_bus, "org.freedesktop.portal.Desktop",
                          "/org/freedesktop/portal/desktop", interface_name,
-                         method_name, parameters, NULL, G_DBUS_CALL_FLAGS_NONE,
-                         -1, NULL, on_forward_call, g_object_ref(invocation));
+                         method_name, parameters, reply_type,
+                         G_DBUS_CALL_FLAGS_NONE, -1, NULL, on_forward_call,
+                         g_object_ref(invocation));
 }
 
 void return_settings_readall(GDBusMethodInvocation *invocation) {
@@ -146,12 +147,6 @@ void return_settings_readall(GDBusMethodInvocation *invocation) {
   g_variant_builder_init(&values, G_VARIANT_TYPE("a{sa{sv}}"));
   g_dbus_method_invocation_return_value(invocation,
                                         g_variant_new("(a{sa{sv}})", &values));
-}
-
-void return_proxy_direct(GDBusMethodInvocation *invocation) {
-  const char *direct[] = {"direct://", NULL};
-  g_dbus_method_invocation_return_value(invocation,
-                                        g_variant_new("(^as)", direct));
 }
 
 void handle_desktop_method(GDBusConnection *connection, const gchar *sender,
@@ -189,17 +184,18 @@ void handle_desktop_method(GDBusConnection *connection, const gchar *sender,
   } else if (g_strcmp0(interface_name, "org.freedesktop.portal.Settings") ==
                  0 &&
              g_strcmp0(method_name, "ReadAll") == 0) {
-    forward_desktop_method(state, interface_name, method_name, parameters,
+    forward_desktop_method(state, interface_name, method_name, parameters, NULL,
                            invocation);
   } else if (g_strcmp0(interface_name, "org.freedesktop.portal.Settings") ==
                  0 &&
              g_strcmp0(method_name, "Read") == 0) {
-    forward_desktop_method(state, interface_name, method_name, parameters,
+    forward_desktop_method(state, interface_name, method_name, parameters, NULL,
                            invocation);
   } else if (g_strcmp0(interface_name,
                        "org.freedesktop.portal.ProxyResolver") == 0 &&
              g_strcmp0(method_name, "Lookup") == 0) {
-    return_proxy_direct(invocation);
+    forward_desktop_method(state, interface_name, method_name, parameters,
+                           G_VARIANT_TYPE("(as)"), invocation);
   } else if (g_strcmp0(interface_name, "org.freedesktop.portal.Inhibit") == 0 &&
              (g_strcmp0(method_name, "CreateMonitor") == 0 ||
               g_strcmp0(method_name, "Inhibit") == 0)) {

@@ -62,6 +62,21 @@ static void test_introspection(void) {
       screencast, "AvailableSourceTypes"));
   g_assert_nonnull(g_dbus_interface_info_lookup_property(
       screencast, "AvailableCursorModes"));
+
+  GDBusInterfaceInfo *proxy_resolver = g_dbus_node_info_lookup_interface(
+      desktop, "org.freedesktop.portal.ProxyResolver");
+  g_assert_nonnull(proxy_resolver);
+  GDBusMethodInfo *lookup =
+      g_dbus_interface_info_lookup_method(proxy_resolver, "Lookup");
+  g_assert_nonnull(lookup);
+  g_assert_nonnull(lookup->in_args);
+  g_assert_nonnull(lookup->in_args[0]);
+  g_assert_cmpstr(lookup->in_args[0]->signature, ==, "s");
+  g_assert_null(lookup->in_args[1]);
+  g_assert_nonnull(lookup->out_args);
+  g_assert_nonnull(lookup->out_args[0]);
+  g_assert_cmpstr(lookup->out_args[0]->signature, ==, "as");
+  g_assert_null(lookup->out_args[1]);
   g_dbus_node_info_unref(desktop);
 
   GDBusNodeInfo *session = g_dbus_node_info_new_for_xml(SESSION_XML, &error);
