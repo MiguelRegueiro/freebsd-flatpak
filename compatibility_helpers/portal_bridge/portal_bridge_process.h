@@ -29,6 +29,7 @@ typedef struct _SessionRecord SessionRecord;
 typedef struct _PipeWireCompat PipeWireCompat;
 typedef enum {
   REQUEST_FILECHOOSER,
+  REQUEST_OPEN_URI,
   REQUEST_SCREENCAST_CREATE,
   REQUEST_SCREENCAST_OTHER,
   REQUEST_SCREENCAST_START
@@ -57,6 +58,9 @@ typedef struct {
   guint32 source_types;
   guint32 cursor_modes;
 } ScreenCastPortalState;
+typedef struct {
+  guint32 version;
+} OpenUriPortalState;
 struct _DocumentGrant {
   char *doc_id;
   char *host_path;
@@ -106,6 +110,7 @@ struct _PortalBridgeProcess {
   bool enable_host_command;
   DocumentGrantStore documents;
   PortalRequestStore request_store;
+  OpenUriPortalState open_uri;
   ScreenCastPortalState screencast;
   guint local_name_signal_id;
   bool local_objects_registered;

@@ -205,6 +205,7 @@ fn document_portal_ready(bus_address: &str, mountpoint: &str) -> bool {
 
 fn desktop_portal_ready(bus_address: &str) -> bool {
     portal_property_ready(bus_address, "org.freedesktop.portal.FileChooser", "version")
+        && portal_property_ready(bus_address, "org.freedesktop.portal.OpenURI", "version")
         && portal_property_ready(
             bus_address,
             "org.freedesktop.portal.ScreenCast",

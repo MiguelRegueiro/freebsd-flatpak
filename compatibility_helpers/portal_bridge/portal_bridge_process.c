@@ -67,6 +67,29 @@ void portal_bridge_process_load_host_properties(BridgeState *state) {
                   state->screencast.cursor_modes);
   g_variant_unref(properties);
   g_variant_unref(reply);
+
+  error = NULL;
+  reply = g_dbus_connection_call_sync(
+      state->host_bus, "org.freedesktop.portal.Desktop",
+      "/org/freedesktop/portal/desktop", "org.freedesktop.DBus.Properties",
+      "Get",
+      g_variant_new("(ss)", "org.freedesktop.portal.OpenURI", "version"),
+      G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
+  if (reply == NULL) {
+    log_line("read host OpenURI version failed: %s", error->message);
+    g_error_free(error);
+    return;
+  }
+  GVariant *version = NULL;
+  g_variant_get(reply, "(@v)", &version);
+  GVariant *version_value = g_variant_get_variant(version);
+  if (g_variant_is_of_type(version_value, G_VARIANT_TYPE_UINT32)) {
+    state->open_uri.version = g_variant_get_uint32(version_value);
+  }
+  diagnostic_line("host OpenURI version=%u", state->open_uri.version);
+  g_variant_unref(version_value);
+  g_variant_unref(version);
+  g_variant_unref(reply);
 }
 
 void portal_bridge_process_close_client_resources(BridgeState *state,

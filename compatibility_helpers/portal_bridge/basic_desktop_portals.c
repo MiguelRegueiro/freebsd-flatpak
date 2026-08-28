@@ -1,5 +1,6 @@
 #include "basic_desktop_portals.h"
 #include "file_chooser_portal.h"
+#include "open_uri_portal.h"
 #include "portal_bridge_process.h"
 #include "screencast_portal.h"
 const char *DESKTOP_XML =
@@ -23,6 +24,34 @@ const char *DESKTOP_XML =
     "      <arg type='s' name='title' direction='in'/>"
     "      <arg type='a{sv}' name='options' direction='in'/>"
     "      <arg type='o' name='handle' direction='out'/>"
+    "    </method>"
+    "  </interface>"
+    "  <interface name='org.freedesktop.portal.OpenURI'>"
+    "    <property name='version' type='u' access='read'/>"
+    "    <method name='OpenURI'>"
+    "      <arg type='s' name='parent_window' direction='in'/>"
+    "      <arg type='s' name='uri' direction='in'/>"
+    "      <arg type='a{sv}' name='options' direction='in'/>"
+    "      <arg type='o' name='handle' direction='out'/>"
+    "    </method>"
+    "    <method name='OpenFile'>"
+    "      <annotation name='org.gtk.GDBus.C.UnixFD' value='true'/>"
+    "      <arg type='s' name='parent_window' direction='in'/>"
+    "      <arg type='h' name='fd' direction='in'/>"
+    "      <arg type='a{sv}' name='options' direction='in'/>"
+    "      <arg type='o' name='handle' direction='out'/>"
+    "    </method>"
+    "    <method name='OpenDirectory'>"
+    "      <annotation name='org.gtk.GDBus.C.UnixFD' value='true'/>"
+    "      <arg type='s' name='parent_window' direction='in'/>"
+    "      <arg type='h' name='fd' direction='in'/>"
+    "      <arg type='a{sv}' name='options' direction='in'/>"
+    "      <arg type='o' name='handle' direction='out'/>"
+    "    </method>"
+    "    <method name='SchemeSupported'>"
+    "      <arg type='s' name='scheme' direction='in'/>"
+    "      <arg type='a{sv}' name='options' direction='in'/>"
+    "      <arg type='b' name='supported' direction='out'/>"
     "    </method>"
     "  </interface>"
     "  <interface name='org.freedesktop.portal.Settings'>"
@@ -181,6 +210,15 @@ void handle_desktop_method(GDBusConnection *connection, const gchar *sender,
     g_dbus_method_invocation_return_error(
         invocation, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
         "%s is not implemented by this V1 bridge", method_name);
+  } else if (g_strcmp0(interface_name, "org.freedesktop.portal.OpenURI") == 0 &&
+             (g_strcmp0(method_name, "OpenURI") == 0 ||
+              g_strcmp0(method_name, "OpenFile") == 0 ||
+              g_strcmp0(method_name, "OpenDirectory") == 0)) {
+    handle_open_uri_request(state, sender, method_name, parameters, invocation);
+  } else if (g_strcmp0(interface_name, "org.freedesktop.portal.OpenURI") == 0 &&
+             g_strcmp0(method_name, "SchemeSupported") == 0) {
+    forward_desktop_method(state, interface_name, method_name, parameters,
+                           G_VARIANT_TYPE("(b)"), invocation);
   } else if (g_strcmp0(interface_name, "org.freedesktop.portal.Settings") ==
                  0 &&
              g_strcmp0(method_name, "ReadAll") == 0) {
@@ -236,6 +274,9 @@ GVariant *handle_get_property(GDBusConnection *connection, const gchar *sender,
   if (g_strcmp0(property_name, "version") == 0) {
     if (g_strcmp0(interface_name, "org.freedesktop.portal.FileChooser") == 0) {
       return g_variant_new_uint32(4);
+    }
+    if (g_strcmp0(interface_name, "org.freedesktop.portal.OpenURI") == 0) {
+      return g_variant_new_uint32(state->open_uri.version);
     }
     if (g_strcmp0(interface_name, "org.freedesktop.portal.Documents") == 0) {
       return g_variant_new_uint32(5);
