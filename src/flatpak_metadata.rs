@@ -66,3 +66,17 @@ pub(crate) fn sections_with_prefix(metadata: &str, prefix: &str) -> Vec<String> 
         })
         .collect()
 }
+
+pub(crate) fn section_names(metadata: &str) -> Vec<String> {
+    let mut sections = metadata
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            (line.starts_with('[') && line.ends_with(']'))
+                .then(|| line[1..line.len() - 1].to_string())
+        })
+        .collect::<Vec<_>>();
+    sections.sort();
+    sections.dedup();
+    sections
+}

@@ -4,9 +4,11 @@ use super::application_entrypoint::{
 use super::chroot_instance::ChrootInstance;
 use super::filesystem_grants::HostFilesystem;
 use super::flatpak_data_mount_plan::FlatpakDataMountPlan;
+use super::flatpak_installation::FlatpakInstallationProjection;
 use super::launch_application::FlatpakApp;
 use super::process_signals::install_signal_handlers;
 use super::sandbox_root::{app_allows_network, prepare_root, write_flatpak_info};
+use super::static_overrides::{effective_metadata, permission_enabled};
 use crate::desktop_integration::DesktopSession;
 use crate::diagnostics::{Detail, Diagnostics};
 use crate::host_resources::audio::HostAudio;
@@ -145,16 +147,24 @@ impl ChrootNullfsBackend {
         identity.finish("sandbox", "identity and instance paths");
         let metadata = diagnostics.timer(Detail::Detailed);
         let metadata_path = app.app_dir.join("metadata");
-        let network_enabled = app_allows_network(&metadata_path)?;
+        let effective_metadata =
+            effective_metadata(&metadata_path, &self.paths.flatpak_overrides(), &app.app_id)?;
+        let expose_flatpak_apps = permission_enabled(
+            &effective_metadata,
+            "Context",
+            "filesystems",
+            "xdg-data/flatpak/app",
+        );
+        let network_enabled = app_allows_network(&effective_metadata);
         let host_network = HostNetwork::prepare(&self.paths, network_enabled)?;
-        let host_filesystem = HostFilesystem::from_metadata_file_for_user(
-            &metadata_path,
+        let host_filesystem = HostFilesystem::from_metadata_for_user(
+            &effective_metadata,
             &user,
             self.paths.data_root(),
             &root,
         )?;
         let host_audio =
-            HostAudio::from_metadata_file(&metadata_path, &desktop.xdg_runtime_dir, uid)?;
+            HostAudio::from_metadata(&effective_metadata, &desktop.xdg_runtime_dir, uid);
         let host_cursor = HostCursorTheme::from_host(desktop);
         let host_fonts = HostFonts::from_host();
         metadata.finish("sandbox", "metadata and host resources");
@@ -217,6 +227,7 @@ impl ChrootNullfsBackend {
             gid,
             supplementary_gids,
             host_filesystem,
+            effective_metadata,
             host_audio,
             host_cursor,
             host_fonts,
@@ -276,17 +287,11 @@ impl ChrootNullfsBackend {
         for mount in instance.host_video.runtime_mounts() {
             instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
         }
-        let reserved_data_roots = [
-            self.paths.data_home().join("flatpak"),
-            self.paths.data_root().to_path_buf(),
-        ]
-        .into_iter()
-        .filter(|root| root.is_dir())
-        .collect::<Vec<_>>();
         let flatpak_data_plan = FlatpakDataMountPlan::build(
             &instance.host_filesystem,
             &app_data,
-            &reserved_data_roots,
+            self.paths.data_home(),
+            self.paths.data_root(),
         )?;
         for grant in flatpak_data_plan.grants_before_mask {
             instance.mount_nullfs_secure(
@@ -319,6 +324,13 @@ impl ChrootNullfsBackend {
             absolute_to_chroot_relative(&flatpak_data_plan.app_data)?,
             false,
         )?;
+        if expose_flatpak_apps {
+            let projection = FlatpakInstallationProjection::prepare(&instance.root, &self.paths)?;
+            instance.mount_nullfs_secure(&projection.source_root, &projection.target_root, true)?;
+            for deployment in projection.deployments {
+                instance.mount_nullfs_secure(&deployment.source, &deployment.target, true)?;
+            }
+        }
         for mount in instance.host_cursor.mounts().to_vec() {
             instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
         }

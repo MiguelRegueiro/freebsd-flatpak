@@ -85,6 +85,9 @@ impl Installation {
     pub fn data_home(&self) -> &Path {
         &self.data_home
     }
+    pub fn flatpak_overrides(&self) -> PathBuf {
+        self.data_home.join("flatpak/overrides")
+    }
     pub fn data_root(&self) -> &Path {
         &self.data_root
     }

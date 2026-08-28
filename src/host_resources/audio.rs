@@ -30,17 +30,7 @@ struct PipeWireAudio {
 }
 
 impl HostAudio {
-    pub fn from_metadata_file(
-        metadata_path: &Path,
-        xdg_runtime_dir: &Path,
-        uid: u32,
-    ) -> Result<Self> {
-        let metadata = fs::read_to_string(metadata_path)
-            .with_context(|| format!("read Flatpak metadata {}", metadata_path.display()))?;
-        Ok(Self::from_metadata(&metadata, xdg_runtime_dir, uid))
-    }
-
-    fn from_metadata(metadata: &str, xdg_runtime_dir: &Path, uid: u32) -> Self {
+    pub(crate) fn from_metadata(metadata: &str, xdg_runtime_dir: &Path, uid: u32) -> Self {
         let sockets = parse_socket_permissions(metadata);
         let mut warnings = Vec::new();
 

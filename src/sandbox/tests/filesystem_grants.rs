@@ -1,5 +1,6 @@
 use super::{authorized_grant_paths, AccessMode, HostFilesystem, XdgUserDirs};
 use std::fs;
+use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -428,4 +429,72 @@ fn read_only_parent_and_writable_child_keep_explicit_precedence() {
     assert!(filesystem.grants()[1]
         .sandbox_path()
         .starts_with(filesystem.grants()[0].sandbox_path()));
+}
+
+#[test]
+fn xdg_data_create_materializes_and_grants_the_standard_override_directory() {
+    let tree = TestTree::new("xdg-data-overrides");
+    let home = tree.path("home/user");
+    fs::create_dir_all(&home).unwrap();
+    let filesystem = HostFilesystem::from_metadata(
+        &metadata("xdg-data/flatpak/overrides:create;"),
+        "user",
+        &home,
+        &tree.path("project"),
+        &tree.path("sandbox"),
+    )
+    .unwrap();
+    let overrides = home.join(".local/share/flatpak/overrides");
+    assert!(overrides.is_dir());
+    assert_eq!(filesystem.grants()[0].host_path(), overrides);
+    assert_eq!(filesystem.grants()[0].access(), AccessMode::ReadWrite);
+    assert!(filesystem.warnings().is_empty());
+}
+
+#[test]
+fn xdg_data_create_preserves_an_existing_symlinked_override_directory() {
+    let tree = TestTree::new("xdg-data-symlinked-overrides");
+    let home = tree.path("home/user");
+    let flatpak = home.join(".local/share/flatpak");
+    let backing = tree.path("managed/flatpak-overrides");
+    fs::create_dir_all(&flatpak).unwrap();
+    fs::create_dir_all(&backing).unwrap();
+    let overrides = flatpak.join("overrides");
+    unix_fs::symlink(&backing, &overrides).unwrap();
+
+    let filesystem = HostFilesystem::from_metadata(
+        &metadata("xdg-data/flatpak/overrides:create;"),
+        "user",
+        &home,
+        &tree.path("project"),
+        &tree.path("sandbox"),
+    )
+    .unwrap();
+
+    assert!(fs::symlink_metadata(&overrides)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::read_link(&overrides).unwrap(), backing);
+    assert_eq!(filesystem.grants().len(), 1);
+    assert_eq!(filesystem.grants()[0].host_path(), backing);
+    assert_eq!(filesystem.grants()[0].sandbox_path(), overrides);
+    assert_eq!(filesystem.grants()[0].access(), AccessMode::ReadWrite);
+}
+
+#[test]
+fn projected_flatpak_app_permission_is_supported_without_exposing_private_storage() {
+    let tree = TestTree::new("xdg-data-app-projection");
+    let home = tree.path("home/user");
+    fs::create_dir_all(&home).unwrap();
+    let filesystem = HostFilesystem::from_metadata(
+        &metadata("xdg-data/flatpak/app:ro;"),
+        "user",
+        &home,
+        &tree.path("project"),
+        &tree.path("sandbox"),
+    )
+    .unwrap();
+    assert!(filesystem.grants().is_empty());
+    assert!(filesystem.warnings().is_empty());
 }

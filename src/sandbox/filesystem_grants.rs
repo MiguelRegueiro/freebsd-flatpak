@@ -93,10 +93,6 @@ impl HostPathGrant {
         None
     }
 
-    pub(super) fn maps_host_path_to_same_sandbox_path(&self, host_path: &Path) -> bool {
-        self.map_host_path(host_path).as_deref() == Some(host_path)
-    }
-
     fn same_mount(&self, host_path: &Path, sandbox_path: &Path) -> bool {
         (self.host_path == host_path || self.canonical_host_path == host_path)
             && self.sandbox_path == sandbox_path
@@ -113,20 +109,32 @@ pub struct HostFilesystem {
 }
 
 impl HostFilesystem {
-    pub fn from_metadata_file_for_user(
-        metadata_path: &Path,
+    pub(crate) fn from_metadata_for_user(
+        metadata: &str,
         user: &str,
         project_root: &Path,
         sandbox_root: &Path,
     ) -> Result<Self> {
-        let metadata = fs::read_to_string(metadata_path)
-            .with_context(|| format!("read Flatpak metadata {}", metadata_path.display()))?;
         let home = env::var_os("HOME")
             .map(PathBuf::from)
             .context("HOME must be set to derive Flatpak filesystem grants")?;
-        Self::from_metadata(&metadata, user, &home, project_root, sandbox_root)
+        let xdg_data_home = env::var_os("XDG_DATA_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/share"));
+        Self::from_metadata_with_xdg_dirs_and_data_home(
+            metadata,
+            user,
+            &home,
+            project_root,
+            sandbox_root,
+            host_mount_points(),
+            XdgUserDirs::load(&home),
+            xdg_data_home,
+        )
     }
 
+    #[cfg(test)]
     fn from_metadata(
         metadata: &str,
         user: &str,
@@ -144,6 +152,7 @@ impl HostFilesystem {
         )
     }
 
+    #[cfg(test)]
     fn from_metadata_with_mount_points(
         metadata: &str,
         user: &str,
@@ -163,6 +172,7 @@ impl HostFilesystem {
         )
     }
 
+    #[cfg(test)]
     fn from_metadata_with_xdg_dirs(
         metadata: &str,
         user: &str,
@@ -171,6 +181,30 @@ impl HostFilesystem {
         sandbox_root: &Path,
         mount_points: Vec<PathBuf>,
         xdg_dirs: XdgUserDirs,
+    ) -> Result<Self> {
+        let xdg_data_home = home.join(".local/share");
+        Self::from_metadata_with_xdg_dirs_and_data_home(
+            metadata,
+            user,
+            home,
+            project_root,
+            sandbox_root,
+            mount_points,
+            xdg_dirs,
+            xdg_data_home,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_metadata_with_xdg_dirs_and_data_home(
+        metadata: &str,
+        user: &str,
+        home: &Path,
+        project_root: &Path,
+        sandbox_root: &Path,
+        mount_points: Vec<PathBuf>,
+        xdg_dirs: XdgUserDirs,
+        xdg_data_home: PathBuf,
     ) -> Result<Self> {
         let permissions = parse_filesystem_permissions(metadata)?;
         let sandbox_home = PathBuf::from("/home").join(user);
@@ -184,6 +218,7 @@ impl HostFilesystem {
                 .unwrap_or_else(|_| project_root.to_path_buf()),
             sandbox_root: sandbox_root.to_path_buf(),
             xdg_dirs,
+            xdg_data_home,
         };
 
         for permission in &permissions {
@@ -350,6 +385,7 @@ struct GrantBuilder {
     project_root: PathBuf,
     sandbox_root: PathBuf,
     xdg_dirs: XdgUserDirs,
+    xdg_data_home: PathBuf,
 }
 
 impl GrantBuilder {
@@ -361,6 +397,7 @@ impl GrantBuilder {
             .unwrap_or((permission.path.as_str(), None));
 
         match base {
+            _ if base.starts_with('!') => Ok(()),
             "host" if suffix.is_none() => self.add_host_grants(permission),
             "home" | "~" => {
                 let host_path = append_permission_suffix(&self.home, suffix)?;
@@ -391,6 +428,21 @@ impl GrantBuilder {
                 self.add_grant_or_expand(
                     permission,
                     base,
+                    host_path,
+                    sandbox_path,
+                    permission.create,
+                    0,
+                )
+            }
+            "xdg-data" => {
+                if suffix == Some("flatpak/app") {
+                    return Ok(());
+                }
+                let host_path = append_permission_suffix(&self.xdg_data_home, suffix)?;
+                let sandbox_path = host_path.clone();
+                self.add_grant_or_expand(
+                    permission,
+                    "xdg-data",
                     host_path,
                     sandbox_path,
                     permission.create,

@@ -1,6 +1,7 @@
 use crate::host_resources::audio;
 use crate::installation::{self as state, installation_paths::Installation};
 use crate::sandbox::filesystem_grants as filesystem;
+use crate::sandbox::static_overrides;
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
@@ -16,16 +17,21 @@ pub(crate) fn cmd_permissions(paths: &Installation, args: Vec<String>) -> Result
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(format!("/run/user/{uid}")));
     let metadata_path = state::absolute(paths, &record.app_dir).join("metadata");
-    let host_filesystem = filesystem::HostFilesystem::from_metadata_file_for_user(
+    let effective_metadata = static_overrides::effective_metadata(
         &metadata_path,
+        &paths.flatpak_overrides(),
+        &record.app_id,
+    )?;
+    let host_filesystem = filesystem::HostFilesystem::from_metadata_for_user(
+        &effective_metadata,
         &user,
         paths.data_root(),
         &sandbox_root,
     )?;
-    let host_audio = audio::HostAudio::from_metadata_file(&metadata_path, &xdg_runtime_dir, uid)?;
+    let host_audio = audio::HostAudio::from_metadata(&effective_metadata, &xdg_runtime_dir, uid);
 
     println!("Filesystem permissions for {}", record.app_id);
-    println!("Metadata filesystems:");
+    println!("Effective filesystems (metadata plus static overrides):");
     if host_filesystem.permissions().is_empty() {
         println!("  <none>");
     } else {

@@ -29,6 +29,10 @@ fn app_with_metadata(metadata: &str) -> FlatpakApp {
     }
 }
 
+fn metadata_for(app: &FlatpakApp) -> String {
+    fs::read_to_string(app.app_dir.join("metadata")).unwrap()
+}
+
 #[test]
 fn app_metadata_environment_expands_existing_sandbox_values() {
     let app = app_with_metadata(
@@ -40,7 +44,7 @@ fn app_metadata_environment_expands_existing_sandbox_values() {
     ];
 
     assert_eq!(
-        app_metadata_env(&app, &base_env).unwrap(),
+        app_metadata_env(&metadata_for(&app), &base_env),
         vec![
             (
                 "MESA_SHADER_CACHE_DIR".to_string(),
@@ -61,13 +65,25 @@ fn launch_data_dirs_include_projected_host_icon_themes() {
         dbus_session_bus_address: None,
     };
 
-    let env = launch_env(&app, &desktop, 1001, "user");
+    let env = launch_env(
+        &app,
+        &desktop,
+        1001,
+        "user",
+        PathBuf::from("/host/data").as_path(),
+    );
 
     assert_eq!(
         env.iter()
             .find(|(key, _)| key == "XDG_DATA_DIRS")
             .map(|(_, value)| value.as_str()),
         Some("/app/share:/usr/share:/usr/share/runtime/share:/run/host/share")
+    );
+    assert_eq!(
+        env.iter()
+            .find(|(key, _)| key == "HOST_XDG_DATA_HOME")
+            .map(|(_, value)| value.as_str()),
+        Some("/host/data")
     );
 }
 
@@ -80,7 +96,7 @@ fn app_metadata_environment_supports_braced_variables() {
     ];
 
     assert_eq!(
-        app_metadata_env(&app, &base_env).unwrap(),
+        app_metadata_env(&metadata_for(&app), &base_env),
         vec![(
             "EXAMPLE".to_string(),
             "/run/user/1001/app/org.example.App".to_string()

@@ -17,20 +17,12 @@ fn test_dir(name: &str) -> PathBuf {
 
 #[test]
 fn shared_network_enables_resolver_overlay() {
-    let dir = test_dir("network-metadata");
-    let metadata = dir.join("metadata");
-    fs::write(&metadata, "[Context]\nshared=ipc;network;\n").unwrap();
-
-    assert!(app_allows_network(&metadata).unwrap());
+    assert!(app_allows_network("[Context]\nshared=ipc;network;\n"));
 }
 
 #[test]
 fn missing_network_shared_permission_disables_resolver_overlay() {
-    let dir = test_dir("non-network-metadata");
-    let metadata = dir.join("metadata");
-    fs::write(&metadata, "[Context]\nshared=ipc;\n").unwrap();
-
-    assert!(!app_allows_network(&metadata).unwrap());
+    assert!(!app_allows_network("[Context]\nshared=ipc;\n"));
 }
 
 #[test]

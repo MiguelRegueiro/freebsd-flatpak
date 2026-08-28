@@ -1,5 +1,37 @@
 use super::*;
 use crate::sandbox::filesystem_permissions::AccessMode;
+use std::fs;
+use std::os::unix::fs as unix_fs;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static TEST_ID: AtomicUsize = AtomicUsize::new(0);
+
+struct TestTree {
+    root: PathBuf,
+}
+
+impl TestTree {
+    fn new(name: &str) -> Self {
+        let id = TEST_ID.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!(
+            "freebsd-flatpak-mount-plan-{name}-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        Self { root }
+    }
+
+    fn path(&self, relative: &str) -> PathBuf {
+        self.root.join(relative)
+    }
+}
+
+impl Drop for TestTree {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
 
 fn grant(
     permission: &str,
@@ -182,23 +214,134 @@ fn ordinary_host_grants_remain_before_the_private_boundary() {
 #[test]
 fn broad_access_masks_flatpak_installation_storage_too() {
     let (_, own) = app_paths();
-    let installation_roots = [
-        PathBuf::from("/home/user/.local/share/flatpak"),
-        PathBuf::from("/home/user/.local/share/freebsd-flatpak"),
-    ];
-    let plan = FlatpakDataMountPlan::build_from_parts(
-        &[grant(
-            "host",
-            Path::new("/home/user"),
-            Path::new("/home/user"),
-            AccessMode::ReadWrite,
-        )],
+    let data_home = PathBuf::from("/home/user/path/which/does/not/exist/share");
+    let data_root = data_home.join("freebsd-flatpak");
+    for (permission, broad_root) in [
+        ("host", PathBuf::from("/home")),
+        ("home", PathBuf::from("/home/user")),
+        ("xdg-data", data_home.clone()),
+    ] {
+        let plan = FlatpakDataMountPlan::build_from_installation_parts(
+            &[grant(
+                permission,
+                &broad_root,
+                &broad_root,
+                AccessMode::ReadWrite,
+            )],
+            &own,
+            &data_home,
+            &data_root,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.reserved_roots_to_mask,
+            [data_home.join("flatpak"), data_root.clone()],
+            "{permission} must not expose Flatpak-managed data",
+        );
+    }
+}
+
+#[test]
+fn canonical_protected_aliases_are_masked_and_only_explicit_overrides_are_restored() {
+    let tree = TestTree::new("canonical-protected-aliases");
+    let home = tree.path("home/user");
+    let data_home = home.join(".local/share");
+    let data_root = data_home.join("freebsd-flatpak");
+    let app_data_root = home.join(".var/app");
+    let own = app_data_root.join("org.example.App");
+    let trusted = home.join("trusted-state");
+    let overrides = data_home.join("flatpak/overrides");
+    let canonical_overrides = trusted.join("overrides");
+    let canonical_data_root = trusted.join("installation");
+    let canonical_app_data_root = trusted.join("app-data");
+    fs::create_dir_all(data_home.join("flatpak")).unwrap();
+    for path in [
+        &canonical_overrides,
+        &canonical_data_root,
+        &canonical_app_data_root.join("org.example.App"),
+    ] {
+        fs::create_dir_all(path).unwrap();
+    }
+    fs::create_dir_all(app_data_root.parent().unwrap()).unwrap();
+    unix_fs::symlink(&canonical_overrides, &overrides).unwrap();
+    unix_fs::symlink(&canonical_data_root, &data_root).unwrap();
+    unix_fs::symlink(&canonical_app_data_root, &app_data_root).unwrap();
+
+    let broad_home = grant("home", &home, &home, AccessMode::ReadWrite);
+    let expanded_home = grant(
+        "home",
+        &canonical_overrides,
+        &canonical_overrides,
+        AccessMode::ReadWrite,
+    );
+    let plan_without_explicit = FlatpakDataMountPlan::build_from_installation_parts(
+        &[broad_home.clone(), expanded_home.clone()],
         &own,
-        &installation_roots,
+        &data_home,
+        &data_root,
     )
     .unwrap();
 
-    assert_eq!(plan.reserved_roots_to_mask, installation_roots);
+    for protected_alias in [
+        &canonical_overrides,
+        &canonical_data_root,
+        &canonical_app_data_root,
+    ] {
+        assert!(
+            plan_without_explicit
+                .reserved_roots_to_mask
+                .contains(protected_alias),
+            "canonical protected alias was not masked: {}",
+            protected_alias.display(),
+        );
+    }
+    assert_eq!(plan_without_explicit.grants_before_mask.len(), 2);
+    assert!(plan_without_explicit.grants_after_mask.is_empty());
+
+    let plan_with_explicit = FlatpakDataMountPlan::build_from_installation_parts(
+        &[
+            broad_home,
+            expanded_home,
+            grant(
+                "xdg-data/flatpak/overrides:create",
+                &canonical_overrides,
+                &overrides,
+                AccessMode::ReadWrite,
+            ),
+        ],
+        &own,
+        &data_home,
+        &data_root,
+    )
+    .unwrap();
+
+    assert!(plan_with_explicit
+        .reserved_roots_to_mask
+        .contains(&canonical_overrides));
+    assert_eq!(plan_with_explicit.grants_after_mask.len(), 1);
+    assert_eq!(
+        plan_with_explicit.grants_after_mask[0].host_path(),
+        canonical_overrides
+    );
+    assert_eq!(
+        plan_with_explicit.grants_after_mask[0].sandbox_path(),
+        overrides
+    );
+    assert_eq!(
+        plan_with_explicit.grants_after_mask[0].access(),
+        AccessMode::ReadWrite
+    );
+    for symlink in [
+        data_home.join("flatpak/overrides"),
+        data_root,
+        app_data_root,
+    ] {
+        assert!(fs::symlink_metadata(symlink)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
 }
 
 #[test]

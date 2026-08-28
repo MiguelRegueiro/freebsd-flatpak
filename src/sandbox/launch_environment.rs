@@ -1,6 +1,6 @@
 use super::launch_application::FlatpakApp;
 use crate::desktop_integration::DesktopSession;
-use crate::flatpak_metadata::section_entries;
+use crate::flatpak_metadata::{section_entries, value};
 use crate::installation as runtime;
 use anyhow::{Context, Result};
 use std::fs;
@@ -11,6 +11,7 @@ pub(super) fn launch_env(
     desktop: &DesktopSession,
     uid: u32,
     user: &str,
+    host_data_home: &Path,
 ) -> Vec<(String, String)> {
     let mut env = vec![
         ("HOME".to_string(), "/var/data".to_string()),
@@ -27,6 +28,10 @@ pub(super) fn launch_env(
         ("GDK_BACKEND".to_string(), "wayland".to_string()),
         ("GSK_RENDERER".to_string(), "cairo".to_string()),
         ("XDG_DATA_HOME".to_string(), "/var/data".to_string()),
+        (
+            "HOST_XDG_DATA_HOME".to_string(),
+            host_data_home.display().to_string(),
+        ),
         ("XDG_CONFIG_HOME".to_string(), "/var/config".to_string()),
         ("XDG_CACHE_HOME".to_string(), "/var/cache".to_string()),
         ("XDG_CONFIG_DIRS".to_string(), "/app/etc/xdg:/etc/xdg".to_string()),
@@ -68,15 +73,12 @@ fn push_host_env(env: &mut Vec<(String, String)>, key: &str) {
 }
 
 pub(super) fn app_metadata_env(
-    app: &FlatpakApp,
+    metadata: &str,
     base_env: &[(String, String)],
-) -> Result<Vec<(String, String)>> {
-    let metadata_path = app.app_dir.join("metadata");
-    let metadata = fs::read_to_string(&metadata_path)
-        .with_context(|| format!("read Flatpak metadata {}", metadata_path.display()))?;
+) -> Vec<(String, String)> {
     let mut env = base_env.to_vec();
     let mut updates = Vec::new();
-    for (key, raw_value) in section_entries(&metadata, "Environment") {
+    for (key, raw_value) in section_entries(metadata, "Environment") {
         let value = expand_env_value(&raw_value, &env);
         if let Some((_, existing)) = env
             .iter_mut()
@@ -88,7 +90,7 @@ pub(super) fn app_metadata_env(
         }
         updates.push((key, value));
     }
-    Ok(updates)
+    updates
 }
 
 fn expand_env_value(value: &str, env: &[(String, String)]) -> String {
@@ -174,6 +176,18 @@ pub(super) fn merge_env(env: &mut Vec<(String, String)>, updates: Vec<(String, S
             env.push((key, value));
         }
     }
+}
+
+pub(super) fn apply_unset_environment(env: &mut Vec<(String, String)>, metadata: &str) {
+    let Some(unset) = value(metadata, "Context", "unset-environment") else {
+        return;
+    };
+    let names = unset
+        .split(';')
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !name.starts_with('!'))
+        .collect::<Vec<_>>();
+    env.retain(|(key, _)| !names.contains(&key.as_str()));
 }
 
 pub(super) fn prepend_env_paths(env: &mut Vec<(String, String)>, key: &str, paths: Vec<String>) {

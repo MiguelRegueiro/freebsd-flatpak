@@ -2,7 +2,7 @@ use super::application_entrypoint::{host_user, join_numeric_ids, launch_args, En
 use super::filesystem_grants::HostFilesystem;
 use super::launch_application::FlatpakApp;
 use super::launch_environment::{
-    app_extension_ld_paths, app_metadata_env, apply_graphics_preloads,
+    app_extension_ld_paths, app_metadata_env, apply_graphics_preloads, apply_unset_environment,
     ensure_metadata_runtime_dirs, launch_env, merge_env, prepend_env_paths,
 };
 use super::mount_operations::owned_mount_teardown_order;
@@ -38,6 +38,7 @@ pub(super) struct ChrootInstance {
     gid: u32,
     supplementary_gids: Vec<u32>,
     pub(super) host_filesystem: HostFilesystem,
+    effective_metadata: String,
     host_audio: HostAudio,
     pub(super) host_cursor: HostCursorTheme,
     pub(super) host_fonts: HostFonts,
@@ -78,6 +79,7 @@ impl ChrootInstance {
         gid: u32,
         supplementary_gids: Vec<u32>,
         host_filesystem: HostFilesystem,
+        effective_metadata: String,
         host_audio: HostAudio,
         host_cursor: HostCursorTheme,
         host_fonts: HostFonts,
@@ -98,6 +100,7 @@ impl ChrootInstance {
             gid,
             supplementary_gids,
             host_filesystem,
+            effective_metadata,
             host_audio,
             host_cursor,
             host_fonts,
@@ -128,7 +131,7 @@ impl ChrootInstance {
         let launch_configuration = diagnostics.timer(Detail::Detailed);
         install_signal_handlers();
         let user = host_user(self.uid);
-        let mut env = launch_env(app, desktop, self.uid, &user);
+        let mut env = launch_env(app, desktop, self.uid, &user, self.paths.data_home());
         env.retain(|(key, _)| key != "HOME");
         env.push((
             "HOME".to_string(),
@@ -139,8 +142,9 @@ impl ChrootInstance {
         env.extend(self.host_cursor.env());
         prepend_env_paths(&mut env, "XDG_CONFIG_DIRS", self.host_cursor.config_dirs());
         env.extend(self.host_portal.env());
-        let metadata_env = app_metadata_env(app, &env)?;
+        let metadata_env = app_metadata_env(&self.effective_metadata, &env);
         merge_env(&mut env, metadata_env);
+        apply_unset_environment(&mut env, &self.effective_metadata);
         merge_env(&mut env, self.host_graphics.env());
         apply_graphics_preloads(
             &mut env,

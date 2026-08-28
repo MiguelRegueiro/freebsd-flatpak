@@ -119,17 +119,15 @@ fn remove_regular_overlay_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn app_allows_network(metadata_path: &Path) -> Result<bool> {
-    let metadata = fs::read_to_string(metadata_path)
-        .with_context(|| format!("read {}", metadata_path.display()))?;
-    Ok(value(&metadata, "Context", "shared")
+pub(super) fn app_allows_network(metadata: &str) -> bool {
+    value(metadata, "Context", "shared")
         .map(|shared| {
             shared
                 .split(';')
                 .map(str::trim)
                 .any(|permission| permission == "network")
         })
-        .unwrap_or(false))
+        .unwrap_or(false)
 }
 
 pub(super) fn write_flatpak_info(root: &Path, app: &FlatpakApp, instance_id: &str) -> Result<()> {
@@ -141,6 +139,7 @@ runtime={}
 
 [Instance]
 instance-id={}
+flatpak-version=1.12.0
 
 [Context]
 filesystems=
