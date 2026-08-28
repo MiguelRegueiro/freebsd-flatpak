@@ -42,6 +42,7 @@ enum PortalMode {
 }
 
 impl HostPortal {
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         paths: &Installation,
         app: &FlatpakApp,
