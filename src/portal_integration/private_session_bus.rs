@@ -203,7 +203,7 @@ fn portal_property_ready(bus_address: &str, interface: &str, property: &str) -> 
     matches!(output, Ok(output) if output.status.success())
 }
 
-pub(super) fn terminate_child(child: &mut Child) {
+pub(crate) fn terminate_child(child: &mut Child) {
     if child.try_wait().ok().flatten().is_some() {
         return;
     }

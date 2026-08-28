@@ -17,7 +17,9 @@ use crate::host_resources::audio::HostAudio;
 use crate::host_resources::cursor_themes::HostCursorTheme;
 use crate::host_resources::fonts::HostFonts;
 use crate::host_resources::graphics::HostGraphics;
+use crate::host_resources::linux_compat::HostLinuxCompat;
 use crate::host_resources::network::HostNetwork;
+use crate::host_resources::system_bus::HostSystemBus;
 use crate::host_resources::video_acceleration::HostVideo;
 use crate::installation as runtime;
 use crate::installation as state;
@@ -44,7 +46,9 @@ pub(super) struct ChrootInstance {
     pub(super) host_fonts: HostFonts,
     pub(super) host_portal: HostPortal,
     pub(super) host_graphics: HostGraphics,
+    pub(super) host_linux_compat: HostLinuxCompat,
     pub(super) host_network: HostNetwork,
+    pub(super) host_system_bus: HostSystemBus,
     pub(super) host_video: HostVideo,
     pub(super) app_extensions: Vec<runtime::AppExtension>,
     pub(super) owned_mounts: Vec<OwnedMount>,
@@ -85,7 +89,9 @@ impl ChrootInstance {
         host_fonts: HostFonts,
         host_portal: HostPortal,
         host_graphics: HostGraphics,
+        host_linux_compat: HostLinuxCompat,
         host_network: HostNetwork,
+        host_system_bus: HostSystemBus,
         host_video: HostVideo,
         app_extensions: Vec<runtime::AppExtension>,
         run_record: PathBuf,
@@ -106,7 +112,9 @@ impl ChrootInstance {
             host_fonts,
             host_portal,
             host_graphics,
+            host_linux_compat,
             host_network,
+            host_system_bus,
             host_video,
             app_extensions,
             owned_mounts: Vec::new(),
@@ -157,6 +165,7 @@ impl ChrootInstance {
             "ZYPAK_LD_PRELOAD",
             self.host_network.preload_paths(),
         );
+        prepend_env_paths(&mut env, "PATH", self.host_linux_compat.path_entries());
         prepend_env_paths(
             &mut env,
             "LD_LIBRARY_PATH",
@@ -218,6 +227,9 @@ impl ChrootInstance {
             }
             for warning in self.host_portal.warnings() {
                 eprintln!("  portal warning: {warning}");
+            }
+            for line in self.host_system_bus.describe() {
+                eprintln!("  system bus: {line}");
             }
             for line in self.host_graphics.describe() {
                 eprintln!("  graphics: {line}");
@@ -337,6 +349,11 @@ impl ChrootInstance {
         // on a later cleanup pass.
         if self.owned_mounts.is_empty() {
             if let Err(error) = self.host_graphics.cleanup() {
+                errors.push(format!("{error:#}"));
+            }
+        }
+        if self.owned_mounts.is_empty() {
+            if let Err(error) = self.host_system_bus.cleanup() {
                 errors.push(format!("{error:#}"));
             }
         }

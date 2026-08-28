@@ -72,6 +72,7 @@ impl Installation {
             self.chroots(),
             self.runs(),
             self.portal(),
+            self.system_bus(),
             self.gpu(),
             self.app_data_root.clone(),
         ] {
@@ -142,6 +143,9 @@ impl Installation {
     }
     pub fn portal(&self) -> PathBuf {
         self.runtime_root.join("portal")
+    }
+    pub fn system_bus(&self) -> PathBuf {
+        self.runtime_root.join("system-bus")
     }
     pub fn gpu(&self) -> PathBuf {
         self.runtime_root.join("gpu")

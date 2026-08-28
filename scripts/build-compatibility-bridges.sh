@@ -13,7 +13,8 @@ OUTPUT_DIR=$1
 mkdir -p "$OUTPUT_DIR"
 PORTAL_RESPONSE=$OUTPUT_DIR/portal-bridge.pkg-config.rsp
 STATUS_NOTIFIER_RESPONSE=$OUTPUT_DIR/status-notifier-bridge.pkg-config.rsp
-trap 'rm -f "$PORTAL_RESPONSE" "$STATUS_NOTIFIER_RESPONSE"' EXIT HUP INT TERM
+NETWORK_MANAGER_RESPONSE=$OUTPUT_DIR/network-manager-compat.pkg-config.rsp
+trap 'rm -f "$PORTAL_RESPONSE" "$STATUS_NOTIFIER_RESPONSE" "$NETWORK_MANAGER_RESPONSE"' EXIT HUP INT TERM
 
 ui_progress "Portal bridge"
 pkg-config --cflags --libs gio-2.0 gio-unix-2.0 glib-2.0 libpipewire-0.3 \
@@ -47,3 +48,11 @@ cc -O2 -Wall -Wextra \
     compatibility_helpers/status_notifier_bridge/status_notifier_watcher.c \
     -o "$OUTPUT_DIR/status-notifier-bridge" \
     @"$STATUS_NOTIFIER_RESPONSE"
+
+ui_progress "NetworkManager compatibility service"
+pkg-config --cflags --libs gio-2.0 gio-unix-2.0 glib-2.0 \
+    >"$NETWORK_MANAGER_RESPONSE"
+cc -O2 -Wall -Wextra -Werror \
+    compatibility_helpers/network_manager_compat.c \
+    -o "$OUTPUT_DIR/network-manager-compat" \
+    @"$NETWORK_MANAGER_RESPONSE"

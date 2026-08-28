@@ -4,6 +4,8 @@ mod drm_device;
 pub(crate) mod fonts;
 pub(crate) mod graphics;
 mod graphics_shims;
+pub(crate) mod linux_compat;
 mod linux_drm_sysfs;
 pub(crate) mod network;
+pub(crate) mod system_bus;
 pub(crate) mod video_acceleration;

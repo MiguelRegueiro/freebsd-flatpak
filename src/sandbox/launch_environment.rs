@@ -57,6 +57,7 @@ pub(super) fn launch_env(
     push_host_env(&mut env, "XDG_CURRENT_DESKTOP");
     push_host_env(&mut env, "XDG_SESSION_DESKTOP");
     push_host_env(&mut env, "MOZ_ENABLE_WAYLAND");
+    push_host_env(&mut env, "FREEBSD_FLATPAK_TRACE_LINUX_COMPAT");
     if let Some(address) = desktop.chroot_dbus_address(uid) {
         env.push(("DBUS_SESSION_BUS_ADDRESS".to_string(), address));
     }

@@ -15,7 +15,9 @@ use crate::host_resources::audio::HostAudio;
 use crate::host_resources::cursor_themes::HostCursorTheme;
 use crate::host_resources::fonts::HostFonts;
 use crate::host_resources::graphics::HostGraphics;
+use crate::host_resources::linux_compat::HostLinuxCompat;
 use crate::host_resources::network::HostNetwork;
+use crate::host_resources::system_bus::HostSystemBus;
 use crate::host_resources::video_acceleration::HostVideo;
 use crate::installation as runtime;
 use crate::installation as state;
@@ -156,7 +158,10 @@ impl ChrootNullfsBackend {
             "xdg-data/flatpak/app",
         );
         let network_enabled = app_allows_network(&effective_metadata);
+        let host_linux_compat = HostLinuxCompat::prepare(&self.paths)?;
         let host_network = HostNetwork::prepare(&self.paths, network_enabled)?;
+        let host_system_bus =
+            HostSystemBus::prepare(&self.paths, &effective_metadata, &instance_id)?;
         let host_filesystem = HostFilesystem::from_metadata_for_user(
             &effective_metadata,
             &user,
@@ -233,7 +238,9 @@ impl ChrootNullfsBackend {
             host_fonts,
             host_portal,
             host_graphics,
+            host_linux_compat,
             host_network,
+            host_system_bus,
             host_video,
             app_extensions,
             run_record,
@@ -270,19 +277,28 @@ impl ChrootNullfsBackend {
             )?;
         }
         let graphics_mounts = instance.host_graphics.runtime_mounts();
+        let (linux_compat_source, linux_compat_target) = instance.host_linux_compat.runtime_mount();
         let network_mount = instance.host_network.runtime_mount();
+        instance.mount_nullfs(&linux_compat_source, &linux_compat_target, true)?;
         for mount in &graphics_mounts {
-            instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
+            let target = mount.sandbox_target_relative()?;
+            if target != linux_compat_target {
+                instance.mount_nullfs(mount.host_path(), target, true)?;
+            }
         }
         if let Some(mount) = network_mount {
             let target = mount.sandbox_target_relative()?;
-            let already_mounted = graphics_mounts
-                .iter()
-                .filter_map(|graphics| graphics.sandbox_target_relative().ok())
-                .any(|graphics_target| graphics_target == target);
+            let already_mounted = target == linux_compat_target
+                || graphics_mounts
+                    .iter()
+                    .filter_map(|graphics| graphics.sandbox_target_relative().ok())
+                    .any(|graphics_target| graphics_target == target);
             if !already_mounted {
                 instance.mount_nullfs(mount.host_path(), target, true)?;
             }
+        }
+        if let Some((source, target)) = instance.host_system_bus.runtime_mount() {
+            instance.mount_nullfs(&source, target, true)?;
         }
         for mount in instance.host_video.runtime_mounts() {
             instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;

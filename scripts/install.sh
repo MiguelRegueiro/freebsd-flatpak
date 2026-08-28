@@ -453,11 +453,15 @@ print_install_tree() {
         '    │   ├── secure-mount' \
         '    │   ├── portal-bridge' \
         '    │   ├── status-notifier-bridge' \
+        '    │   ├── network-manager-compat' \
         '    │   ├── libwayland-drm-devt-shim.so' \
         '    │   ├── libgtk3-wayland-geometry-shim.so' \
         '    │   ├── libdrm-syncobj-errno-shim.so' \
         '    │   ├── libchromium-zygote-drm-preload.so' \
-        '    │   └── libnetlink-route-flags-shim.so' \
+        '    │   ├── libnetlink-route-flags-shim.so' \
+        '    │   ├── libsignalfd-shim.so' \
+        '    │   └── linux-bin' \
+        '    │       └── flatpak-spawn' \
         "    └── $install_licenses_branch" \
         '        ├── BSD-2-Clause.txt' \
         '        ├── LGPL-2.0-or-later.txt' \
@@ -516,15 +520,18 @@ if [ "$DRY_RUN" -eq 1 ]; then
     dry_command "su '$BUILD_USER' -c \"env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/drm-syncobj-errno-shim.c -o '$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so' -ldl -pthread\""
     dry_command "su '$BUILD_USER' -c \"env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/chromium-zygote-drm-preload.c -o '$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so' -ldl -pthread\""
     dry_command "su '$BUILD_USER' -c \"env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/netlink-route-flags-shim.c -o '$HELPER_BUILD_DIR/libnetlink-route-flags-shim.so' -ldl -pthread\""
+    dry_command "su '$BUILD_USER' -c \"env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/signalfd-shim.c -o '$HELPER_BUILD_DIR/libsignalfd-shim.so' -pthread\""
+    dry_command "su '$BUILD_USER' -c \"env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -O2 -Wall -Wextra compatibility_helpers/flatpak-spawn-wrapper.c -o '$HELPER_BUILD_DIR/flatpak-spawn-wrapper'\""
     ui_heading "Installing FreeBSD Flatpak"
     print_install_tree
-    dry_command "install -d -o root -g wheel -m 755 '$INSTALL_BIN' '$INSTALL_LIBEXEC' '$INSTALL_LICENSES'"
+    dry_command "install -d -o root -g wheel -m 755 '$INSTALL_BIN' '$INSTALL_LIBEXEC' '$INSTALL_LIBEXEC/linux-bin' '$INSTALL_LICENSES'"
     dry_command "install -o root -g wheel -m 755 target/release/flatpak '$INSTALL_BIN/flatpak'"
     dry_command "install -o root -g wheel -m 755 target/release/freebsd-flatpak-secure-mount '$INSTALL_LIBEXEC/secure-mount'"
     dry_command "install -o root -g wheel -m 755 '$OSTREE_PREFIX/lib/libostree-1.so.1.0.0' '$INSTALL_LIBEXEC/libostree-1.so.1'"
     dry_command "install -o root -g wheel -m 644 LICENSE '$INSTALL_LICENSES/BSD-2-Clause.txt'"
     dry_command "install -o root -g wheel -m 644 LICENSES/LGPL-2.0-or-later.txt LICENSES/MIT-ostree-rs.txt '$INSTALL_LICENSES/'"
-    dry_command "install -o root -g wheel -m 755 '$HELPER_BUILD_DIR/portal-bridge' '$HELPER_BUILD_DIR/status-notifier-bridge' '$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so' '$HELPER_BUILD_DIR/libgtk3-wayland-geometry-shim.so' '$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so' '$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so' '$HELPER_BUILD_DIR/libnetlink-route-flags-shim.so' '$INSTALL_LIBEXEC/'"
+    dry_command "install -o root -g wheel -m 755 '$HELPER_BUILD_DIR/portal-bridge' '$HELPER_BUILD_DIR/status-notifier-bridge' '$HELPER_BUILD_DIR/network-manager-compat' '$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so' '$HELPER_BUILD_DIR/libgtk3-wayland-geometry-shim.so' '$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so' '$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so' '$HELPER_BUILD_DIR/libnetlink-route-flags-shim.so' '$HELPER_BUILD_DIR/libsignalfd-shim.so' '$INSTALL_LIBEXEC/'"
+    dry_command "install -o root -g wheel -m 755 '$HELPER_BUILD_DIR/flatpak-spawn-wrapper' '$INSTALL_LIBEXEC/linux-bin/flatpak-spawn'"
     dry_command "ldd '$INSTALL_BIN/flatpak'  # verify shared-library dependencies"
     ui_heading "Installation complete (dry run)"
     exit 0
@@ -604,6 +611,10 @@ run_logged "Chromium zygote compatibility shim build" su "$BUILD_USER" -c \
     "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/chromium-zygote-drm-preload.c -o '$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so' -ldl -pthread"
 run_logged "Netlink route flags compatibility shim build" su "$BUILD_USER" -c \
     "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/netlink-route-flags-shim.c -o '$HELPER_BUILD_DIR/libnetlink-route-flags-shim.so' -ldl -pthread"
+run_logged "signalfd compatibility shim build" su "$BUILD_USER" -c \
+    "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/signalfd-shim.c -o '$HELPER_BUILD_DIR/libsignalfd-shim.so' -pthread"
+run_logged "flatpak-spawn compatibility wrapper build" su "$BUILD_USER" -c \
+    "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -O2 -Wall -Wextra compatibility_helpers/flatpak-spawn-wrapper.c -o '$HELPER_BUILD_DIR/flatpak-spawn-wrapper'"
 
 for artifact in \
     target/release/flatpak \
@@ -611,11 +622,14 @@ for artifact in \
     "$OSTREE_PREFIX/lib/libostree-1.so.1.0.0" \
     "$HELPER_BUILD_DIR/portal-bridge" \
     "$HELPER_BUILD_DIR/status-notifier-bridge" \
+    "$HELPER_BUILD_DIR/network-manager-compat" \
     "$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so" \
     "$HELPER_BUILD_DIR/libgtk3-wayland-geometry-shim.so" \
     "$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so" \
     "$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so" \
-    "$HELPER_BUILD_DIR/libnetlink-route-flags-shim.so"
+    "$HELPER_BUILD_DIR/libnetlink-route-flags-shim.so" \
+    "$HELPER_BUILD_DIR/libsignalfd-shim.so" \
+    "$HELPER_BUILD_DIR/flatpak-spawn-wrapper"
 do
     [ -s "$artifact" ] || fail "expected build artifact is missing or empty: $artifact"
 done
@@ -623,7 +637,7 @@ phase_finish
 
 phase_start "Installing FreeBSD Flatpak" "Installing files..."
 run_logged "Installation directory creation" install -d -o root -g wheel -m 755 \
-    "$INSTALL_BIN" "$INSTALL_LIBEXEC" "$INSTALL_LICENSES"
+    "$INSTALL_BIN" "$INSTALL_LIBEXEC" "$INSTALL_LIBEXEC/linux-bin" "$INSTALL_LICENSES"
 run_logged "CLI installation" install -o root -g wheel -m 755 \
     target/release/flatpak "$INSTALL_BIN/flatpak"
 run_logged "Secure mount helper installation" install -o root -g wheel -m 755 \
@@ -639,12 +653,16 @@ run_logged "Third-party license installation" install -o root -g wheel -m 644 \
 run_logged "Compatibility helper installation" install -o root -g wheel -m 755 \
     "$HELPER_BUILD_DIR/portal-bridge" \
     "$HELPER_BUILD_DIR/status-notifier-bridge" \
+    "$HELPER_BUILD_DIR/network-manager-compat" \
     "$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so" \
     "$HELPER_BUILD_DIR/libgtk3-wayland-geometry-shim.so" \
     "$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so" \
     "$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so" \
     "$HELPER_BUILD_DIR/libnetlink-route-flags-shim.so" \
+    "$HELPER_BUILD_DIR/libsignalfd-shim.so" \
     "$INSTALL_LIBEXEC/"
+run_logged "flatpak-spawn compatibility wrapper installation" install -o root -g wheel -m 755 \
+    "$HELPER_BUILD_DIR/flatpak-spawn-wrapper" "$INSTALL_LIBEXEC/linux-bin/flatpak-spawn"
 
 run_logged "Installed CLI dependency check" /bin/sh -c \
     "ldd_output=\$(ldd '$INSTALL_BIN/flatpak'); printf '%s\\n' \"\$ldd_output\"; if printf '%s\\n' \"\$ldd_output\" | grep -q 'not found'; then exit 1; fi"
