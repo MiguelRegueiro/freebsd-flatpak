@@ -6,13 +6,18 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-pub(super) fn shared_portal_ready(bus_address: &str, mountpoint: &str) -> bool {
+pub(super) fn shared_portal_ready(
+    bus_address: &str,
+    mountpoint: &str,
+    expect_host_command: bool,
+) -> bool {
     bus_address
         .strip_prefix("unix:path=")
         .is_some_and(|path| Path::new(path).exists())
         && document_portal_ready(bus_address, mountpoint)
         && desktop_portal_ready(bus_address)
         && status_notifier_ready(bus_address)
+        && flatpak_development_ready(bus_address) == expect_host_command
 }
 
 pub(super) fn start_private_bus(config: &Path) -> Result<(Child, String)> {
@@ -127,19 +132,41 @@ pub(super) fn sandbox_bus_address(
     Ok(format!("unix:path=/run/user/{uid}/{}", relative.display()))
 }
 
-pub(super) fn wait_for_portal_proxy(bus_address: &str, mountpoint: &str) -> Result<()> {
+pub(super) fn wait_for_portal_proxy(
+    bus_address: &str,
+    mountpoint: &str,
+    expect_host_command: bool,
+) -> Result<()> {
     for _ in 0..40 {
         if document_portal_ready(bus_address, mountpoint)
             && desktop_portal_ready(bus_address)
             && status_notifier_ready(bus_address)
+            && flatpak_development_ready(bus_address) == expect_host_command
         {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
     }
     bail!(
-        "compatibility bridges did not publish FileChooser, ScreenCast, StatusNotifierWatcher, and document mountpoint {mountpoint}"
+        "compatibility bridges did not publish the requested per-app interfaces and document mountpoint {mountpoint}"
     );
+}
+
+fn flatpak_development_ready(bus_address: &str) -> bool {
+    let output = Command::new("gdbus")
+        .arg("call")
+        .arg("--session")
+        .arg("--dest")
+        .arg("org.freedesktop.DBus")
+        .arg("--object-path")
+        .arg("/org/freedesktop/DBus")
+        .arg("--method")
+        .arg("org.freedesktop.DBus.NameHasOwner")
+        .arg("org.freedesktop.Flatpak")
+        .env("DBUS_SESSION_BUS_ADDRESS", bus_address)
+        .output();
+    matches!(output, Ok(output) if output.status.success()
+        && String::from_utf8_lossy(&output.stdout).contains("true"))
 }
 
 fn status_notifier_ready(bus_address: &str) -> bool {

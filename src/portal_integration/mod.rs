@@ -1,3 +1,4 @@
+mod host_command_permission;
 mod portal_scope;
 mod private_session_bus;
 mod sandbox_portal;

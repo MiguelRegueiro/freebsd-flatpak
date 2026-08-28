@@ -179,6 +179,7 @@ impl ChrootNullfsBackend {
             HostPortal::prepare(
                 &self.paths,
                 app,
+                &effective_metadata,
                 &instance_id,
                 desktop,
                 uid,

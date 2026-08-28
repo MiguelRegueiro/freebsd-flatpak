@@ -2,6 +2,7 @@
 #include "basic_desktop_portals.h"
 #include "document_grant_store.h"
 #include "document_mounts.h"
+#include "host_command.h"
 #include "document_portal.h"
 #include "pipewire_screencast_linker.h"
 #include "portal_request.h"
@@ -70,6 +71,7 @@ void portal_bridge_process_load_host_properties(BridgeState *state) {
 
 void portal_bridge_process_close_client_resources(BridgeState *state,
                                                   const char *client_sender) {
+  host_command_service_close_client(&state->host_command, client_sender);
   for (guint i = 0; i < state->request_store.requests->len; i++) {
     RequestRecord *request =
         g_ptr_array_index(state->request_store.requests, i);
@@ -145,6 +147,17 @@ void portal_bridge_process_on_bus_acquired(GDBusConnection *connection,
       G_DBUS_SIGNAL_FLAGS_NONE, on_local_name_owner_changed, state, NULL);
 
   GError *error = NULL;
+  if (state->enable_host_command &&
+      !host_command_service_register(&state->host_command, connection,
+                                     &error)) {
+    log_line("register Flatpak development interface failed: %s",
+             error->message);
+    g_error_free(error);
+    g_main_loop_quit(state->loop);
+    return;
+  }
+
+  error = NULL;
   if (!portal_bridge_process_register_interfaces(
           connection, "/org/freedesktop/portal/desktop", state->desktop_node,
           &DESKTOP_VTABLE, state, &error)) {

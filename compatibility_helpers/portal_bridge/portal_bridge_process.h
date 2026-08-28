@@ -20,6 +20,7 @@
 #include <sys/user.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "host_command.h"
 typedef struct _PortalBridgeProcess PortalBridgeProcess;
 typedef PortalBridgeProcess BridgeState;
 typedef struct _DocumentGrant DocumentGrant;
@@ -101,6 +102,8 @@ struct _PortalBridgeProcess {
   GDBusNodeInfo *request_node;
   GDBusNodeInfo *session_node;
   GDBusNodeInfo *control_node;
+  HostCommandService host_command;
+  bool enable_host_command;
   DocumentGrantStore documents;
   PortalRequestStore request_store;
   ScreenCastPortalState screencast;

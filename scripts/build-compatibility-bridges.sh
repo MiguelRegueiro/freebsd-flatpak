@@ -28,6 +28,7 @@ cc -O2 -Wall -Wextra \
     compatibility_helpers/portal_bridge/document_mounts.c \
     compatibility_helpers/portal_bridge/document_portal.c \
     compatibility_helpers/portal_bridge/file_chooser_portal.c \
+    compatibility_helpers/portal_bridge/host_command.c \
     compatibility_helpers/portal_bridge/main.c \
     compatibility_helpers/portal_bridge/pipewire_screencast_linker.c \
     compatibility_helpers/portal_bridge/portal_bridge_process.c \

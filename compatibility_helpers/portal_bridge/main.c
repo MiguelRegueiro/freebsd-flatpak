@@ -2,6 +2,7 @@
 #include "document_grant_store.h"
 #include "document_grant_persistence.h"
 #include "document_portal.h"
+#include "host_command.h"
 #include "pipewire_screencast_linker.h"
 #include "portal_bridge_process.h"
 #include "portal_request.h"
@@ -14,6 +15,15 @@ const char *arg_value(int argc, char **argv, const char *name) {
     }
   }
   return NULL;
+}
+
+bool has_arg(int argc, char **argv, const char *name) {
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], name) == 0) {
+      return true;
+    }
+  }
+  return false;
 }
 
 GDBusConnection *connect_to_bus_address(const char *address, GError **error) {
@@ -30,6 +40,7 @@ int main(int argc, char **argv) {
   const char *sandbox_root = arg_value(argc, argv, "--sandbox-root");
   const char *mountpoint = arg_value(argc, argv, "--mountpoint");
   const char *grant_store = arg_value(argc, argv, "--grant-store");
+  bool enable_host_command = has_arg(argc, argv, "--enable-host-command");
   const char *host_bus_address = getenv("HOST_DBUS_SESSION_BUS_ADDRESS");
   if (app_id == NULL || doc_dir == NULL || sandbox_root == NULL ||
       mountpoint == NULL || grant_store == NULL || host_bus_address == NULL ||
@@ -37,7 +48,7 @@ int main(int argc, char **argv) {
     fprintf(stderr,
             "usage: %s --app-id APP_ID --doc-dir HOST_DOC_DIR --sandbox-root "
             "APP_CHROOT_ROOT --mountpoint SANDBOX_MOUNTPOINT --grant-store "
-            "PERSISTENT_GRANT_FILE\n",
+            "PERSISTENT_GRANT_FILE [--enable-host-command]\n",
             argv[0]);
     fprintf(
         stderr,
@@ -84,6 +95,7 @@ int main(int argc, char **argv) {
       .request_node = NULL,
       .session_node = NULL,
       .control_node = NULL,
+      .enable_host_command = enable_host_command,
   };
   if (state.host_bus == NULL || state.desktop_node == NULL) {
     fprintf(stderr, "portal bridge setup failed: %s\n", error->message);
@@ -103,6 +115,13 @@ int main(int argc, char **argv) {
   if (state.documents_node == NULL || state.request_node == NULL ||
       state.session_node == NULL || state.control_node == NULL) {
     fprintf(stderr, "portal bridge introspection failed: %s\n", error->message);
+    g_error_free(error);
+    return 1;
+  }
+  if (enable_host_command &&
+      !host_command_service_init(&state.host_command, host_bus_address,
+                                 &error)) {
+    fprintf(stderr, "host command bridge setup failed: %s\n", error->message);
     g_error_free(error);
     return 1;
   }
@@ -128,9 +147,19 @@ int main(int argc, char **argv) {
       portal_bridge_process_on_bus_acquired,
       portal_bridge_process_on_name_acquired,
       portal_bridge_process_on_name_lost, &state, NULL);
+  guint flatpak_owner_id = 0;
+  if (enable_host_command) {
+    flatpak_owner_id = g_bus_own_name(
+        G_BUS_TYPE_SESSION, "org.freedesktop.Flatpak",
+        G_BUS_NAME_OWNER_FLAGS_NONE, portal_bridge_process_on_bus_acquired,
+        portal_bridge_process_on_name_acquired,
+        portal_bridge_process_on_name_lost, &state, NULL);
+  }
   diagnostic_line("serving private portal for %s at %s", state.app_id,
                   state.documents.doc_dir);
   g_main_loop_run(state.loop);
+
+  host_command_service_cleanup(&state.host_command);
 
   portal_bridge_process_cleanup_documents(&state);
   for (guint i = 0; i < state.request_store.requests->len; i++) {
@@ -157,8 +186,12 @@ int main(int argc, char **argv) {
   state.screencast.sessions = NULL;
   g_ptr_array_free(state.request_store.requests, TRUE);
   state.request_store.requests = NULL;
+  if (flatpak_owner_id != 0) {
+    g_bus_unown_name(flatpak_owner_id);
+  }
   g_bus_unown_name(documents_owner_id);
   g_bus_unown_name(desktop_owner_id);
+  host_command_service_clear(&state.host_command);
   if (state.local_bus != NULL) {
     g_object_unref(state.local_bus);
   }

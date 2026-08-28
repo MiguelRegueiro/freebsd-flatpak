@@ -1,3 +1,4 @@
+use super::host_command_permission::metadata_allows_host_command;
 use super::portal_scope::{
     app_scope_name, ensure_bridge_helpers, lock_portal_scope, other_active_app_instances,
     portal_control, shared_portal_dir, stop_shared_portal,
@@ -44,6 +45,7 @@ impl HostPortal {
     pub fn prepare(
         paths: &Installation,
         app: &FlatpakApp,
+        effective_metadata: &str,
         instance_id: &str,
         desktop: &DesktopSession,
         uid: u32,
@@ -51,6 +53,7 @@ impl HostPortal {
         diagnostics: &Diagnostics,
     ) -> Result<Self> {
         let app_id = &app.app_id;
+        let allow_host_command = metadata_allows_host_command(effective_metadata);
         let mut warnings = Vec::new();
         let Some(bus_address) = desktop.dbus_session_bus_address.as_ref() else {
             warnings.push("DBUS_SESSION_BUS_ADDRESS is not set; desktop portals disabled".into());
@@ -89,7 +92,7 @@ impl HostPortal {
         let mountpoint = format!("/run/user/{uid}/doc");
         let grant_store = paths.portal_documents().join(format!("{app_scope}.ini"));
         let ready = diagnostics.measure(Detail::Detailed, "portal", "check shared portal", || {
-            shared_portal_ready(&host_private_bus_address, &mountpoint)
+            shared_portal_ready(&host_private_bus_address, &mountpoint, allow_host_command)
         });
         if !ready {
             diagnostics.measure(Detail::Detailed, "portal", "stop unready portal", || {
@@ -137,6 +140,9 @@ impl HostPortal {
                         .context("configure portal bridge diagnostics")?,
                 )
                 .stderr(Stdio::inherit());
+            if allow_host_command {
+                bridge_command.arg("--enable-host-command");
+            }
             detach_shared_process(&mut bridge_command);
             let mut bridge_child = bridge_command
                 .spawn()
@@ -186,7 +192,7 @@ impl HostPortal {
             status_notifier.finish("portal", "start status notifier");
             if let Err(error) =
                 diagnostics.measure(Detail::Detailed, "portal", "wait for readiness", || {
-                    wait_for_portal_proxy(&address, &mountpoint)
+                    wait_for_portal_proxy(&address, &mountpoint, allow_host_command)
                 })
             {
                 terminate_child(&mut status_child);
