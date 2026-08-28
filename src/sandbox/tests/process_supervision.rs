@@ -1,83 +1,87 @@
 use super::*;
-use anyhow::anyhow;
-use std::cell::Cell;
+use std::fs;
+use std::os::unix::process::ExitStatusExt;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[test]
-fn process_group_parser_selects_only_matching_processes() {
-    let processes = "  PID  PGID\n  100   100\n  101   100\n  200   200\n";
+fn termination_kills_and_reaps_tracked_and_detached_processes() {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let test_dir = std::env::temp_dir().join(format!(
+        "freebsd-flatpak-process-tree-{}-{suffix}",
+        std::process::id()
+    ));
+    fs::create_dir(&test_dir).unwrap();
+    let pid_file = test_dir.join("descendant.pid");
 
-    assert_eq!(
-        process_group_pids(processes, 100).collect::<Vec<_>>(),
-        vec![100, 101]
-    );
-}
-#[test]
-fn sandbox_root_parser_selects_processes_independent_of_process_group() {
-    let processes = concat!(
-        "  PID COMM              FD T V FLAGS REF OFFSET PRO NAME\n",
-        "  100 launcher          root v d r----   -      -   - /sandbox/one\n",
-        "  101 reparented        root v d r----   -      -   - /sandbox/one\n",
-        "  101 reparented        cwd  v d r----   -      -   - /sandbox/one/tmp\n",
-        "  200 portal            root v d r----   -      -   - /\n",
-        "  300 other             root v d r----   -      -   - /sandbox/two\n",
-    );
+    let reaper = ProcessReaper::acquire().unwrap();
+    let mut launcher = Command::new("daemon")
+        .arg("-p")
+        .arg(&pid_file)
+        .args(["/bin/sh", "-c", "trap '' TERM; exec sleep 30"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let process_tree = reaper.track(launcher.id()).unwrap();
+    assert!(launcher.wait().unwrap().success());
 
-    assert_eq!(
-        sandbox_root_pids(processes, Path::new("/sandbox/one")).collect::<Vec<_>>(),
-        vec![100, 101]
-    );
-}
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let descendant = loop {
+        if let Ok(pid) = fs::read_to_string(&pid_file) {
+            if let Ok(pid) = pid.trim().parse::<i32>() {
+                break pid;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon did not publish its descendant pid"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_ne!(unsafe { libc::getsid(descendant) }, unsafe {
+        libc::getsid(0)
+    });
 
-#[test]
-fn supervision_waits_until_the_process_group_is_empty() {
-    let checks = Cell::new(0);
-    let pauses = Cell::new(0);
+    process_tree.wait_for_exit(&mut launcher, || true).unwrap();
 
-    wait_while_processes_remain(
-        || {
-            let check = checks.get();
-            checks.set(check + 1);
-            Ok(check < 2)
-        },
-        || false,
-        || pauses.set(pauses.get() + 1),
-    )
-    .unwrap();
+    assert_ne!(unsafe { libc::kill(descendant, 0) }, 0);
+    drop(process_tree);
 
-    assert_eq!(checks.get(), 3);
-    assert_eq!(pauses.get(), 2);
-}
+    let ready_file = test_dir.join("tracked-child.ready");
+    let reaper = ProcessReaper::acquire().unwrap();
+    let mut tracked_child = Command::new("/bin/sh")
+        .args([
+            "-c",
+            &format!(
+                "trap '' TERM; : > '{}'; exec sleep 30",
+                ready_file.display()
+            ),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let process_tree = reaper.track(tracked_child.id()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !ready_file.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "tracked child did not become ready"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
 
-#[test]
-fn supervision_propagates_process_inspection_failures() {
-    let pauses = Cell::new(0);
+    let status = process_tree
+        .wait_for_exit(&mut tracked_child, || true)
+        .unwrap();
 
-    let error = wait_while_processes_remain(
-        || Err(anyhow!("process inspection failed")),
-        || false,
-        || pauses.set(pauses.get() + 1),
-    )
-    .unwrap_err();
-
-    assert_eq!(error.to_string(), "process inspection failed");
-    assert_eq!(pauses.get(), 0);
-}
-
-#[test]
-fn supervision_stops_waiting_when_termination_is_requested() {
-    let inspections = Cell::new(0);
-    let pauses = Cell::new(0);
-
-    wait_while_processes_remain(
-        || {
-            inspections.set(inspections.get() + 1);
-            Ok(true)
-        },
-        || true,
-        || pauses.set(pauses.get() + 1),
-    )
-    .unwrap();
-
-    assert_eq!(inspections.get(), 0);
-    assert_eq!(pauses.get(), 0);
+    assert_eq!(status.signal(), Some(libc::SIGKILL));
+    let _ = fs::remove_dir_all(test_dir);
 }

@@ -1,6 +1,8 @@
 use super::*;
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+
 #[test]
 fn already_gone_mount_cleanup_is_idempotent() {
     let attempts = Cell::new(0);
@@ -77,4 +79,36 @@ fn active_instance_roots_exclude_only_their_own_mounts_from_recovery() {
     assert!(belongs_to_any_root(&first.join("usr"), &active));
     assert!(belongs_to_any_root(&second.join("proc"), &active));
     assert!(!belongs_to_any_root(&other.join("app"), &active));
+}
+
+#[test]
+fn process_cleanup_signals_the_complete_snapshot_before_escalating() {
+    let remaining = RefCell::new(BTreeSet::from([101, 202]));
+    let signals = RefCell::new(Vec::new());
+
+    let survivors = terminate_processes_with(
+        || Ok(remaining.borrow().iter().copied().collect()),
+        |pid, signal| {
+            signals.borrow_mut().push((pid, signal));
+            if signal == libc::SIGKILL {
+                remaining.borrow_mut().remove(&pid);
+            }
+        },
+        || {},
+    )
+    .unwrap();
+
+    assert!(survivors.is_empty());
+    let signals = signals.into_inner();
+    assert!(signals.contains(&(101, libc::SIGTERM)));
+    assert!(signals.contains(&(202, libc::SIGTERM)));
+    assert!(signals.contains(&(101, libc::SIGKILL)));
+    assert!(signals.contains(&(202, libc::SIGKILL)));
+}
+
+#[test]
+fn process_cleanup_reports_processes_that_survive_sigkill() {
+    let survivors = terminate_processes_with(|| Ok(vec![303]), |_, _| {}, || {}).unwrap();
+
+    assert_eq!(survivors, vec![303]);
 }

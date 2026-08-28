@@ -7,7 +7,7 @@ use super::launch_environment::{
 };
 use super::mount_operations::owned_mount_teardown_order;
 use super::process_signals::{install_signal_handlers, ACTIVE_PROCESS_GROUP, LAST_SIGNAL};
-use super::process_supervision::wait_for_sandbox_processes;
+use super::process_supervision::ProcessReaper;
 use super::stale_sandbox_recovery::{
     remove_instance_root, terminate_chroot_processes, unmount_mountpoint,
 };
@@ -279,12 +279,15 @@ impl ChrootInstance {
             .process_group(0);
 
         LAST_SIGNAL.store(0, Ordering::SeqCst);
+        let reaper = ProcessReaper::acquire()?;
         let mut child = command.spawn().context("launch app through chroot")?;
+        let process_tree = reaper.track(child.id())?;
         spawn.finish("launch", "build command and spawn");
         launch.finish("run", "application spawn");
         diagnostics.startup_complete();
         // Launchers may exit after backgrounding the real application. Its
-        // processes inherit this group, so keep the sandbox until they exit.
+        // process group handles prompt signal forwarding; the reaper subtree
+        // remains authoritative if descendants reparent or create sessions.
         let process_group = child.id() as i32;
         ACTIVE_PROCESS_GROUP.store(process_group, Ordering::SeqCst);
         let launch_result: Result<ExitStatus> = (|| {
@@ -297,8 +300,7 @@ impl ChrootInstance {
                 &self.deployment,
                 &self.extension_refs,
             )?;
-            let status = child.wait().context("wait for app process")?;
-            wait_for_sandbox_processes(&self.root, process_group, || {
+            let status = process_tree.wait_for_exit(&mut child, || {
                 matches!(
                     LAST_SIGNAL.load(Ordering::SeqCst),
                     libc::SIGINT | libc::SIGTERM
@@ -319,9 +321,9 @@ impl ChrootInstance {
 
     pub(super) fn cleanup(&mut self) -> Result<()> {
         let mut errors = Vec::new();
-        if let Err(error) = terminate_chroot_processes(&self.root) {
-            errors.push(format!("{error:#}"));
-        }
+        // Mount teardown cannot make progress while a process still owns the
+        // chroot. Stop here instead of producing repeated EBUSY diagnostics.
+        terminate_chroot_processes(&self.root)?;
         if let Err(error) = self.host_portal.cleanup() {
             errors.push(format!("{error:#}"));
         }

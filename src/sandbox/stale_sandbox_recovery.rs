@@ -176,6 +176,29 @@ fn terminate_chroot_mount_holders(root: &Path) -> Result<()> {
 }
 
 pub(super) fn terminate_chroot_processes(root: &Path) -> Result<()> {
+    let initial = chroot_processes(root)?;
+    if initial.is_empty() {
+        return Ok(());
+    }
+    eprintln!(
+        "terminating {} remaining sandbox process(es)",
+        initial.len()
+    );
+
+    let remaining = terminate_processes_with(
+        || chroot_processes(root),
+        |pid, signal| unsafe {
+            libc::kill(pid, signal);
+        },
+        || thread::sleep(Duration::from_millis(100)),
+    )?;
+    if !remaining.is_empty() {
+        bail!("sandbox processes survived SIGKILL: {remaining:?}");
+    }
+    Ok(())
+}
+
+fn chroot_processes(root: &Path) -> Result<Vec<i32>> {
     let output = Command::new("ps")
         .args(["-axo", "pid"])
         .output()
@@ -196,12 +219,27 @@ pub(super) fn terminate_chroot_processes(root: &Path) -> Result<()> {
             pids.insert(pid);
         }
     }
+    Ok(pids.into_iter().collect())
+}
 
-    for pid in pids {
-        eprintln!("terminating remaining sandbox process pid {pid}");
-        terminate_process(pid);
+fn terminate_processes_with(
+    mut processes: impl FnMut() -> Result<Vec<i32>>,
+    mut signal: impl FnMut(i32, i32),
+    mut pause: impl FnMut(),
+) -> Result<Vec<i32>> {
+    for requested_signal in [libc::SIGTERM, libc::SIGKILL] {
+        for _ in 0..20 {
+            let pids = processes()?;
+            if pids.is_empty() {
+                return Ok(pids);
+            }
+            for pid in pids {
+                signal(pid, requested_signal);
+            }
+            pause();
+        }
     }
-    Ok(())
+    processes()
 }
 
 fn mount_holders(mountpoint: &Path) -> Result<Vec<i32>> {
