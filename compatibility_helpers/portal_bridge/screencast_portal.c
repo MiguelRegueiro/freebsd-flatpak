@@ -169,8 +169,8 @@ SessionRecord *register_session(RequestRecord *request, const char *host_path,
       "org.freedesktop.portal.Session", "Closed", session->host_path, NULL,
       G_DBUS_SIGNAL_FLAGS_NONE, on_host_session_closed, session, NULL);
   g_ptr_array_add(state->screencast.sessions, session);
-  log_line("mapped ScreenCast session %s -> %s", session->local_path,
-           session->host_path);
+  diagnostic_line("mapped ScreenCast session %s -> %s", session->local_path,
+                  session->host_path);
   return session;
 }
 
@@ -239,9 +239,10 @@ void update_session_sources(SessionRecord *session, GVariant *results) {
     g_variant_lookup(properties, "pipewire-serial", "t", &source.serial);
     if (!session_approves_source(session, node_id)) {
       g_array_append_val(session->sources, source);
-      log_line("approved ScreenCast source node %u (serial %" G_GUINT64_FORMAT
-               ") for session %s",
-               node_id, source.serial, session->local_path);
+      diagnostic_line(
+          "approved ScreenCast source node %u (serial %" G_GUINT64_FORMAT
+          ") for session %s",
+          node_id, source.serial, session->local_path);
     }
     g_variant_unref(properties);
   }
@@ -407,7 +408,8 @@ void handle_screencast_create(BridgeState *state, const char *sender,
                          NULL, on_host_screencast_call, request);
   g_dbus_method_invocation_return_value(
       invocation, g_variant_new("(o)", request->local_path));
-  log_line("forwarded ScreenCast.CreateSession as %s", request->local_path);
+  diagnostic_line("forwarded ScreenCast.CreateSession as %s",
+                  request->local_path);
 out:
   g_free(host_handle_token);
   g_free(host_session_token);
@@ -458,7 +460,8 @@ void handle_screencast_request(BridgeState *state, const char *sender,
       G_DBUS_CALL_FLAGS_NONE, -1, NULL, on_host_screencast_call, request);
   g_dbus_method_invocation_return_value(
       invocation, g_variant_new("(o)", request->local_path));
-  log_line("forwarded ScreenCast.%s as %s", method_name, request->local_path);
+  diagnostic_line("forwarded ScreenCast.%s as %s", method_name,
+                  request->local_path);
   g_free(host_token);
   g_variant_unref(options);
 }
@@ -502,7 +505,7 @@ void on_open_pipewire_remote(GObject *source_object, GAsyncResult *result,
   } else {
     g_dbus_method_invocation_return_value_with_unix_fd_list(
         invocation, g_variant_new("(h)", local_index), local_fds);
-    log_line("forwarded restricted PipeWire remote fd");
+    diagnostic_line("forwarded restricted PipeWire remote fd");
   }
   g_object_unref(local_fds);
   g_variant_unref(reply);

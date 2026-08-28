@@ -131,7 +131,11 @@ impl HostPortal {
                 .env("DBUS_SESSION_BUS_ADDRESS", &address)
                 .env("HOST_DBUS_SESSION_BUS_ADDRESS", bus_address)
                 .stdin(Stdio::null())
-                .stdout(Stdio::inherit())
+                .stdout(
+                    diagnostics
+                        .child_diagnostics(Detail::Detailed)
+                        .context("configure portal bridge diagnostics")?,
+                )
                 .stderr(Stdio::inherit());
             detach_shared_process(&mut bridge_command);
             let mut bridge_child = bridge_command
@@ -158,7 +162,11 @@ impl HostPortal {
                 .env("DBUS_SESSION_BUS_ADDRESS", &address)
                 .env("HOST_DBUS_SESSION_BUS_ADDRESS", bus_address)
                 .stdin(Stdio::null())
-                .stdout(Stdio::inherit())
+                .stdout(
+                    diagnostics
+                        .child_diagnostics(Detail::Detailed)
+                        .context("configure status notifier diagnostics")?,
+                )
                 .stderr(Stdio::inherit());
             detach_shared_process(&mut status_command);
             let mut status_child = match status_command.spawn() {

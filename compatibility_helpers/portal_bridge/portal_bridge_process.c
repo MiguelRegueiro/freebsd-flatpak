@@ -16,6 +16,15 @@ void log_line(const char *fmt, ...) {
   va_end(ap);
 }
 
+void diagnostic_line(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  fputs("portal bridge: ", stdout);
+  vfprintf(stdout, fmt, ap);
+  fputc('\n', stdout);
+  va_end(ap);
+}
+
 void portal_bridge_process_cleanup_documents(BridgeState *state) {
   for (guint i = 0; i < state->documents.grants->len; i++) {
     cleanup_grant(g_ptr_array_index(state->documents.grants, i));
@@ -52,9 +61,9 @@ void portal_bridge_process_load_host_properties(BridgeState *state) {
                    &state->screencast.source_types);
   g_variant_lookup(properties, "AvailableCursorModes", "u",
                    &state->screencast.cursor_modes);
-  log_line("host ScreenCast version=%u source-types=%u cursor-modes=%u",
-           state->screencast.version, state->screencast.source_types,
-           state->screencast.cursor_modes);
+  diagnostic_line("host ScreenCast version=%u source-types=%u cursor-modes=%u",
+                  state->screencast.version, state->screencast.source_types,
+                  state->screencast.cursor_modes);
   g_variant_unref(properties);
   g_variant_unref(reply);
 }
@@ -168,7 +177,7 @@ void portal_bridge_process_on_name_acquired(GDBusConnection *connection,
                                             gpointer user_data) {
   (void)connection;
   (void)user_data;
-  log_line("acquired %s", name);
+  diagnostic_line("acquired %s", name);
 }
 
 void portal_bridge_process_on_name_lost(GDBusConnection *connection,

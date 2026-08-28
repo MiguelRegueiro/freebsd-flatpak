@@ -128,8 +128,8 @@ int main(int argc, char **argv) {
       portal_bridge_process_on_bus_acquired,
       portal_bridge_process_on_name_acquired,
       portal_bridge_process_on_name_lost, &state, NULL);
-  log_line("serving private portal for %s at %s", state.app_id,
-           state.documents.doc_dir);
+  diagnostic_line("serving private portal for %s at %s", state.app_id,
+                  state.documents.doc_dir);
   g_main_loop_run(state.loop);
 
   portal_bridge_process_cleanup_documents(&state);

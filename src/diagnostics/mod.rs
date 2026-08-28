@@ -1,3 +1,6 @@
+use std::io;
+use std::os::fd::{FromRawFd, OwnedFd};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -85,6 +88,19 @@ impl Diagnostics {
         if self.enabled(detail) {
             self.write_line(&message());
         }
+    }
+
+    pub(crate) fn child_diagnostics(&self, detail: Detail) -> io::Result<Stdio> {
+        if !self.enabled(detail) {
+            return Ok(Stdio::null());
+        }
+
+        let fd = unsafe { libc::dup(libc::STDERR_FILENO) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        Ok(Stdio::from(fd))
     }
 
     fn write_timing(&self, scope: &str, label: &str, elapsed: Duration) {

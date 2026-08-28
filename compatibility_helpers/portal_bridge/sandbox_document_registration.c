@@ -43,7 +43,7 @@ bool add_sandbox(BridgeState *state, const char *sandbox_doc_dir,
   }
   g_ptr_array_add(state->documents.sandbox_doc_dirs,
                   g_strdup(sandbox_doc_dir));
-  log_line("attached sandbox document root %s", sandbox_doc_dir);
+  diagnostic_line("attached sandbox document root %s", sandbox_doc_dir);
   return true;
 }
 
@@ -54,7 +54,7 @@ void remove_sandbox(BridgeState *state, const char *sandbox_doc_dir) {
   }
   remove_sandbox_grants(state, sandbox_doc_dir);
   g_ptr_array_remove_index(state->documents.sandbox_doc_dirs, (guint)index);
-  log_line("detached sandbox document root %s", sandbox_doc_dir);
+  diagnostic_line("detached sandbox document root %s", sandbox_doc_dir);
 }
 
 void handle_control_method(GDBusConnection *connection, const gchar *sender,

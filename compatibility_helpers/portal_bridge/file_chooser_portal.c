@@ -35,7 +35,7 @@ char *rewrite_file_uri(BridgeState *state, const char *uri, bool directory) {
 
   char *rewritten = sandbox_uri_for_grant(state, grant);
   if (rewritten != NULL) {
-    log_line("rewrote FileChooser URI to %s", rewritten);
+    diagnostic_line("rewrote FileChooser URI to %s", rewritten);
   }
   return rewritten;
 }
@@ -216,6 +216,6 @@ void handle_filechooser_open(BridgeState *state, const char *sender,
 
   g_dbus_method_invocation_return_value(invocation,
                                         g_variant_new("(o)", local_path));
-  log_line("forwarded FileChooser.OpenFile as %s", local_path);
+  diagnostic_line("forwarded FileChooser.OpenFile as %s", local_path);
   g_free(local_path);
 }

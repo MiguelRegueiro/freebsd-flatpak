@@ -91,8 +91,8 @@ void emit_request_response(RequestRecord *request, guint32 response,
     g_error_free(error);
     return;
   }
-  log_line("emitted Response %u to %s on %s", response, request->client_sender,
-           request->local_path);
+  diagnostic_line("emitted Response %u to %s on %s", response,
+                  request->client_sender, request->local_path);
 }
 
 void emit_cancel_response(RequestRecord *request) {

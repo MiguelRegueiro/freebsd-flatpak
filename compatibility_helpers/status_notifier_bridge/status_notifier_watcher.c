@@ -9,6 +9,14 @@ void status_notifier_log(const char *fmt, ...) {
   fputc('\n', stderr);
   va_end(ap);
 }
+void status_notifier_diagnostic(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  fputs("status notifier bridge: ", stdout);
+  vfprintf(stdout, fmt, ap);
+  fputc('\n', stdout);
+  va_end(ap);
+}
 const char *STATUS_WATCHER_XML =
     "<node>"
     "  <interface name='org.kde.StatusNotifierWatcher'>"
@@ -132,8 +140,9 @@ void handle_register_status_item(StatusNotifierBridge *state,
   g_ptr_array_add(state->status_items, item);
   emit_local_status_item_registered(item);
   g_dbus_method_invocation_return_value(invocation, NULL);
-  status_notifier_log("bridged StatusNotifierItem %s%s -> host %s",
-                      item->local_service, item->local_path, item->host_path);
+  status_notifier_diagnostic("bridged StatusNotifierItem %s%s -> host %s",
+                             item->local_service, item->local_path,
+                             item->host_path);
 }
 
 void handle_status_watcher_method(

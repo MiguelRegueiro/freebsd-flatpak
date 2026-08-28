@@ -168,8 +168,8 @@ bool prepare_document_grant(BridgeState *state, const char *doc_id,
   }
   *out = grant;
 
-  log_line("%s -> %u sandbox(s) as %s/%s", grant->host_path,
-           grant->target_paths->len, grant->doc_id, base);
+  diagnostic_line("%s -> %u sandbox(s) as %s/%s", grant->host_path,
+                  grant->target_paths->len, grant->doc_id, base);
   g_free(base);
   g_free(source_doc_dir);
   return true;

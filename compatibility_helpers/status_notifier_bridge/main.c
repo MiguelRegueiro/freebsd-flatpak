@@ -48,7 +48,7 @@ static void on_name_acquired(GDBusConnection *connection, const gchar *name,
                              gpointer user_data) {
   (void)connection;
   (void)user_data;
-  status_notifier_log("acquired %s", name);
+  status_notifier_diagnostic("acquired %s", name);
 }
 
 static void on_name_lost(GDBusConnection *connection, const gchar *name,
@@ -121,8 +121,8 @@ int main(int argc, char **argv) {
       G_BUS_TYPE_SESSION, "org.kde.StatusNotifierWatcher",
       G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT | G_BUS_NAME_OWNER_FLAGS_REPLACE,
       on_bus_acquired, on_name_acquired, on_name_lost, &state, NULL);
-  status_notifier_log("serving private status notifier for %s at %s",
-                      state.app_id, shared_dir);
+  status_notifier_diagnostic("serving private status notifier for %s at %s",
+                             state.app_id, shared_dir);
   g_main_loop_run(state.loop);
   g_bus_unown_name(owner_id);
   g_ptr_array_free(state.status_items, TRUE);

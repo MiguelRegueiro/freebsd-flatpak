@@ -108,6 +108,7 @@ struct _PortalBridgeProcess {
   bool local_objects_registered;
 };
 void log_line(const char *fmt, ...);
+void diagnostic_line(const char *fmt, ...);
 void portal_bridge_process_load_host_properties(BridgeState *state);
 void portal_bridge_process_cleanup_documents(BridgeState *state);
 gboolean portal_bridge_process_handle_signal(gpointer user_data);

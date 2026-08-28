@@ -21,6 +21,58 @@ typedef struct {
 
 static GPtrArray *test_mount_calls;
 
+static char *read_test_stream(FILE *stream) {
+  g_assert_cmpint(fflush(stream), ==, 0);
+  g_assert_cmpint(fseek(stream, 0, SEEK_END), ==, 0);
+  long length = ftell(stream);
+  g_assert_cmpint(length, >=, 0);
+  g_assert_cmpint(fseek(stream, 0, SEEK_SET), ==, 0);
+  char *text = g_malloc0((gsize)length + 1);
+  g_assert_cmpuint(fread(text, 1, (gsize)length, stream), ==, (gsize)length);
+  return text;
+}
+
+static void test_helper_diagnostics_use_stdout_and_warnings_use_stderr(void) {
+  FILE *captured_stdout = tmpfile();
+  FILE *captured_stderr = tmpfile();
+  g_assert_nonnull(captured_stdout);
+  g_assert_nonnull(captured_stderr);
+  int saved_stdout = dup(STDOUT_FILENO);
+  int saved_stderr = dup(STDERR_FILENO);
+  g_assert_cmpint(saved_stdout, >=, 0);
+  g_assert_cmpint(saved_stderr, >=, 0);
+  g_assert_cmpint(dup2(fileno(captured_stdout), STDOUT_FILENO), >=, 0);
+  g_assert_cmpint(dup2(fileno(captured_stderr), STDERR_FILENO), >=, 0);
+
+  diagnostic_line("portal detail");
+  log_line("portal warning");
+  status_notifier_diagnostic("notifier detail");
+  status_notifier_log("notifier warning");
+  fflush(stdout);
+  fflush(stderr);
+
+  g_assert_cmpint(dup2(saved_stdout, STDOUT_FILENO), >=, 0);
+  g_assert_cmpint(dup2(saved_stderr, STDERR_FILENO), >=, 0);
+  close(saved_stdout);
+  close(saved_stderr);
+
+  char *stdout_text = read_test_stream(captured_stdout);
+  char *stderr_text = read_test_stream(captured_stderr);
+  g_assert_nonnull(strstr(stdout_text, "portal bridge: portal detail"));
+  g_assert_nonnull(
+      strstr(stdout_text, "status notifier bridge: notifier detail"));
+  g_assert_null(strstr(stdout_text, "warning"));
+  g_assert_nonnull(strstr(stderr_text, "portal bridge: portal warning"));
+  g_assert_nonnull(
+      strstr(stderr_text, "status notifier bridge: notifier warning"));
+  g_assert_null(strstr(stderr_text, "detail"));
+
+  g_free(stdout_text);
+  g_free(stderr_text);
+  fclose(captured_stdout);
+  fclose(captured_stderr);
+}
+
 static void free_test_mount_call(TestMountCall *call) {
   g_free(call->source);
   g_free(call->target);
@@ -691,6 +743,7 @@ static void test_status_icon_resolution(void) {
 }
 
 int main(void) {
+  test_helper_diagnostics_use_stdout_and_warnings_use_stderr();
   test_introspection();
   test_shared_sandbox_scope_validation();
   test_remove_sandbox_is_per_instance_and_idempotent();

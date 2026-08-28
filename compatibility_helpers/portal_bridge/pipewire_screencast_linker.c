@@ -295,7 +295,7 @@ void create_pipewire_link(PipeWireCompat *compat, SessionRecord *session,
   pw_proxy_add_listener(link->proxy, &link->proxy_listener,
                         &PIPEWIRE_LINK_PROXY_EVENTS, link);
   g_ptr_array_add(compat->links, link);
-  log_line(
+  diagnostic_line(
       "linked approved ScreenCast source %u:%u -> portal client %u node %u:%u",
       source->id, source_port->id, client->id, consumer->id, consumer_port->id);
 }
@@ -655,6 +655,6 @@ PipeWireCompat *new_pipewire_compat(BridgeState *state) {
                        G_IO_IN | G_IO_ERR | G_IO_HUP);
   compat->source = &source->source;
   g_source_attach(compat->source, NULL);
-  log_line("enabled ownership-based PipeWire ScreenCast linking");
+  diagnostic_line("enabled ownership-based PipeWire ScreenCast linking");
   return compat;
 }

@@ -136,7 +136,7 @@ MenuProxy *ensure_menu_proxy(StatusItem *item, const char *menu_path) {
       on_local_menu_signal, menu, NULL);
 
   g_ptr_array_add(item->menus, menu);
-  status_notifier_log("bridged DBusMenu %s -> host %s", menu->local_path,
-                      menu->host_path);
+  status_notifier_diagnostic("bridged DBusMenu %s -> host %s",
+                             menu->local_path, menu->host_path);
   return menu;
 }

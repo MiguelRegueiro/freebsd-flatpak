@@ -234,8 +234,8 @@ static void load_status_icon(StatusItem *item, StatusIcon *icon,
   icon->exposed_name =
       g_strdup(icon->pixmap == NULL ? icon->local_name : "");
   if (icon->pixmap != NULL) {
-    status_notifier_log("resolved sandbox icon %s as pixmap",
-                        icon->local_name);
+    status_notifier_diagnostic("resolved sandbox icon %s as pixmap",
+                               icon->local_name);
   }
 }
 

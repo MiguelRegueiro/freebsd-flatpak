@@ -27,5 +27,6 @@ struct _StatusNotifierBridge {
 extern const char *STATUS_WATCHER_XML;
 extern const GDBusInterfaceVTable STATUS_WATCHER_VTABLE;
 void status_notifier_log(const char *fmt, ...);
+void status_notifier_diagnostic(const char *fmt, ...);
 void free_status_item(StatusItem *);
 #endif
