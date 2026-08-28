@@ -3,6 +3,7 @@ mod desktop_integration;
 mod diagnostics;
 mod extensions;
 mod flatpak_metadata;
+mod flatpak_ref;
 mod host_resources;
 mod installation;
 mod ostree;
@@ -12,6 +13,12 @@ mod sandbox;
 #[allow(dead_code)]
 mod secure_mount;
 
-fn main() -> anyhow::Result<()> {
-    cli::run_at_process_boundary()
+fn main() -> std::process::ExitCode {
+    match cli::run_at_process_boundary() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            cli::report_error(&error);
+            std::process::ExitCode::FAILURE
+        }
+    }
 }

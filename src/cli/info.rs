@@ -31,6 +31,7 @@ pub(crate) fn cmd_info(paths: &Installation, args: Vec<String>) -> Result<()> {
     if operands.len() > 2 {
         bail!("too many arguments for info");
     }
+    crate::flatpak_ref::validate_partial_ref(name, branch)?;
     let info = resolve_installed(paths, name, branch)?;
     if show_size || show_location {
         let mut values = Vec::new();

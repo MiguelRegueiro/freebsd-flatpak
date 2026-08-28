@@ -1,4 +1,5 @@
 mod confirmation;
+mod error_output;
 mod help;
 mod info;
 mod install;
@@ -18,6 +19,8 @@ mod uninstall;
 mod update;
 mod update_output;
 use crate::diagnostics::{Detail, Diagnostics, Verbosity};
+
+pub(crate) use error_output::report as report_error;
 
 use crate::installation::startup_recovery as startup;
 use crate::remotes;
@@ -175,6 +178,10 @@ mod boundary_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "tests/error_output.rs"]
+mod error_output_tests;
 
 #[cfg(test)]
 #[path = "tests/verbosity.rs"]
