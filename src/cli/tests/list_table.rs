@@ -21,3 +21,43 @@ fn validates_columns_and_unique_prefixes() {
     assert!(resolve_column("missing").is_err());
     assert!(resolve_column("").is_err());
 }
+
+fn example_row() -> InstalledRow {
+    InstalledRow {
+        name: "Example".to_string(),
+        application: "org.example.App".to_string(),
+        arch: "x86_64".to_string(),
+        version: "2.4".to_string(),
+        branch: "stable".to_string(),
+        runtime: "org.example.Platform/x86_64/1".to_string(),
+        ref_name: "app/org.example.App/x86_64/stable".to_string(),
+        origin: "example-origin".to_string(),
+        active: "abc123".to_string(),
+        installed_size: 1024,
+    }
+}
+
+#[test]
+fn default_table_has_new_columns_and_wider_spacing() {
+    let options = parse_options(&[]).unwrap();
+    assert_eq!(options.columns, DEFAULT_COLUMNS);
+    assert_eq!(
+        render(&[example_row()], &options, false),
+        concat!(
+            "Name       Application ID     Version    Branch    Origin\n",
+            "Example    org.example.App    2.4        stable    example-origin\n",
+        )
+    );
+}
+
+#[test]
+fn table_bolds_only_headers_when_styled() {
+    let options = parse_options(&[]).unwrap();
+    let plain = render(&[example_row()], &options, false);
+    let styled = render(&[example_row()], &options, true);
+
+    assert!(!plain.contains("\x1b["));
+    assert!(styled.starts_with("\x1b[1mName\x1b[0m"));
+    assert!(styled.contains("\x1b[1mApplication ID\x1b[0m"));
+    assert!(!styled.lines().nth(1).unwrap().contains("\x1b["));
+}

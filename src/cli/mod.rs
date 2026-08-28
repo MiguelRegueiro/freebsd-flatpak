@@ -15,6 +15,7 @@ mod repair;
 mod run;
 mod search;
 mod size_format;
+mod style;
 mod uninstall;
 mod update;
 mod update_output;

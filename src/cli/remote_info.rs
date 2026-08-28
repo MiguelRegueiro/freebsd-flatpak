@@ -2,8 +2,6 @@ use crate::installation::installation_paths::Installation;
 use crate::ostree as storage;
 use crate::remotes;
 use anyhow::{bail, Context, Result};
-use std::fmt::Write as _;
-use std::io::IsTerminal;
 
 pub(crate) fn cmd_remote_info(paths: &Installation, args: Vec<String>) -> Result<()> {
     let options = parse_remote_info_args(args)?;
@@ -19,7 +17,7 @@ pub(crate) fn cmd_remote_info(paths: &Installation, args: Vec<String>) -> Result
             None
         }
     };
-    let styled = std::io::stdout().is_terminal();
+    let styled = super::style::stdout_enabled();
 
     if options.log {
         let (_, history) = metadata.app_history(paths, &options.app_id)?;
@@ -211,11 +209,7 @@ fn append_label(output: &mut String, label: &str, value: Option<&str>, styled: b
     const WIDTH: usize = 15;
     let padding = WIDTH.saturating_sub(label.len());
     output.push_str(&" ".repeat(padding));
-    if styled {
-        let _ = write!(output, "\x1b[1m{label}\x1b[0m");
-    } else {
-        output.push_str(label);
-    }
+    output.push_str(&super::style::bold(label, styled));
     if let Some(value) = value {
         output.push(' ');
         output.push_str(value);

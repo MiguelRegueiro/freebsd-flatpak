@@ -26,6 +26,20 @@ impl Fixture {
         let runtime_location = data.join("runtimes/flathub/platform/runtime-commit");
         fs::create_dir_all(&app_location).unwrap();
         fs::create_dir_all(&runtime_location).unwrap();
+        let app_metainfo = app_location.join("files/share/metainfo");
+        let runtime_metainfo = runtime_location.join("files/share/metainfo");
+        fs::create_dir_all(&app_metainfo).unwrap();
+        fs::create_dir_all(&runtime_metainfo).unwrap();
+        fs::write(
+            app_metainfo.join("app.zen_browser.zen.metainfo.xml"),
+            r#"<component><id>app.zen_browser.zen.desktop</id><name>Zen Browser</name><releases><release version="1.2.3"/></releases></component>"#,
+        )
+        .unwrap();
+        fs::write(
+            runtime_metainfo.join("org.freedesktop.Platform.metainfo.xml"),
+            r#"<component><id>org.freedesktop.Platform</id><name>Freedesktop Platform</name><releases><release version="24.08.20"/></releases></component>"#,
+        )
+        .unwrap();
         fs::write(
             refs.join("apps/app.zen_browser.zen.ini"),
             "origin=flathub\nruntime_origin=flathub\napp_id=app.zen_browser.zen\napp_ref=app/app.zen_browser.zen/x86_64/stable\napp_commit=app-commit\ninstalled_size=402500000\napp_dir=apps/app.zen_browser.zen/app-commit\narch=x86_64\nbranch=stable\nruntime_ref=org.freedesktop.Platform/x86_64/24.08\nruntime_commit=runtime-commit\nruntime_dir=runtimes/flathub/platform/runtime-commit\ncommand=zen\n",
@@ -38,6 +52,13 @@ impl Fixture {
         .unwrap();
         let extension = data.join("extensions/org.freedesktop.Platform.GL.default-24.08");
         fs::create_dir_all(extension.join("files")).unwrap();
+        let extension_metainfo = extension.join("files/share/metainfo");
+        fs::create_dir_all(&extension_metainfo).unwrap();
+        fs::write(
+            extension_metainfo.join("org.freedesktop.Platform.GL.default.metainfo.xml"),
+            r#"<component><id>org.freedesktop.Platform.GL.default</id><name>Default GL</name><releases><release version="24.08"/></releases></component>"#,
+        )
+        .unwrap();
         fs::write(extension.join("metadata"), "[Runtime]\n").unwrap();
         fs::write(
             extension.join(".ostree-commit"),
@@ -86,6 +107,13 @@ fn row_ids(output: &str) -> Vec<&str> {
 #[test]
 fn list_columns_and_kind_filters_include_runtime_extensions() {
     let fixture = Fixture::new();
+    assert_eq!(
+        stdout(fixture.run(&["list", "--app"])),
+        concat!(
+            "Name           Application ID         Version    Branch    Origin\n",
+            "Zen Browser    app.zen_browser.zen    1.2.3      stable    flathub\n",
+        )
+    );
     let all = stdout(fixture.run(&["list", "--columns=application,size"]));
     assert!(all.starts_with("Application ID"));
     assert!(all.contains("app.zen_browser.zen"));
@@ -97,6 +125,12 @@ fn list_columns_and_kind_filters_include_runtime_extensions() {
 
     let apps = stdout(fixture.run(&["list", "--app", "--columns=application,size"]));
     assert_eq!(row_ids(&apps), ["app.zen_browser.zen"]);
+
+    let runtime_defaults = stdout(fixture.run(&["list", "--runtime"]));
+    assert!(runtime_defaults.contains("Default GL"));
+    assert!(runtime_defaults.contains("24.08"));
+    assert!(runtime_defaults.contains("Freedesktop Platform"));
+    assert!(runtime_defaults.contains("24.08.20"));
 
     let runtimes = stdout(fixture.run(&["list", "--runtime", "--columns=application,size"]));
     assert_eq!(

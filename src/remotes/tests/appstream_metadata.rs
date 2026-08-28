@@ -71,3 +71,37 @@ fn appstream_info_preserves_missing_optional_fields() {
     assert_eq!(info.license, None);
     assert!(parse_appstream_info(xml, "org.example.Missing").is_none());
 }
+
+#[test]
+fn appstream_info_matches_desktop_component_suffix() {
+    let xml = r#"<component><id>org.example.App.desktop</id><name>Example</name></component>"#;
+
+    assert_eq!(
+        parse_appstream_info(xml, "org.example.App")
+            .unwrap()
+            .name
+            .as_deref(),
+        Some("Example")
+    );
+}
+
+#[test]
+fn appstream_info_uses_component_name_instead_of_nested_developer_name() {
+    let xml = r#"
+<component type="desktop-application">
+  <id>org.gnome.TextEditor</id>
+  <developer id="org.gnome">
+    <name>The GNOME Project</name>
+  </developer>
+  <name>Text Editor</name>
+  <releases>
+    <release version="50.1"/>
+  </releases>
+</component>
+"#;
+
+    let info = parse_appstream_info(xml, "org.gnome.TextEditor").unwrap();
+
+    assert_eq!(info.name.as_deref(), Some("Text Editor"));
+    assert_eq!(info.version.as_deref(), Some("50.1"));
+}

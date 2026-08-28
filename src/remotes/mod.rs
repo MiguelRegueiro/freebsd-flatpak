@@ -1,4 +1,5 @@
 mod appstream_metadata;
+pub(crate) use appstream_metadata::parse_appstream_info;
 mod metadata_cache;
 mod ostree_summary;
 mod ref_resolution;

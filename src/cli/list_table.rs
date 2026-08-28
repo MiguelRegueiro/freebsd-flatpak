@@ -1,14 +1,17 @@
 use anyhow::{bail, Result};
 
 const DEFAULT_COLUMNS: &[Column] = &[
+    Column::Name,
     Column::Application,
-    Column::Arch,
+    Column::Version,
     Column::Branch,
     Column::Origin,
 ];
 const ALL_COLUMNS: &[Column] = &[
+    Column::Name,
     Column::Application,
     Column::Arch,
+    Column::Version,
     Column::Branch,
     Column::Runtime,
     Column::Ref,
@@ -20,8 +23,10 @@ const ALL_COLUMNS: &[Column] = &[
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Column {
+    Name,
     Application,
     Arch,
+    Version,
     Branch,
     Runtime,
     Ref,
@@ -34,8 +39,10 @@ enum Column {
 impl Column {
     fn name(self) -> &'static str {
         match self {
+            Self::Name => "name",
             Self::Application => "application",
             Self::Arch => "arch",
+            Self::Version => "version",
             Self::Branch => "branch",
             Self::Runtime => "runtime",
             Self::Ref => "ref",
@@ -48,8 +55,10 @@ impl Column {
 
     fn title(self) -> &'static str {
         match self {
+            Self::Name => "Name",
             Self::Application => "Application ID",
             Self::Arch => "Arch",
+            Self::Version => "Version",
             Self::Branch => "Branch",
             Self::Runtime => "Runtime",
             Self::Ref => "Ref",
@@ -70,8 +79,10 @@ pub(super) struct Options {
 
 #[derive(Debug)]
 pub(super) struct InstalledRow {
+    pub(super) name: String,
     pub(super) application: String,
     pub(super) arch: String,
+    pub(super) version: String,
     pub(super) branch: String,
     pub(super) runtime: String,
     pub(super) ref_name: String,
@@ -164,7 +175,7 @@ fn resolve_column(field: &str) -> Result<Option<Column>> {
     }
 }
 
-pub(super) fn render(rows: &[InstalledRow], options: &Options) -> String {
+pub(super) fn render(rows: &[InstalledRow], options: &Options, styled: bool) -> String {
     if rows.is_empty() || options.columns.is_empty() {
         return String::new();
     }
@@ -200,12 +211,14 @@ pub(super) fn render(rows: &[InstalledRow], options: &Options) -> String {
             .map(|column| column.title())
             .collect::<Vec<_>>(),
         &widths,
+        styled,
     );
     for row in &values {
         write_table_line(
             &mut output,
             &row.iter().map(String::as_str).collect::<Vec<_>>(),
             &widths,
+            false,
         );
     }
     output
@@ -213,8 +226,10 @@ pub(super) fn render(rows: &[InstalledRow], options: &Options) -> String {
 
 fn value(row: &InstalledRow, column: Column) -> String {
     match column {
+        Column::Name => row.name.clone(),
         Column::Application => row.application.clone(),
         Column::Arch => row.arch.clone(),
+        Column::Version => row.version.clone(),
         Column::Branch => row.branch.clone(),
         Column::Runtime => row.runtime.clone(),
         Column::Ref => row.ref_name.clone(),
@@ -225,12 +240,12 @@ fn value(row: &InstalledRow, column: Column) -> String {
     }
 }
 
-fn write_table_line(output: &mut String, values: &[&str], widths: &[usize]) {
+fn write_table_line(output: &mut String, values: &[&str], widths: &[usize], bold: bool) {
     for (index, value) in values.iter().enumerate() {
         if index > 0 {
-            output.push_str("  ");
+            output.push_str("    ");
         }
-        output.push_str(value);
+        output.push_str(&super::style::bold(value, bold));
         if index + 1 < values.len() {
             output.extend(std::iter::repeat_n(
                 ' ',

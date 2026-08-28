@@ -31,11 +31,24 @@ pub(super) fn decompress_appstream_xml(data: &[u8]) -> Result<String> {
     String::from_utf8(decompress_gzip(data)?).context("AppStream XML is not UTF-8")
 }
 
+fn find_component_start(xml: &str) -> Option<usize> {
+    let mut offset = 0usize;
+    while let Some(relative_start) = xml[offset..].find("<component") {
+        let start = offset + relative_start;
+        let boundary = xml.as_bytes().get(start + "<component".len()).copied()?;
+        if boundary == b'>' || boundary.is_ascii_whitespace() {
+            return Some(start);
+        }
+        offset = start + "<component".len();
+    }
+    None
+}
+
 pub(super) fn parse_appstream_replacements(xml: &str) -> BTreeMap<String, Vec<String>> {
     let mut replacements: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut rest = xml;
 
-    while let Some(start) = rest.find("<component") {
+    while let Some(start) = find_component_start(rest) {
         rest = &rest[start..];
         let Some(tag_end) = rest.find('>') else {
             break;
@@ -47,7 +60,7 @@ pub(super) fn parse_appstream_replacements(xml: &str) -> BTreeMap<String, Vec<St
         let component = &component_body[..end];
         rest = &component_body[end + "</component>".len()..];
 
-        let Some(new_id) = first_xml_text(component, "id") else {
+        let Some(new_id) = first_direct_xml_text(component, "id") else {
             continue;
         };
         let mut component_rest = component;
@@ -68,25 +81,27 @@ pub(super) fn parse_appstream_replacements(xml: &str) -> BTreeMap<String, Vec<St
     replacements
 }
 
-pub(super) fn parse_appstream_info(xml: &str, app_id: &str) -> Option<AppstreamInfo> {
+pub(crate) fn parse_appstream_info(xml: &str, app_id: &str) -> Option<AppstreamInfo> {
     let mut rest = xml;
-    while let Some(start) = rest.find("<component") {
+    while let Some(start) = find_component_start(rest) {
         rest = &rest[start..];
         let tag_end = rest.find('>')?;
         let component_body = &rest[tag_end + 1..];
         let end = component_body.find("</component>")?;
         let component = &component_body[..end];
         rest = &component_body[end + "</component>".len()..];
-        if first_xml_text(component, "id").as_deref() != Some(app_id) {
+        let matches_app = first_direct_xml_text(component, "id")
+            .is_some_and(|id| id == app_id || id.strip_suffix(".desktop") == Some(app_id));
+        if !matches_app {
             continue;
         }
 
         let version = first_release_version(component);
         return Some(AppstreamInfo {
-            name: first_xml_text(component, "name"),
-            summary: first_xml_text(component, "summary"),
+            name: first_direct_xml_text(component, "name"),
+            summary: first_direct_xml_text(component, "summary"),
             version,
-            license: first_xml_text(component, "project_license"),
+            license: first_direct_xml_text(component, "project_license"),
         });
     }
     None
@@ -114,8 +129,48 @@ fn xml_attribute(tag: &str, attribute: &str) -> Option<String> {
     (!value.is_empty()).then(|| xml_unescape_text(value))
 }
 
-fn first_xml_text(xml: &str, tag: &str) -> Option<String> {
-    xml_texts(xml, tag).into_iter().next()
+fn first_direct_xml_text(xml: &str, tag: &str) -> Option<String> {
+    let mut depth = 0usize;
+    let mut offset = 0usize;
+    while let Some(relative_start) = xml[offset..].find('<') {
+        let start = offset + relative_start;
+        if xml[start..].starts_with("<!--") {
+            offset = start + xml[start..].find("-->")? + 3;
+            continue;
+        }
+        let end = start + xml[start..].find('>')?;
+        let markup = xml[start + 1..end].trim();
+        if markup.starts_with('?') || markup.starts_with('!') {
+            offset = end + 1;
+            continue;
+        }
+        if markup.starts_with('/') {
+            depth = depth.saturating_sub(1);
+            offset = end + 1;
+            continue;
+        }
+
+        let self_closing = markup.ends_with('/');
+        let element = markup
+            .trim_end_matches('/')
+            .split_whitespace()
+            .next()
+            .unwrap_or_default();
+        if depth == 0 && element == tag && !markup.contains("xml:lang=") {
+            let value_start = end + 1;
+            let close = format!("</{tag}>");
+            let value_end = value_start + xml[value_start..].find(&close)?;
+            let value = xml[value_start..value_end].trim();
+            if !value.is_empty() {
+                return Some(xml_unescape_text(value));
+            }
+        }
+        if !self_closing {
+            depth += 1;
+        }
+        offset = end + 1;
+    }
+    None
 }
 
 fn xml_texts(xml: &str, tag: &str) -> Vec<String> {
