@@ -74,3 +74,41 @@ fn etc_overlay_does_not_fabricate_missing_runtime_os_release() {
 
     assert!(fs::symlink_metadata(root.join("etc/os-release")).is_err());
 }
+
+#[test]
+fn root_contains_flatpak_identity_files_instead_of_runtime_accounts() {
+    let dir = test_dir("identity-files");
+    let root = dir.join("root");
+    let runtime_etc = dir.join("runtime-files/etc");
+    fs::create_dir_all(&runtime_etc).unwrap();
+    fs::write(runtime_etc.join("passwd"), "runtime:x:0:0::/:/bin/sh\n").unwrap();
+    fs::write(runtime_etc.join("group"), "runtime:x:0:\n").unwrap();
+    let identity = SandboxIdentity::new(
+        1001,
+        1002,
+        "example".to_string(),
+        Some("media".to_string()),
+        "Example User".to_string(),
+        PathBuf::from("/home/example"),
+    )
+    .unwrap();
+
+    prepare_root(&root, &identity, &runtime_etc, false).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(root.join("etc/passwd")).unwrap(),
+        identity.passwd_contents()
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("etc/group")).unwrap(),
+        identity.group_contents()
+    );
+    assert_eq!(
+        fs::metadata(root.join("etc/passwd"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644
+    );
+}

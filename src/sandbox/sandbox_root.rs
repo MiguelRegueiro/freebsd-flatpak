@@ -1,4 +1,5 @@
 use super::launch_application::FlatpakApp;
+use super::sandbox_identity::SandboxIdentity;
 use crate::flatpak_metadata::value;
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -8,7 +9,7 @@ use std::path::Path;
 
 pub(super) fn prepare_root(
     root: &Path,
-    uid: u32,
+    identity: &SandboxIdentity,
     runtime_etc: &Path,
     network_enabled: bool,
 ) -> Result<()> {
@@ -26,13 +27,18 @@ pub(super) fn prepare_root(
         fs::create_dir_all(root.join(dir))
             .with_context(|| format!("create {}", root.join(dir).display()))?;
     }
-    fs::create_dir_all(root.join("run").join("user").join(uid.to_string()))
-        .with_context(|| format!("create {}", root.join("run/user").display()))?;
+    fs::create_dir_all(
+        root.join("run")
+            .join("user")
+            .join(identity.uid().to_string()),
+    )
+    .with_context(|| format!("create {}", root.join("run/user").display()))?;
 
     make_link("usr/bin", &root.join("bin"))?;
     make_link("usr/lib", &root.join("lib"))?;
     make_link("usr/lib64", &root.join("lib64"))?;
     prepare_etc_overlay(root, runtime_etc, network_enabled)?;
+    prepare_identity_files(&root.join("etc"), identity)?;
     Ok(())
 }
 
@@ -59,7 +65,10 @@ pub(super) fn prepare_etc_overlay(
         let Some(name_text) = name.to_str() else {
             continue;
         };
-        if matches!(name_text, "resolv.conf" | "hosts" | "os-release") {
+        if matches!(
+            name_text,
+            "passwd" | "group" | "resolv.conf" | "hosts" | "os-release"
+        ) {
             continue;
         }
         let link = etc.join(name_text);
@@ -123,6 +132,21 @@ fn prepare_host_resolver_file(
     fs::write(&target, data).with_context(|| format!("write {}", target.display()))?;
     fs::set_permissions(&target, fs::Permissions::from_mode(0o644))
         .with_context(|| format!("set permissions on {}", target.display()))?;
+    Ok(())
+}
+
+fn prepare_identity_files(etc: &Path, identity: &SandboxIdentity) -> Result<()> {
+    let files = [
+        ("passwd", identity.passwd_contents()),
+        ("group", identity.group_contents()),
+    ];
+    for (name, contents) in files {
+        let target = etc.join(name);
+        remove_regular_overlay_file(&target)?;
+        fs::write(&target, contents).with_context(|| format!("write {}", target.display()))?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644))
+            .with_context(|| format!("set permissions on {}", target.display()))?;
+    }
     Ok(())
 }
 

@@ -12,6 +12,7 @@ mod launch_environment;
 mod mount_operations;
 mod process_signals;
 mod process_supervision;
+mod sandbox_identity;
 mod sandbox_root;
 mod stale_sandbox_recovery;
 pub(crate) mod static_overrides;

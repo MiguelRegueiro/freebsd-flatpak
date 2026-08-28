@@ -1,12 +1,11 @@
-use super::application_entrypoint::{
-    host_user, numeric_id, numeric_ids, resolve_entry, sandbox_name,
-};
+use super::application_entrypoint::{numeric_id, numeric_ids, resolve_entry, sandbox_name};
 use super::chroot_instance::ChrootInstance;
 use super::filesystem_grants::HostFilesystem;
 use super::flatpak_data_mount_plan::FlatpakDataMountPlan;
 use super::flatpak_installation::FlatpakInstallationProjection;
 use super::launch_application::FlatpakApp;
 use super::process_signals::install_signal_handlers;
+use super::sandbox_identity::SandboxIdentity;
 use super::sandbox_root::{app_allows_network, prepare_root, write_flatpak_info};
 use super::static_overrides::{effective_metadata, permission_enabled};
 use crate::desktop_integration::DesktopSession;
@@ -134,11 +133,12 @@ impl ChrootNullfsBackend {
         diagnostics: &Diagnostics,
     ) -> Result<ChrootInstance> {
         let host_resources = diagnostics.timer(Detail::Summary);
-        let identity = diagnostics.timer(Detail::Detailed);
+        let identity_timing = diagnostics.timer(Detail::Detailed);
         let uid = numeric_id("id", "-u")?;
         let gid = numeric_id("id", "-g")?;
         let supplementary_gids = numeric_ids("id", "-G")?;
-        let user = host_user(uid);
+        let identity = SandboxIdentity::from_current_process(uid, gid)?;
+        let user = identity.user_name().to_string();
         let instance_id = new_instance_id();
         let root = self
             .paths
@@ -146,7 +146,7 @@ impl ChrootNullfsBackend {
             .join(sandbox_name(&app.app_id))
             .join(&instance_id);
         let mut pending_run = PendingRunRecord::new(&self.paths, app, &instance_id, &root)?;
-        identity.finish("sandbox", "identity and instance paths");
+        identity_timing.finish("sandbox", "identity and instance paths");
         let metadata = diagnostics.timer(Detail::Detailed);
         let metadata_path = app.app_dir.join("metadata");
         let effective_metadata =
@@ -216,7 +216,7 @@ impl ChrootNullfsBackend {
         let root_layout = diagnostics.timer(Detail::Detailed);
         prepare_root(
             &root,
-            uid,
+            &identity,
             &app.runtime_dir.join("files").join("etc"),
             network_enabled,
         )?;
