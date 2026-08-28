@@ -42,3 +42,35 @@ fn etc_overlay_preserves_runtime_etc_and_adds_network_resolver_files() {
         PathBuf::from("/usr/etc/nsswitch.conf")
     );
 }
+
+#[test]
+fn etc_overlay_exposes_runtime_os_release_with_flatpak_layout() {
+    let dir = test_dir("runtime-os-release");
+    let root = dir.join("root");
+    let runtime_files = dir.join("runtime-files");
+    let runtime_etc = runtime_files.join("etc");
+    fs::create_dir_all(runtime_files.join("lib")).unwrap();
+    fs::create_dir_all(&runtime_etc).unwrap();
+    fs::write(runtime_files.join("lib/os-release"), "NAME=Runtime\n").unwrap();
+    std::os::unix::fs::symlink("../usr/lib/os-release", runtime_etc.join("os-release")).unwrap();
+
+    prepare_etc_overlay(&root, &runtime_etc, false).unwrap();
+
+    assert_eq!(
+        fs::read_link(root.join("etc/os-release")).unwrap(),
+        PathBuf::from("../usr/lib/os-release")
+    );
+}
+
+#[test]
+fn etc_overlay_does_not_fabricate_missing_runtime_os_release() {
+    let dir = test_dir("missing-runtime-os-release");
+    let root = dir.join("root");
+    let runtime_etc = dir.join("runtime-files/etc");
+    fs::create_dir_all(&runtime_etc).unwrap();
+    std::os::unix::fs::symlink("../usr/lib/os-release", runtime_etc.join("os-release")).unwrap();
+
+    prepare_etc_overlay(&root, &runtime_etc, false).unwrap();
+
+    assert!(fs::symlink_metadata(root.join("etc/os-release")).is_err());
+}

@@ -59,7 +59,7 @@ pub(super) fn prepare_etc_overlay(
         let Some(name_text) = name.to_str() else {
             continue;
         };
-        if matches!(name_text, "resolv.conf" | "hosts") {
+        if matches!(name_text, "resolv.conf" | "hosts" | "os-release") {
             continue;
         }
         let link = etc.join(name_text);
@@ -70,6 +70,8 @@ pub(super) fn prepare_etc_overlay(
             .with_context(|| format!("symlink {} -> /usr/etc/{name_text}", link.display()))?;
     }
 
+    prepare_runtime_os_release(&etc, runtime_etc)?;
+
     prepare_host_resolver_file(
         &etc,
         "resolv.conf",
@@ -78,6 +80,21 @@ pub(super) fn prepare_etc_overlay(
     )?;
     prepare_host_resolver_file(&etc, "hosts", Path::new("/etc/hosts"), network_enabled)?;
     Ok(())
+}
+
+fn prepare_runtime_os_release(etc: &Path, runtime_etc: &Path) -> Result<()> {
+    let target = etc.join("os-release");
+    remove_regular_overlay_file(&target)?;
+
+    let Some(runtime_files) = runtime_etc.parent() else {
+        return Ok(());
+    };
+    if !runtime_files.join("lib/os-release").is_file() {
+        return Ok(());
+    }
+
+    unix_fs::symlink("../usr/lib/os-release", &target)
+        .with_context(|| format!("symlink {} -> ../usr/lib/os-release", target.display()))
 }
 
 fn prepare_host_resolver_file(
