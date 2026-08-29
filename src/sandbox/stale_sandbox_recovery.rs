@@ -14,6 +14,7 @@ use std::time::Duration;
 
 pub fn recover_stale_mounts(paths: &Installation) -> Result<()> {
     state::ensure_layout(paths)?;
+    recover_orphaned_document_mounts(paths)?;
 
     for record in state::read_run_records(paths)? {
         let Some(record_path) = record.get("_path").map(PathBuf::from) else {
@@ -71,6 +72,61 @@ pub fn recover_stale_mounts(paths: &Installation) -> Result<()> {
 pub fn app_has_mounts(paths: &Installation, app_id: &str) -> Result<bool> {
     let root = paths.chroots().join(sandbox_name(app_id));
     Ok(!mount_points_under(&root)?.is_empty())
+}
+
+fn recover_orphaned_document_mounts(paths: &Installation) -> Result<()> {
+    let chroots = paths.chroots();
+    let chroots_identity = mount_identity(&chroots)?;
+    for mountpoint in mount_points_under(&chroots)? {
+        if !is_orphaned_regular_document_mount(&chroots, &mountpoint) {
+            continue;
+        }
+        let unmount = |force| {
+            let command = secure_mount::recover_orphaned_document_unmount_command(
+                &chroots,
+                chroots_identity,
+                &mountpoint,
+                force,
+            )?;
+            run_command(
+                command,
+                &format!("recover orphaned document mount {}", mountpoint.display()),
+            )
+        };
+        if let Err(error) = unmount(false) {
+            if !is_mounted(&mountpoint)? {
+                continue;
+            }
+            eprintln!(
+                "warning: orphaned document umount failed for {}: {error:#}",
+                mountpoint.display()
+            );
+            unmount(true)?;
+        }
+    }
+    Ok(())
+}
+
+fn is_orphaned_regular_document_mount(chroots: &Path, mountpoint: &Path) -> bool {
+    let Ok(relative) = mountpoint.strip_prefix(chroots) else {
+        return false;
+    };
+    let parts: Vec<_> = relative.components().collect();
+    let [std::path::Component::Normal(app), std::path::Component::Normal(instance), std::path::Component::Normal(run), std::path::Component::Normal(user), std::path::Component::Normal(_uid), std::path::Component::Normal(doc), std::path::Component::Normal(_grant), std::path::Component::Normal(_file)] =
+        parts.as_slice()
+    else {
+        return false;
+    };
+    *run == std::ffi::OsStr::new("run")
+        && *user == std::ffi::OsStr::new("user")
+        && *doc == std::ffi::OsStr::new("doc")
+        && !chroots.join(app).join(instance).exists()
+}
+
+fn mount_identity(path: &Path) -> Result<(u64, u64)> {
+    let metadata =
+        fs::metadata(path).with_context(|| format!("read metadata for {}", path.display()))?;
+    Ok((metadata.dev(), metadata.ino()))
 }
 
 fn active_run_roots(paths: &Installation) -> Result<Vec<PathBuf>> {

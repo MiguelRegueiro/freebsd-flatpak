@@ -7,10 +7,17 @@ void cleanup_grant(DocumentGrant *grant) {
     return;
   }
   if (grant->target_paths != NULL) {
-    for (guint i = 0; i < grant->target_paths->len; i++) {
-      unmount_path(g_ptr_array_index(grant->target_paths, i));
+    for (guint i = grant->target_paths->len; i > 0; i--) {
+      const char *target = g_ptr_array_index(grant->target_paths, i - 1);
+      if (unmount_path(target)) {
+        g_ptr_array_remove_index(grant->target_paths, i - 1);
+      }
     }
-    g_ptr_array_set_size(grant->target_paths, 0);
+    if (grant->target_paths->len != 0) {
+      log_line("preserving document placeholder while %u mount(s) remain",
+               grant->target_paths->len);
+      return;
+    }
   }
   const char *placeholder = grant->placeholder_path;
   if (placeholder == NULL) {
@@ -59,17 +66,27 @@ bool mount_grant_in_sandbox(DocumentGrant *grant, const char *sandbox_doc_dir,
   return true;
 }
 
-void remove_sandbox_grants(BridgeState *state, const char *sandbox_doc_dir) {
+bool remove_sandbox_grants(BridgeState *state, const char *sandbox_doc_dir,
+                           GError **error) {
+  bool complete = true;
   char *prefix = g_strconcat(sandbox_doc_dir, G_DIR_SEPARATOR_S, NULL);
   for (guint i = 0; i < state->documents.grants->len; i++) {
     DocumentGrant *grant = g_ptr_array_index(state->documents.grants, i);
     for (guint j = grant->target_paths->len; j > 0; j--) {
       const char *target = g_ptr_array_index(grant->target_paths, j - 1);
       if (g_str_has_prefix(target, prefix)) {
-        unmount_path(target);
-        g_ptr_array_remove_index(grant->target_paths, j - 1);
+        if (unmount_path(target)) {
+          g_ptr_array_remove_index(grant->target_paths, j - 1);
+        } else {
+          complete = false;
+        }
       }
     }
   }
   g_free(prefix);
+  if (!complete && error != NULL) {
+    g_set_error(error, G_IO_ERROR, G_IO_ERROR_BUSY,
+                "document grant mounts could not be detached");
+  }
+  return complete;
 }

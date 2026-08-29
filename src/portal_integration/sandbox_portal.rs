@@ -242,6 +242,12 @@ impl HostPortal {
         self.proxy.as_ref().map(|proxy| proxy.doc_dir.as_path())
     }
 
+    pub fn sandbox_doc_dir(&self) -> Option<&Path> {
+        self.proxy
+            .as_ref()
+            .map(|proxy| proxy.sandbox_doc_dir.as_path())
+    }
+
     pub fn attach_sandbox(&self) -> Result<()> {
         let Some(proxy) = &self.proxy else {
             return Ok(());

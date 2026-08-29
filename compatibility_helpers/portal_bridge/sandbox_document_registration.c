@@ -37,7 +37,7 @@ bool add_sandbox(BridgeState *state, const char *sandbox_doc_dir,
   for (guint i = 0; i < state->documents.grants->len; i++) {
     if (!mount_grant_in_sandbox(g_ptr_array_index(state->documents.grants, i),
                                 sandbox_doc_dir, error)) {
-      remove_sandbox_grants(state, sandbox_doc_dir);
+      remove_sandbox_grants(state, sandbox_doc_dir, NULL);
       return false;
     }
   }
@@ -47,14 +47,18 @@ bool add_sandbox(BridgeState *state, const char *sandbox_doc_dir,
   return true;
 }
 
-void remove_sandbox(BridgeState *state, const char *sandbox_doc_dir) {
+bool remove_sandbox(BridgeState *state, const char *sandbox_doc_dir,
+                    GError **error) {
   gint index = find_sandbox_doc_dir(state, sandbox_doc_dir);
   if (index < 0) {
-    return;
+    return true;
   }
-  remove_sandbox_grants(state, sandbox_doc_dir);
+  if (!remove_sandbox_grants(state, sandbox_doc_dir, error)) {
+    return false;
+  }
   g_ptr_array_remove_index(state->documents.sandbox_doc_dirs, (guint)index);
   diagnostic_line("detached sandbox document root %s", sandbox_doc_dir);
+  return true;
 }
 
 void handle_control_method(GDBusConnection *connection, const gchar *sender,
@@ -80,7 +84,11 @@ void handle_control_method(GDBusConnection *connection, const gchar *sender,
     return;
   }
   if (g_strcmp0(method_name, "RemoveSandbox") == 0) {
-    remove_sandbox(state, sandbox_doc_dir);
+    GError *error = NULL;
+    if (!remove_sandbox(state, sandbox_doc_dir, &error)) {
+      g_dbus_method_invocation_take_error(invocation, error);
+      return;
+    }
     g_dbus_method_invocation_return_value(invocation, NULL);
     return;
   }

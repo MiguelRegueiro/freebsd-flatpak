@@ -15,6 +15,7 @@
 #include <arpa/inet.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 
+static bool test_unmount_succeeds = true;
 typedef struct {
   char *source;
   char *target;
@@ -94,7 +95,7 @@ bool mount_grant_path(const char *source, const char *target, bool read_only,
 
 bool unmount_path(const char *target) {
   (void)target;
-  return true;
+  return test_unmount_succeeds;
 }
 
 static void test_flatpak_spawn_contract(void) {
@@ -208,18 +209,48 @@ static void test_remove_sandbox_is_per_instance_and_idempotent(void) {
   g_ptr_array_add(state.documents.sandbox_doc_dirs, g_strdup(first));
   g_ptr_array_add(state.documents.sandbox_doc_dirs, g_strdup(second));
 
-  remove_sandbox(&state, first);
+  g_assert_true(remove_sandbox(&state, first, NULL));
   g_assert_cmpuint(state.documents.sandbox_doc_dirs->len, ==, 1);
   g_assert_cmpstr(g_ptr_array_index(state.documents.sandbox_doc_dirs, 0), ==,
                   second);
 
-  remove_sandbox(&state, first);
+  g_assert_true(remove_sandbox(&state, first, NULL));
   g_assert_cmpuint(state.documents.sandbox_doc_dirs->len, ==, 1);
-  remove_sandbox(&state, second);
+  g_assert_true(remove_sandbox(&state, second, NULL));
   g_assert_cmpuint(state.documents.sandbox_doc_dirs->len, ==, 0);
 
   g_ptr_array_free(state.documents.sandbox_doc_dirs, TRUE);
   g_ptr_array_free(state.documents.grants, TRUE);
+}
+
+static void test_failed_document_unmount_keeps_the_document_root_registered(void) {
+  BridgeState state = {0};
+  const char *doc_dir =
+      "/runtime/chroots/org.example.App/first/run/user/1001/doc";
+  DocumentGrant *grant = g_new0(DocumentGrant, 1);
+  grant->target_paths = g_ptr_array_new_with_free_func(g_free);
+  g_ptr_array_add(grant->target_paths,
+                  g_strdup("/runtime/chroots/org.example.App/first/run/user/1001/doc/grant/file"));
+  state.documents.grants =
+      g_ptr_array_new_with_free_func((GDestroyNotify)free_grant);
+  state.documents.sandbox_doc_dirs = g_ptr_array_new_with_free_func(g_free);
+  g_ptr_array_add(state.documents.grants, grant);
+  g_ptr_array_add(state.documents.sandbox_doc_dirs, g_strdup(doc_dir));
+
+  test_unmount_succeeds = false;
+  GError *error = NULL;
+  g_assert_false(remove_sandbox(&state, doc_dir, &error));
+  g_assert_error(error, G_IO_ERROR, G_IO_ERROR_BUSY);
+  g_clear_error(&error);
+  g_assert_cmpuint(state.documents.sandbox_doc_dirs->len, ==, 1);
+  g_assert_cmpuint(grant->target_paths->len, ==, 1);
+
+  test_unmount_succeeds = true;
+  g_assert_true(remove_sandbox(&state, doc_dir, NULL));
+  g_assert_cmpuint(state.documents.sandbox_doc_dirs->len, ==, 0);
+  g_assert_cmpuint(grant->target_paths->len, ==, 0);
+  g_ptr_array_free(state.documents.grants, TRUE);
+  g_ptr_array_free(state.documents.sandbox_doc_dirs, TRUE);
 }
 
 static void test_path_and_option_translation(void) {
@@ -787,6 +818,7 @@ int main(void) {
   test_introspection();
   test_shared_sandbox_scope_validation();
   test_remove_sandbox_is_per_instance_and_idempotent();
+  test_failed_document_unmount_keeps_the_document_root_registered();
   test_path_and_option_translation();
   test_unix_fd_copy();
   test_grant_mount_order_is_direct_and_equivalent();

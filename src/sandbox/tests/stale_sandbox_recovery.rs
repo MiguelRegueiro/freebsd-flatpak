@@ -1,6 +1,7 @@
 use super::*;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 #[test]
@@ -79,6 +80,26 @@ fn active_instance_roots_exclude_only_their_own_mounts_from_recovery() {
     assert!(belongs_to_any_root(&first.join("usr"), &active));
     assert!(belongs_to_any_root(&second.join("proc"), &active));
     assert!(!belongs_to_any_root(&other.join("app"), &active));
+}
+#[test]
+fn orphaned_regular_document_mounts_are_recovered_only_after_the_instance_is_gone() {
+    let base = std::env::temp_dir().join(format!(
+        "freebsd-flatpak-orphaned-document-{}",
+        std::process::id()
+    ));
+    let chroots = base.join("chroots");
+    let mountpoint = chroots.join("org.example.App/dead/run/user/1001/doc/grant/file");
+    fs::create_dir_all(chroots.join("org.example.App")).unwrap();
+
+    assert!(is_orphaned_regular_document_mount(&chroots, &mountpoint));
+    fs::create_dir_all(chroots.join("org.example.App/dead")).unwrap();
+    assert!(!is_orphaned_regular_document_mount(&chroots, &mountpoint));
+    assert!(!is_orphaned_regular_document_mount(
+        &chroots,
+        &chroots.join("org.example.App/dead/run/user/1001/doc/grant/directory/nested")
+    ));
+
+    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]

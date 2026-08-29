@@ -348,7 +348,10 @@ impl ChrootInstance {
         // Mount teardown cannot make progress while a process still owns the
         // chroot. Stop here instead of producing repeated EBUSY diagnostics.
         terminate_chroot_processes(&self.root)?;
+        let portal_doc_dir = self.host_portal.sandbox_doc_dir().map(PathBuf::from);
+        let mut portal_cleanup_failed = false;
         if let Err(error) = self.host_portal.cleanup() {
+            portal_cleanup_failed = true;
             errors.push(format!("{error:#}"));
         }
         let mut remaining_mounts = Vec::new();
@@ -356,6 +359,17 @@ impl ChrootInstance {
         match owned_mount_teardown_order(&self.root, owned_mounts.clone()) {
             Ok(mounts) => {
                 for mount in mounts {
+                    if portal_cleanup_failed
+                        && portal_doc_dir
+                            .as_ref()
+                            .is_some_and(|doc_dir| mount.path == *doc_dir)
+                    {
+                        // RemoveSandbox leaves the root registered when a child
+                        // grant could not detach. Keep this parent mounted so a
+                        // retry can still resolve and unmount the child.
+                        remaining_mounts.push(mount);
+                        continue;
+                    }
                     if let Err(error) =
                         unmount_mountpoint(&mount.path, mount.read_only, "umount owned mount")
                     {
