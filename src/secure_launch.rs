@@ -18,6 +18,7 @@ const MAX_ARGUMENTS: usize = 1024;
 const MAX_ENVIRONMENT: usize = 512;
 const NESTED_DAEMON_SOCKET: &str = "/var/run/freebsd-flatpak/secure-launch.sock";
 const MAX_NESTED_PACKET: usize = 65_536;
+const JAIL_OWN_DESC: libc::c_int = 0x80;
 
 pub(crate) struct LaunchRequest<'a> {
     pub(crate) root: &'a Path,
@@ -232,7 +233,7 @@ impl Request {
     }
 
     fn execute(self, real_uid: libc::uid_t, real_gid: libc::gid_t) -> Result<()> {
-        self.execute_with_mappings(real_uid, real_gid, &[], &[])
+        self.execute_with_mappings(real_uid, real_gid, &[], &[], None)
     }
 
     fn execute_with_mappings(
@@ -241,18 +242,20 @@ impl Request {
         real_gid: libc::gid_t,
         mapped_targets: &[i32],
         mapped_sources: &[OwnedFd],
+        jail_lifecycle: Option<RawFd>,
     ) -> Result<()> {
-        let root_fd = open_directory(&self.root)?;
-        if file_identity_fd(root_fd.as_raw_fd())? != (self.root_device, self.root_inode) {
+        let mut root_fd = Some(open_directory(&self.root)?);
+        if file_identity_fd(root_fd.as_ref().expect("sandbox root fd").as_raw_fd())?
+            != (self.root_device, self.root_inode)
+        {
             bail!("sandbox root changed while preparing secure launch");
         }
         if self.jail_mode != JailMode::Direct {
-            // FreeBSD evaluates jail privilege using the real UID, not merely
-            // this helper's effective UID. The request has been fully
-            // validated above and `path=.` is descriptor-anchored below, so
-            // temporarily restoring the helper's saved root UID is limited to
-            // creating/attaching this exact nested jail. Credentials are
-            // irrevocably dropped before executing application code.
+            // FreeBSD jail attachment performs chroot(2) internally and
+            // rejects a process that still has an open directory descriptor.
+            // Create the jail first while cwd is anchored to the validated
+            // descriptor, then close it before attaching.
+            let lifecycle = jail_lifecycle.context("nested jail requires daemon supervision")?;
             if unsafe { libc::setuid(0) } != 0
                 || unsafe { libc::setgroups(0, std::ptr::null()) } != 0
                 || unsafe { libc::setgid(0) } != 0
@@ -260,25 +263,35 @@ impl Request {
                 return Err(io::Error::last_os_error())
                     .context("adopt root credentials for nested sandbox jail");
             }
-            if unsafe { libc::fchdir(root_fd.as_raw_fd()) } != 0 {
+            if unsafe { libc::fchdir(root_fd.as_ref().expect("sandbox root fd").as_raw_fd()) } != 0
+            {
                 return Err(io::Error::last_os_error()).context("anchor nested jail root");
             }
-            enter_nested_jail(self.jail_mode == JailMode::NoNetwork)?;
-        }
-        // Descriptor-anchored chroot prevents a validated path from being
-        // replaced before entry. Do not install caller-selected descriptor
-        // numbers until after every privileged operation that uses root_fd:
-        // otherwise an SCM_RIGHTS mapping could overwrite that descriptor and
-        // redirect chroot(2) outside the validated sandbox.
-        let dot = std::ffi::CString::new(".")?;
-        let slash = std::ffi::CString::new("/")?;
-        if unsafe { libc::fchdir(root_fd.as_raw_fd()) } != 0
-            || unsafe { libc::chroot(dot.as_ptr()) } != 0
-        {
-            return Err(io::Error::last_os_error()).context("enter sandbox chroot");
-        }
-        if unsafe { libc::chdir(slash.as_ptr()) } != 0 {
-            return Err(io::Error::last_os_error()).context("enter sandbox root");
+            let (jail, owner) = create_nested_jail(self.jail_mode == JailMode::NoNetwork)?;
+            drop(root_fd.take());
+            if unsafe { jail_attach(jail) } != 0 {
+                let error = io::Error::last_os_error();
+                unsafe { jail_remove(jail) };
+                return Err(error).context("attach nested sandbox jail");
+            }
+            synchronize_nested_jail(lifecycle, jail, owner)?;
+        } else {
+            // Descriptor-anchored chroot prevents a validated path from being
+            // replaced before entry. Do not install caller-selected descriptor
+            // numbers until after every privileged operation that uses root_fd:
+            // otherwise an SCM_RIGHTS mapping could overwrite that descriptor and
+            // redirect chroot(2) outside the validated sandbox.
+            let dot = std::ffi::CString::new(".")?;
+            let slash = std::ffi::CString::new("/")?;
+            let root_fd = root_fd.take().expect("sandbox root fd");
+            if unsafe { libc::fchdir(root_fd.as_raw_fd()) } != 0
+                || unsafe { libc::chroot(dot.as_ptr()) } != 0
+            {
+                return Err(io::Error::last_os_error()).context("enter sandbox chroot");
+            }
+            if unsafe { libc::chdir(slash.as_ptr()) } != 0 {
+                return Err(io::Error::last_os_error()).context("enter sandbox root");
+            }
         }
         if let Some(cwd) = &self.cwd {
             let cwd = std::ffi::CString::new(cwd.as_bytes())?;
@@ -332,29 +345,25 @@ struct JailParam {
 unsafe extern "C" {
     fn jailparam_init(parameter: *mut JailParam, name: *const libc::c_char) -> libc::c_int;
     fn jailparam_import(parameter: *mut JailParam, value: *const libc::c_char) -> libc::c_int;
+    fn jailparam_import_raw(
+        parameter: *mut JailParam,
+        value: *mut libc::c_void,
+        value_len: usize,
+    ) -> libc::c_int;
     fn jailparam_set(
         parameters: *mut JailParam,
         count: libc::c_uint,
         flags: libc::c_int,
     ) -> libc::c_int;
     fn jailparam_free(parameters: *mut JailParam, count: libc::c_uint);
+    fn jail_attach(jid: libc::c_int) -> libc::c_int;
+    fn jail_remove(jid: libc::c_int) -> libc::c_int;
 }
 
-fn enter_nested_jail(no_network: bool) -> Result<()> {
-    let network = if no_network { "disable" } else { "inherit" };
-    let entries = [
-        ("path", "."),
-        ("host.hostname", "freebsd-flatpak"),
-        ("ip4", network),
-        ("ip6", network),
-    ];
+fn set_jail_parameters(entries: &[(&str, &std::ffi::CStr)], flags: libc::c_int) -> Result<i32> {
     let names = entries
         .iter()
         .map(|(name, _)| std::ffi::CString::new(*name))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let values = entries
-        .iter()
-        .map(|(_, value)| std::ffi::CString::new(*value))
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let mut parameters = entries
         .iter()
@@ -368,7 +377,11 @@ fn enter_nested_jail(no_network: bool) -> Result<()> {
             flags: 0,
         })
         .collect::<Vec<_>>();
-    for ((parameter, name), value) in parameters.iter_mut().zip(&names).zip(&values) {
+    for ((parameter, name), value) in parameters
+        .iter_mut()
+        .zip(&names)
+        .zip(entries.iter().map(|(_, value)| *value))
+    {
         if unsafe { jailparam_init(parameter, name.as_ptr()) } < 0
             || unsafe { jailparam_import(parameter, value.as_ptr()) } < 0
         {
@@ -376,25 +389,253 @@ fn enter_nested_jail(no_network: bool) -> Result<()> {
             return Err(io::Error::last_os_error()).context("prepare nested sandbox jail");
         }
     }
-    // The helper anchored its cwd to the validated sandbox root before this
-    // call, so `path=.` cannot be redirected by an untrusted pathname.
+    let result = unsafe {
+        jailparam_set(
+            parameters.as_mut_ptr(),
+            parameters.len().try_into().expect("jail option limit"),
+            flags,
+        )
+    };
+    unsafe { jailparam_free(parameters.as_mut_ptr(), parameters.len() as _) };
+    if result < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    Ok(result)
+}
+
+fn create_nested_jail(no_network: bool) -> Result<(i32, OwnedFd)> {
+    let path = std::ffi::CString::new(".")?;
+    let network = if no_network { "disable" } else { "inherit" };
+    let hostname = std::ffi::CString::new("freebsd-flatpak")?;
+    let ip4 = std::ffi::CString::new(network)?;
+    let ip6 = std::ffi::CString::new(network)?;
+    let persist = std::ffi::CString::new("true")?;
+    let entries = [
+        ("path", path.as_c_str()),
+        ("host.hostname", hostname.as_c_str()),
+        ("ip4", ip4.as_c_str()),
+        ("ip6", ip6.as_c_str()),
+        ("persist", persist.as_c_str()),
+    ];
+    let names = entries
+        .iter()
+        .map(|(name, _)| std::ffi::CString::new(*name))
+        .chain(std::iter::once(Ok(
+            std::ffi::CString::new("desc").expect("static jail parameter")
+        )))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut parameters = names
+        .iter()
+        .map(|_| JailParam {
+            name: std::ptr::null_mut(),
+            value: std::ptr::null_mut(),
+            value_len: 0,
+            element_len: 0,
+            control_type: 0,
+            struct_type: 0,
+            flags: 0,
+        })
+        .collect::<Vec<_>>();
+    for ((parameter, name), value) in parameters[..entries.len()]
+        .iter_mut()
+        .zip(&names)
+        .zip(entries.iter().map(|(_, value)| *value))
+    {
+        if unsafe { jailparam_init(parameter, name.as_ptr()) } < 0
+            || unsafe { jailparam_import(parameter, value.as_ptr()) } < 0
+        {
+            unsafe { jailparam_free(parameters.as_mut_ptr(), parameters.len() as _) };
+            return Err(io::Error::last_os_error()).context("prepare nested sandbox jail");
+        }
+    }
+    let descriptor = parameters.last_mut().expect("jail descriptor parameter");
+    let descriptor_name = names.last().expect("jail descriptor name");
+    let mut owner = -1;
+    if unsafe { jailparam_init(descriptor, descriptor_name.as_ptr()) } < 0
+        || unsafe {
+            jailparam_import_raw(
+                descriptor,
+                (&mut owner as *mut i32).cast(),
+                std::mem::size_of_val(&owner),
+            )
+        } < 0
+    {
+        unsafe { jailparam_free(parameters.as_mut_ptr(), parameters.len() as _) };
+        return Err(io::Error::last_os_error()).context("prepare nested sandbox jail");
+    }
     let jail = unsafe {
         jailparam_set(
             parameters.as_mut_ptr(),
             parameters.len().try_into().expect("jail option limit"),
-            libc::JAIL_CREATE | libc::JAIL_ATTACH,
+            libc::JAIL_CREATE | JAIL_OWN_DESC,
         )
     };
     unsafe { jailparam_free(parameters.as_mut_ptr(), parameters.len() as _) };
     if jail < 0 {
-        let uid = unsafe { libc::getuid() };
-        let effective_uid = unsafe { libc::geteuid() };
-        return Err(io::Error::last_os_error()).with_context(|| {
-            format!("create nested sandbox jail (uid={uid}, effective uid={effective_uid})")
-        });
+        return Err(io::Error::last_os_error()).context("create nested sandbox jail");
+    }
+    if owner < 0 {
+        bail!("nested sandbox jail did not return an owning descriptor");
+    }
+    Ok((jail, unsafe { OwnedFd::from_raw_fd(owner) }))
+}
+
+fn clear_nested_jail_persistence(jail: i32) -> Result<()> {
+    let jail = std::ffi::CString::new(jail.to_string())?;
+    let persist = std::ffi::CString::new("false")?;
+    set_jail_parameters(
+        &[("jid", jail.as_c_str()), ("persist", persist.as_c_str())],
+        libc::JAIL_UPDATE,
+    )
+    .context("clear nested sandbox jail persistence")?;
+    Ok(())
+}
+
+fn write_all_fd(fd: RawFd, bytes: &[u8]) -> Result<()> {
+    let mut bytes = bytes;
+    while !bytes.is_empty() {
+        let written =
+            unsafe { libc::send(fd, bytes.as_ptr().cast(), bytes.len(), libc::MSG_NOSIGNAL) };
+        if written < 0 {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(io::Error::last_os_error()).context("write nested jail lifecycle");
+        }
+        if written == 0 {
+            bail!("nested jail lifecycle closed unexpectedly");
+        }
+        bytes = &bytes[written as usize..];
     }
     Ok(())
 }
+
+fn read_exact_fd(fd: RawFd, mut bytes: &mut [u8]) -> Result<()> {
+    while !bytes.is_empty() {
+        let read = unsafe { libc::read(fd, bytes.as_mut_ptr().cast(), bytes.len()) };
+        if read < 0 {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(io::Error::last_os_error()).context("read nested jail lifecycle");
+        }
+        if read == 0 {
+            bail!("nested jail lifecycle closed unexpectedly");
+        }
+        let (_, remaining) = bytes.split_at_mut(read as usize);
+        bytes = remaining;
+    }
+    Ok(())
+}
+
+fn send_nested_jail_lifecycle(fd: RawFd, jail: i32, owner: RawFd) -> Result<()> {
+    let jail = jail.to_ne_bytes();
+    let mut iov = libc::iovec {
+        iov_base: jail.as_ptr().cast_mut().cast(),
+        iov_len: jail.len(),
+    };
+    let mut control =
+        vec![0u8; unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as _) as usize }];
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = &mut iov;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    message.msg_controllen = control.len() as _;
+    let cmsg = unsafe { libc::CMSG_FIRSTHDR(&message) };
+    if cmsg.is_null() {
+        bail!("prepare nested jail lifecycle descriptor");
+    }
+    unsafe {
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as _) as _;
+        *libc::CMSG_DATA(cmsg).cast::<RawFd>() = owner;
+    }
+    let sent = unsafe { libc::sendmsg(fd, &message, libc::MSG_NOSIGNAL) };
+    if sent != jail.len() as isize {
+        if sent == 0 {
+            bail!("nested jail lifecycle closed unexpectedly");
+        }
+        return Err(io::Error::last_os_error()).context("send nested jail lifecycle");
+    }
+    Ok(())
+}
+
+fn receive_nested_jail_lifecycle(fd: RawFd) -> Result<(i32, OwnedFd)> {
+    let mut jail = [0; std::mem::size_of::<i32>()];
+    let mut iov = libc::iovec {
+        iov_base: jail.as_mut_ptr().cast(),
+        iov_len: jail.len(),
+    };
+    let mut control =
+        vec![0u8; unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as _) as usize }];
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = &mut iov;
+    message.msg_iovlen = 1;
+    message.msg_control = control.as_mut_ptr().cast();
+    message.msg_controllen = control.len() as _;
+    let received = unsafe { libc::recvmsg(fd, &mut message, 0) };
+    if received != jail.len() as isize {
+        unsafe { close_nested_control_fds(&message) };
+        if received < 0 {
+            return Err(io::Error::last_os_error()).context("receive nested jail lifecycle");
+        }
+        bail!("nested jail lifecycle closed unexpectedly");
+    }
+    let cmsg = unsafe { libc::CMSG_FIRSTHDR(&message) };
+    if message.msg_flags & libc::MSG_CTRUNC != 0
+        || cmsg.is_null()
+        || unsafe {
+            (*cmsg).cmsg_level != libc::SOL_SOCKET
+                || (*cmsg).cmsg_type != libc::SCM_RIGHTS
+                || (*cmsg).cmsg_len != libc::CMSG_LEN(std::mem::size_of::<RawFd>() as _) as _
+                || !libc::CMSG_NXTHDR(&message, cmsg).is_null()
+        }
+    {
+        unsafe { close_nested_control_fds(&message) };
+        bail!("invalid nested jail lifecycle descriptor");
+    }
+    let owner = unsafe { *libc::CMSG_DATA(cmsg).cast::<RawFd>() };
+    if owner < 0 {
+        unsafe { close_nested_control_fds(&message) };
+        bail!("invalid nested jail lifecycle descriptor");
+    }
+    Ok((i32::from_ne_bytes(jail), unsafe {
+        OwnedFd::from_raw_fd(owner)
+    }))
+}
+
+fn synchronize_nested_jail(fd: RawFd, jail: i32, owner: OwnedFd) -> Result<()> {
+    send_nested_jail_lifecycle(fd, jail, owner.as_raw_fd())?;
+    let mut approved = [0];
+    read_exact_fd(fd, &mut approved)?;
+    if approved != [1] {
+        bail!("nested jail supervisor rejected launch");
+    }
+    Ok(())
+}
+
+fn nested_jail_lifecycle_socket() -> Result<(OwnedFd, OwnedFd)> {
+    let mut sockets = [-1; 2];
+    if unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+            0,
+            sockets.as_mut_ptr(),
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error()).context("create nested jail lifecycle socket");
+    }
+    Ok(unsafe {
+        (
+            OwnedFd::from_raw_fd(sockets[0]),
+            OwnedFd::from_raw_fd(sockets[1]),
+        )
+    })
+}
+
 fn required(args: &mut impl Iterator<Item = OsString>, label: &str) -> Result<OsString> {
     args.next().with_context(|| format!("missing {label}"))
 }
@@ -717,28 +958,61 @@ fn serve_nested_request(fd: RawFd) -> Result<()> {
     if request.mapped_fds.len() != fds.len() {
         bail!("nested request descriptor count does not match mappings");
     }
+    let (parent_lifecycle, child_lifecycle) = nested_jail_lifecycle_socket()?;
     let child = unsafe { libc::fork() };
     if child < 0 {
         return Err(io::Error::last_os_error()).context("fork nested sandbox child");
     }
     if child == 0 {
+        drop(parent_lifecycle);
+        unsafe { libc::close(fd) };
         let targets = request.mapped_fds.clone();
-        if let Err(error) = request.execute_with_mappings(uid, gid, &targets, &fds) {
+        if let Err(error) = request.execute_with_mappings(
+            uid,
+            gid,
+            &targets,
+            &fds,
+            Some(child_lifecycle.as_raw_fd()),
+        ) {
             eprintln!("freebsd-flatpak secure-launch child: {error:#}");
         }
         unsafe { libc::_exit(127) };
     }
+    drop(child_lifecycle);
     drop(fds);
+    let mut child_wait_started = false;
+    let result = (|| {
+        let (jail, owner) = receive_nested_jail_lifecycle(parent_lifecycle.as_raw_fd())?;
+        if let Err(error) = clear_nested_jail_persistence(jail) {
+            unsafe { jail_remove(jail) };
+            return Err(error);
+        }
+        if let Err(error) = write_all_fd(parent_lifecycle.as_raw_fd(), &[1]) {
+            unsafe { jail_remove(jail) };
+            return Err(error);
+        }
+        child_wait_started = true;
+        let status = wait_for_nested_child(child)?;
+        drop(owner);
+        write_status(fd, status as u32)
+    })();
+    if result.is_err() && !child_wait_started {
+        unsafe { libc::kill(child, libc::SIGKILL) };
+        let _ = wait_for_nested_child(child);
+    }
+    result
+}
+
+fn wait_for_nested_child(child: libc::pid_t) -> Result<i32> {
     let mut status = 0;
     loop {
         if unsafe { libc::waitpid(child, &mut status, 0) } >= 0 {
-            break;
+            return Ok(status);
         }
         if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
             return Err(io::Error::last_os_error()).context("wait nested sandbox child");
         }
     }
-    write_status(fd, status as u32)
 }
 
 fn account_groups(uid: libc::uid_t, primary_gid: libc::gid_t) -> Result<HashSet<u32>> {
