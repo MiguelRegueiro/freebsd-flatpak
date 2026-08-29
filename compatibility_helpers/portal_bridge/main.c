@@ -99,6 +99,7 @@ int main(int argc, char **argv) {
       .flatpak_node = NULL,
       .enable_host_command = enable_host_command,
       .spawn_lifecycles = g_ptr_array_new_with_free_func((GDestroyNotify)flatpak_spawn_lifecycle_free),
+      .spawn_sender_roots = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, flatpak_spawn_sender_root_free),
   };
   if (state.host_bus == NULL || state.desktop_node == NULL) {
     fprintf(stderr, "portal bridge setup failed: %s\n", error->message);
@@ -164,6 +165,8 @@ int main(int argc, char **argv) {
   host_command_service_cleanup(&state.host_command);
 
   flatpak_spawn_cleanup_lifecycles(&state);
+  g_hash_table_destroy(state.spawn_sender_roots);
+  state.spawn_sender_roots = NULL;
 
   portal_bridge_process_cleanup_documents(&state);
   for (guint i = 0; i < state.request_store.requests->len; i++) {

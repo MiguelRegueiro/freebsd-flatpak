@@ -116,6 +116,7 @@ struct _PortalBridgeProcess {
   guint local_name_signal_id;
   bool local_objects_registered;
   GPtrArray *spawn_lifecycles;
+  GHashTable *spawn_sender_roots;
 };
 void log_line(const char *fmt, ...);
 void diagnostic_line(const char *fmt, ...);

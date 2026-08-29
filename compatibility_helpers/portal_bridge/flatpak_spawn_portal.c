@@ -31,10 +31,13 @@ static char *sender_root(BridgeState *state, const char *sender) {
       G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
   if (reply == NULL) { g_clear_error(&error); return NULL; }
   guint32 pid; g_variant_get(reply, "(u)", &pid); g_variant_unref(reply);
-  gchar *command = g_strdup_printf("/usr/bin/procstat -f %u", pid);
+  gchar *pid_text = g_strdup_printf("%u", pid);
+  gchar *argv[] = {"/usr/bin/procstat", "-f", pid_text, NULL};
   gchar *stdout_text = NULL;
-  gboolean ok = g_spawn_command_line_sync(command, &stdout_text, NULL, NULL, &error);
-  g_free(command); if (!ok) { g_clear_error(&error); return NULL; }
+  gboolean ok = g_spawn_sync(NULL, argv, NULL, G_SPAWN_STDERR_TO_DEV_NULL,
+                             NULL, NULL, &stdout_text, NULL, NULL, &error);
+  g_free(pid_text);
+  if (!ok) { g_clear_error(&error); return NULL; }
   char **lines = g_strsplit(stdout_text, "\\n", -1); char *root = NULL;
   for (guint i = 0; lines[i] != NULL; i++) {
     char **fields = g_strsplit_set(lines[i], " \\t", -1); char *dense[64]; guint n = 0;
@@ -50,12 +53,12 @@ static char *sender_root(BridgeState *state, const char *sender) {
   g_strfreev(lines); g_free(stdout_text); return root;
 }
 
-/* Some zypak callers exit immediately after issuing Spawn, before procstat can
- * inspect their PID. The bridge itself registers each live instance's document
- * root. A unique registration is therefore an authenticated, unambiguous
- * fallback; concurrent instances intentionally remain rejected. */
-static char *unique_registered_root(BridgeState *state) {
+/* The sender-root cache below handles callers that disconnect immediately.
+ * This unique registration fallback is retained only for callers that connected
+ * before the bridge observed their NameOwnerChanged signal. */
+static char *unique_registered_root(BridgeState *state, guint *valid_count) {
   char *root = NULL;
+  *valid_count = 0;
   gsize suffix_length = strlen(state->documents.mountpoint);
   for (guint i = 0; i < state->documents.sandbox_doc_dirs->len; i++) {
     const char *doc_dir = g_ptr_array_index(state->documents.sandbox_doc_dirs, i);
@@ -69,10 +72,67 @@ static char *unique_registered_root(BridgeState *state) {
       g_free(candidate);
       continue;
     }
+    (*valid_count)++;
     if (root != NULL) { g_free(root); g_free(candidate); return NULL; }
     root = candidate;
   }
   return root;
+}
+
+#define SPAWN_SENDER_ROOT_CACHE_LIMIT 256
+#define SPAWN_SENDER_ROOT_CACHE_TTL_USEC (30 * G_USEC_PER_SEC)
+
+typedef struct {
+  char *root;
+  gint64 expires_at;
+} SpawnSenderRoot;
+
+void flatpak_spawn_sender_root_free(gpointer data) {
+  SpawnSenderRoot *entry = data;
+  if (entry == NULL) return;
+  g_free(entry->root);
+  g_free(entry);
+}
+
+static void prune_sender_root_cache(BridgeState *state, gint64 now) {
+  if (state->spawn_sender_roots == NULL) return;
+  GHashTableIter iter; gpointer key = NULL, value = NULL;
+  g_hash_table_iter_init(&iter, state->spawn_sender_roots);
+  while (g_hash_table_iter_next(&iter, &key, &value)) {
+    SpawnSenderRoot *entry = value;
+    if (entry->expires_at <= now) g_hash_table_iter_remove(&iter);
+  }
+}
+
+static void cache_sender_root_value(BridgeState *state, const char *sender, char *root) {
+  if (root == NULL) return;
+  if (state->spawn_sender_roots == NULL || sender == NULL || sender[0] != ':') {
+    g_free(root);
+    return;
+  }
+  gint64 now = g_get_monotonic_time();
+  prune_sender_root_cache(state, now);
+  if (g_hash_table_size(state->spawn_sender_roots) >= SPAWN_SENDER_ROOT_CACHE_LIMIT &&
+      !g_hash_table_contains(state->spawn_sender_roots, sender)) {
+    g_free(root);
+    return;
+  }
+  SpawnSenderRoot *entry = g_new0(SpawnSenderRoot, 1);
+  entry->root = root;
+  entry->expires_at = now + SPAWN_SENDER_ROOT_CACHE_TTL_USEC;
+  g_hash_table_replace(state->spawn_sender_roots, g_strdup(sender), entry);
+}
+
+void flatpak_spawn_cache_sender_root(BridgeState *state, const char *sender) {
+  cache_sender_root_value(state, sender, sender_root(state, sender));
+}
+
+static char *cached_sender_root(BridgeState *state, const char *sender) {
+  if (state->spawn_sender_roots == NULL || sender == NULL) return NULL;
+  gint64 now = g_get_monotonic_time();
+  prune_sender_root_cache(state, now);
+  SpawnSenderRoot *entry = g_hash_table_lookup(state->spawn_sender_roots, sender);
+  return entry == NULL ? NULL : g_strdup(entry->root);
 }
 
 static bool broker_send_packet(int fd, guint16 type, guint32 request,
@@ -202,8 +262,14 @@ static bool path_is_descendant(const char *path, const char *parent) {
 
 static int broker_connect(BridgeState *state, const char *sender) {
   char *root = sender_root(state, sender);
-  if (!root) root = unique_registered_root(state);
-  if (!root) { diagnostic_line("Flatpak Spawn rejected: cannot resolve caller root"); return -1; }
+  if (root != NULL) cache_sender_root_value(state, sender, g_strdup(root));
+  if (root == NULL) root = cached_sender_root(state, sender);
+  guint registered_instances = 0;
+  if (root == NULL) root = unique_registered_root(state, &registered_instances);
+  if (root == NULL) {
+    diagnostic_line("Flatpak Spawn rejected: cannot resolve caller root (registered_instances=%u)", registered_instances);
+    return -1;
+  }
   char *chroots = g_path_get_dirname(state->documents.sandbox_root);
   char *canonical_root = realpath(root, NULL); char *canonical_chroots = realpath(chroots, NULL);
   g_free(root); g_free(chroots);
@@ -310,7 +376,7 @@ static void call(GDBusConnection *c, const gchar *s, const gchar *p,
   }
   GVariant *cwd = NULL, *argv = NULL, *fd_map = NULL, *envs = NULL, *options = NULL; guint32 flags;
   g_variant_get(v, "(@ay@aay@a{uh}@a{ss}u@a{sv})", &cwd, &argv, &fd_map, &envs, &flags, &options);
-  diagnostic_line("Flatpak Spawn flags=%u argv=%" G_GSIZE_FORMAT " fds=%" G_GSIZE_FORMAT " options=%" G_GSIZE_FORMAT, flags, g_variant_n_children(argv), g_variant_n_children(fd_map), g_variant_n_children(options));
+  diagnostic_line("Flatpak Spawn request=1 flags=%u cwd_bytes=%" G_GSIZE_FORMAT " argv_count=%" G_GSIZE_FORMAT " environment_count=%" G_GSIZE_FORMAT " fd_mappings=%" G_GSIZE_FORMAT " options=%" G_GSIZE_FORMAT, flags, g_variant_n_children(cwd), g_variant_n_children(argv), g_variant_n_children(envs), g_variant_n_children(fd_map), g_variant_n_children(options));
   if ((flags & ~0x1fU) != 0) {
     g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.portal.Error.NotAllowed", "Unsupported Flatpak Spawn flags");
     g_variant_unref(cwd); g_variant_unref(argv); g_variant_unref(fd_map); g_variant_unref(envs); g_variant_unref(options); return;
@@ -326,7 +392,9 @@ static void call(GDBusConnection *c, const gchar *s, const gchar *p,
     g_dbus_method_invocation_return_gerror(inv, error); g_error_free(error);
   } else {
     int fd = broker_connect(state, s); guint32 pid = 0;
-    bool accepted = fd >= 0 && broker_send_packet(fd, 8, 1, payload->data, payload->len, (const int *)fds->data, fds->len) && broker_spawn_accepted(fd, 1, &pid);
+    bool sent = fd >= 0 && broker_send_packet(fd, 8, 1, payload->data, payload->len, (const int *)fds->data, fds->len);
+    bool accepted = sent && broker_spawn_accepted(fd, 1, &pid);
+    if (!accepted) diagnostic_line("Flatpak Spawn broker rejection request=1 stage=%s payload_bytes=%" G_GSIZE_FORMAT " fd_mappings=%u", fd < 0 ? "connect" : (!sent ? "send" : "reply"), payload->len, fds->len);
     g_byte_array_unref(payload); close_fd_array(fds);
     if (!accepted) { if (fd >= 0) close(fd); g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.portal.Error.Failed", "Spawn broker rejected request"); }
     else { diagnostic_line("Flatpak Spawn accepted pid=%u", pid); flatpak_spawn_watch_lifecycle(state, fd, 1, pid, s); g_dbus_method_invocation_return_value(inv, g_variant_new("(u)", pid)); }

@@ -24,6 +24,7 @@ void diagnostic_line(const char *fmt, ...) {
   fputs("portal bridge: ", stdout);
   vfprintf(stdout, fmt, ap);
   fputc('\n', stdout);
+  fflush(stdout);
   va_end(ap);
 }
 
@@ -136,8 +137,12 @@ void on_local_name_owner_changed(GDBusConnection *connection,
   const char *old_owner = NULL;
   const char *new_owner = NULL;
   g_variant_get(parameters, "(&s&s&s)", &name, &old_owner, &new_owner);
-  if (name[0] == ':' && old_owner[0] != '\0' && new_owner[0] == '\0') {
-    portal_bridge_process_close_client_resources(user_data, name);
+  BridgeState *state = user_data;
+  if (name[0] == ':' && old_owner[0] == 0 && new_owner[0] != 0) {
+    flatpak_spawn_cache_sender_root(state, name);
+  }
+  if (name[0] == ':' && old_owner[0] != 0 && new_owner[0] == 0) {
+    portal_bridge_process_close_client_resources(state, name);
   }
 }
 

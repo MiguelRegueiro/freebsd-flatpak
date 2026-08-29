@@ -476,41 +476,60 @@ fn decode_bytes(payload: &[u8], offset: &mut usize, allow_empty: bool) -> Option
     Some(value.to_vec())
 }
 
-fn parse_spawn(payload: &[u8], fds: Vec<OwnedFd>) -> Option<SpawnRequest> {
+fn parse_spawn(
+    payload: &[u8],
+    fds: Vec<OwnedFd>,
+) -> std::result::Result<SpawnRequest, &'static str> {
     let mut offset = 0;
-    let cwd = decode_bytes(payload, &mut offset, true)?;
-    let argc = usize::try_from(decode_u32(payload, &mut offset)?).ok()?;
-    let envc = usize::try_from(decode_u32(payload, &mut offset)?).ok()?;
-    let mapping_count = usize::try_from(decode_u32(payload, &mut offset)?).ok()?;
-    let flags = decode_u32(payload, &mut offset)?;
-    if argc == 0 || mapping_count != fds.len() || argc > 256 || envc > 256 {
-        return None;
+    let cwd = decode_bytes(payload, &mut offset, true).ok_or("invalid cwd")?;
+    let argc = usize::try_from(decode_u32(payload, &mut offset).ok_or("missing argument count")?)
+        .map_err(|_| "invalid argument count")?;
+    let envc =
+        usize::try_from(decode_u32(payload, &mut offset).ok_or("missing environment count")?)
+            .map_err(|_| "invalid environment count")?;
+    let mapping_count =
+        usize::try_from(decode_u32(payload, &mut offset).ok_or("missing fd mapping count")?)
+            .map_err(|_| "invalid fd mapping count")?;
+    let flags = decode_u32(payload, &mut offset).ok_or("missing flags")?;
+    if argc == 0 || argc > 256 {
+        return Err("invalid argument count");
+    }
+    if envc > 256 {
+        return Err("invalid environment count");
+    }
+    if mapping_count != fds.len() {
+        return Err("fd mapping count mismatch");
     }
     let mut argv = Vec::with_capacity(argc);
     for _ in 0..argc {
-        argv.push(decode_bytes(payload, &mut offset, false)?);
+        argv.push(decode_bytes(payload, &mut offset, false).ok_or("invalid argument")?);
     }
     let mut environment = Vec::with_capacity(envc);
     for _ in 0..envc {
-        let key = decode_bytes(payload, &mut offset, false)?;
+        let key = decode_bytes(payload, &mut offset, false).ok_or("invalid environment key")?;
         if key.contains(&b'=') {
-            return None;
+            return Err("invalid environment key");
         }
-        environment.push((key, decode_bytes(payload, &mut offset, true)?));
+        let value = decode_bytes(payload, &mut offset, true).ok_or("invalid environment value")?;
+        environment.push((key, value));
     }
     let mut targets = HashSet::with_capacity(mapping_count);
     let mut mappings = Vec::with_capacity(mapping_count);
     for source in fds {
-        let target = i32::try_from(decode_u32(payload, &mut offset)?).ok()?;
-        if !(0..=MAX_TARGET_FD).contains(&target) || !targets.insert(target) {
-            return None;
+        let target = i32::try_from(decode_u32(payload, &mut offset).ok_or("missing fd target")?)
+            .map_err(|_| "invalid fd target")?;
+        if !(0..=MAX_TARGET_FD).contains(&target) {
+            return Err("invalid fd target");
+        }
+        if !targets.insert(target) {
+            return Err("duplicate fd target");
         }
         mappings.push((target, source));
     }
     if offset != payload.len() {
-        return None;
+        return Err("trailing payload bytes");
     }
-    Some(SpawnRequest {
+    Ok(SpawnRequest {
         flags,
         cwd: (!cwd.is_empty()).then_some(cwd),
         argv,
@@ -671,14 +690,22 @@ unsafe fn handle_connection(
                     }
                 }
                 SPAWN => {
-                    let Some(spawn_request) = parse_spawn(&packet[HEADER_SIZE..], fds) else {
-                        connections.release(fd);
-                        return;
+                    let payload = &packet[HEADER_SIZE..];
+                    let passed_fds = fds.len();
+                    let spawn_request = match parse_spawn(payload, fds) {
+                        Ok(request) => request,
+                        Err(reason) => {
+                            eprintln!("spawn broker rejected request {request}: stage=parse reason={reason} payload_bytes={} passed_fds={}", payload.len(), passed_fds);
+                            connections.release(fd);
+                            return;
+                        }
                     };
+                    let cwd_bytes = spawn_request.cwd.as_ref().map_or(0, Vec::len);
+                    eprintln!("spawn broker request {request}: flags={} cwd_bytes={cwd_bytes} argv_count={} environment_count={} fd_mappings={} payload_bytes={}", spawn_request.flags, spawn_request.argv.len(), spawn_request.environment.len(), spawn_request.mappings.len(), payload.len());
                     let mut child = match spawn_in_existing_sandbox(&context, spawn_request) {
                         Ok(child) => child,
                         Err(error) => {
-                            eprintln!("spawn broker rejected request {request}: {error:#}");
+                            eprintln!("spawn broker rejected request {request}: stage=launch error={error:#}");
                             connections.release(fd);
                             return;
                         }
@@ -876,7 +903,7 @@ mod tests {
         payload.extend_from_slice(b"x");
         payload.extend_from_slice(&3u32.to_be_bytes());
         payload.extend_from_slice(&3u32.to_be_bytes());
-        assert!(parse_spawn(&payload, vec![a, b]).is_none());
+        assert!(parse_spawn(&payload, vec![a, b]).is_err());
     }
     #[test]
     fn lifecycle_messages_share_one_connection() {
