@@ -8,6 +8,10 @@ fn read_only_network_manager_contract_over_private_bus() {
         "freebsd-flatpak-network-manager-compat-test-{}",
         std::process::id()
     ));
+    let trace = std::env::temp_dir().join(format!(
+        "freebsd-flatpak-network-manager-compat-test-{}-trace.log",
+        std::process::id()
+    ));
     let pkg_config = Command::new("pkg-config")
         .args(["--cflags", "--libs", "gio-2.0", "gio-unix-2.0", "glib-2.0"])
         .output()
@@ -32,8 +36,10 @@ fn read_only_network_manager_contract_over_private_bus() {
     );
 
     let script = r#"
+set -e
 helper=$1
-"$helper" --address "$DBUS_SESSION_BUS_ADDRESS" &
+trace=$2
+"$helper" --address "$DBUS_SESSION_BUS_ADDRESS" --trace-file "$trace" &
 helper_pid=$!
 trap 'kill "$helper_pid" 2>/dev/null || true; wait "$helper_pid" 2>/dev/null || true' EXIT HUP INT TERM
 
@@ -53,6 +59,10 @@ done
 [ "$ready" = true ]
 
 gdbus call --session --dest org.freedesktop.NetworkManager \
+    --object-path /org/freedesktop \
+    --method org.freedesktop.DBus.ObjectManager.GetManagedObjects
+
+gdbus call --session --dest org.freedesktop.NetworkManager \
     --object-path /org/freedesktop/NetworkManager \
     --method org.freedesktop.DBus.Properties.Get \
     org.freedesktop.NetworkManager Version
@@ -61,6 +71,27 @@ gdbus call --session --dest org.freedesktop.NetworkManager \
     --object-path /org/freedesktop/NetworkManager/Settings \
     --method org.freedesktop.NetworkManager.Settings.ListConnections
 
+gdbus call --session --dest org.freedesktop.NetworkManager \
+    --object-path /org/freedesktop/NetworkManager/Settings \
+    --method org.freedesktop.NetworkManager.Settings.AddConnectionUnsaved \
+    "{'connection': {'id': <'test'>, 'type': <'dummy'>}}"
+gdbus call --session --dest org.freedesktop.NetworkManager \
+    --object-path /org/freedesktop \
+    --method org.freedesktop.DBus.ObjectManager.GetManagedObjects | grep -q /org/freedesktop/NetworkManager/Settings/1
+gdbus call --session --dest org.freedesktop.NetworkManager \
+    --object-path /org/freedesktop/NetworkManager/Settings \
+    --method org.freedesktop.DBus.Properties.Get \
+    org.freedesktop.NetworkManager.Settings Connections | grep -q /org/freedesktop/NetworkManager/Settings/1
+gdbus call --session --dest org.freedesktop.NetworkManager \
+    --object-path /org/freedesktop/NetworkManager/Settings/1 \
+    --method org.freedesktop.NetworkManager.Settings.Connection.GetSettings | grep -q test
+
+gdbus call --session --dest org.freedesktop.NetworkManager \
+    --object-path /org/freedesktop/NetworkManager/Settings/1 \
+    --method org.freedesktop.NetworkManager.Settings.Connection.Delete
+gdbus call --session --dest org.freedesktop.NetworkManager \
+    --object-path /org/freedesktop \
+    --method org.freedesktop.DBus.ObjectManager.GetManagedObjects | grep -vq /org/freedesktop/NetworkManager/Settings/1
 if mutation_error=$(gdbus call --session \
     --dest org.freedesktop.NetworkManager \
     --object-path /org/freedesktop/NetworkManager \
@@ -74,9 +105,12 @@ echo "$mutation_error" | grep -q org.freedesktop.NetworkManager.Error.NotSupport
     let result = Command::new("dbus-run-session")
         .args(["--", "/bin/sh", "-c", script, "network-manager-test"])
         .arg(&output)
+        .arg(&trace)
         .output()
         .expect("run NetworkManager compatibility service test");
+    let trace_output = std::fs::read_to_string(&trace).expect("read NetworkManager trace");
     let _ = std::fs::remove_file(&output);
+    let _ = std::fs::remove_file(&trace);
 
     assert!(
         result.status.success(),
@@ -88,6 +122,17 @@ echo "$mutation_error" | grep -q org.freedesktop.NetworkManager.Error.NotSupport
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stdout.contains("1.40.18-freebsd-compat"));
     assert!(stdout.contains("@ao []"));
-    assert!(stderr.contains("org.freedesktop.DBus.Properties.Get"));
-    assert!(stderr.contains("org.freedesktop.NetworkManager.Settings.ListConnections"));
+    assert!(stdout.contains("/org/freedesktop/NetworkManager"));
+    assert!(stdout.contains("/org/freedesktop/NetworkManager/Settings/1"));
+    assert!(trace_output.contains("member=InterfacesAdded"));
+    assert!(trace_output.contains("member=InterfacesRemoved"));
+    for trace in [&stderr[..], &trace_output] {
+        assert!(trace.contains("interface=org.freedesktop.DBus.ObjectManager"));
+        assert!(trace.contains("member=GetManagedObjects"));
+        assert!(trace.contains("interface=org.freedesktop.DBus.Properties"));
+        assert!(trace.contains("member=Get"));
+        assert!(trace.contains("interface=org.freedesktop.NetworkManager.Settings"));
+        assert!(trace.contains("member=ListConnections"));
+        assert!(trace.contains("member=AddConnectionUnsaved"));
+    }
 }

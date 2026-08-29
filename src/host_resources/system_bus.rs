@@ -85,6 +85,13 @@ impl HostSystemBus {
         command
             .arg("--address")
             .arg(address)
+            .arg("--trace-file")
+            .arg(
+                self.directory
+                    .as_ref()
+                    .expect("system bus directory")
+                    .join("network-manager-compat.log"),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
