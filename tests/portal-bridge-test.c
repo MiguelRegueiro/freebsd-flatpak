@@ -1,4 +1,5 @@
 #include "../compatibility_helpers/portal_bridge/basic_desktop_portals.h"
+#include "../compatibility_helpers/portal_bridge/flatpak_spawn_portal.h"
 #include "../compatibility_helpers/portal_bridge/document_grant_store.h"
 #include "../compatibility_helpers/portal_bridge/document_grant_persistence.h"
 #include "../compatibility_helpers/portal_bridge/document_mounts.h"
@@ -11,6 +12,7 @@
 #include "../compatibility_helpers/portal_bridge/screencast_portal.h"
 #include "../compatibility_helpers/status_notifier_bridge/status_notifier_watcher.h"
 #include "../compatibility_helpers/status_notifier_bridge/icon_resolver.h"
+#include <arpa/inet.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 
 typedef struct {
@@ -93,6 +95,23 @@ bool mount_grant_path(const char *source, const char *target, bool read_only,
 bool unmount_path(const char *target) {
   (void)target;
   return true;
+}
+
+static void test_flatpak_spawn_contract(void) {
+  GError *error = NULL;
+  GDBusNodeInfo *node = g_dbus_node_info_new_for_xml(FLATPAK_SPAWN_XML, &error);
+  g_assert_no_error(error);
+  GDBusInterfaceInfo *iface = g_dbus_node_info_lookup_interface(node, "org.freedesktop.portal.Flatpak");
+  g_assert_nonnull(iface);
+  GDBusMethodInfo *spawn = g_dbus_interface_info_lookup_method(iface, "Spawn");
+  g_assert_nonnull(spawn);
+  const char *expected[] = {"ay", "aay", "a{uh}", "a{ss}", "u", "a{sv}"};
+  for (guint i = 0; i < 6; i++) g_assert_cmpstr(spawn->in_args[i]->signature, ==, expected[i]);
+  g_assert_cmpstr(spawn->out_args[0]->signature, ==, "u");
+  g_assert_cmpstr(g_dbus_interface_info_lookup_method(iface, "SpawnSignal")->in_args[1]->signature, ==, "u");
+  g_assert_cmpstr(g_dbus_interface_info_lookup_signal(iface, "SpawnStarted")->args[1]->signature, ==, "u");
+  g_assert_cmpstr(g_dbus_interface_info_lookup_signal(iface, "SpawnExited")->args[1]->signature, ==, "u");
+  g_dbus_node_info_unref(node);
 }
 
 static void test_introspection(void) {
@@ -742,8 +761,29 @@ static void test_status_icon_resolution(void) {
   g_free(root);
 }
 
+static void test_flatpak_lifecycle_source_is_async(void) {
+  int pair[2];
+  g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, pair), ==, 0);
+  BridgeState state = { .spawn_lifecycles = g_ptr_array_new_with_free_func((GDestroyNotify)flatpak_spawn_lifecycle_free) };
+  flatpak_spawn_watch_lifecycle(&state, pair[1], 55, 55, NULL);
+  unsigned char accepted[24] = {0}; guint32 magic = htonl(0x46534250), request = htonl(55), length = htonl(4); guint16 version = htons(1), type = htons(6);
+  memcpy(accepted, &magic, 4); memcpy(accepted + 4, &version, 2); memcpy(accepted + 6, &type, 2); memcpy(accepted + 8, &request, 4); memcpy(accepted + 12, &length, 4); memcpy(accepted + 20, &request, 4);
+  g_assert_cmpint(send(pair[0], accepted, sizeof(accepted), 0), ==, sizeof(accepted));
+  g_main_context_iteration(NULL, TRUE);
+  g_assert_cmpuint(state.spawn_lifecycles->len, ==, 1);
+  unsigned char exited[28] = {0}; type = htons(7); length = htonl(8);
+  memcpy(exited, &magic, 4); memcpy(exited + 4, &version, 2); memcpy(exited + 6, &type, 2); memcpy(exited + 8, &request, 4); memcpy(exited + 12, &length, 4); memcpy(exited + 20, &request, 4);
+  g_assert_cmpint(send(pair[0], exited, sizeof(exited), 0), ==, sizeof(exited));
+  g_main_context_iteration(NULL, TRUE);
+  g_assert_cmpuint(state.spawn_lifecycles->len, ==, 0);
+  close(pair[0]);
+  g_ptr_array_free(state.spawn_lifecycles, TRUE);
+}
+
 int main(void) {
   test_helper_diagnostics_use_stdout_and_warnings_use_stderr();
+  test_flatpak_spawn_contract();
+  test_flatpak_lifecycle_source_is_async();
   test_introspection();
   test_shared_sandbox_scope_validation();
   test_remove_sandbox_is_per_instance_and_idempotent();

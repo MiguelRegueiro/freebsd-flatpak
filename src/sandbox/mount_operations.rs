@@ -5,7 +5,6 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::process::Command;
 
 const STAGING_ROOT: &str = ".freebsd-flatpak-mount-sources";
 
@@ -39,7 +38,7 @@ impl ChrootInstance {
         source: &Path,
         target_relative: &Path,
         read_only: bool,
-        secure_target: bool,
+        _secure_target: bool,
     ) -> Result<()> {
         let source_is_private = source.starts_with(self.root.join(STAGING_ROOT));
         let source = if source_is_private {
@@ -78,31 +77,19 @@ impl ChrootInstance {
             return Ok(());
         }
 
-        if secure_target {
-            let command = secure_mount::nullfs_command(
-                &self.root,
-                identity(&self.root)?,
-                &source,
-                if source_is_private {
-                    None
-                } else {
-                    Some(identity(&source)?)
-                },
-                &target_relative,
-                read_only,
-            )?;
-            run_command(command, &format!("mount nullfs {}", target.display()))?;
-        } else {
-            fs::create_dir_all(&target)
-                .with_context(|| format!("create trusted mount target {}", target.display()))?;
-            let mut command = Command::new("doas");
-            command.arg("mount_nullfs");
-            if read_only {
-                command.arg("-o").arg("ro");
-            }
-            command.arg(&source).arg(&target);
-            run_command(command, &format!("mount nullfs {}", target.display()))?;
-        }
+        let command = secure_mount::nullfs_command(
+            &self.root,
+            identity(&self.root)?,
+            &source,
+            if source_is_private {
+                None
+            } else {
+                Some(identity(&source)?)
+            },
+            &target_relative,
+            read_only,
+        )?;
+        run_command(command, &format!("mount nullfs {}", target.display()))?;
         self.owned_mounts.push(OwnedMount {
             path: target.clone(),
             read_only,
@@ -117,16 +104,16 @@ impl ChrootInstance {
         fs_type: &str,
         source: &str,
     ) -> Result<()> {
-        let target = self.root.join(target_relative);
+        let target = self.root.join(target_relative.as_ref());
         ensure_mountpoint_free(&target)?;
 
-        let mut command = Command::new("doas");
-        command
-            .arg("mount")
-            .arg("-t")
-            .arg(fs_type)
-            .arg(source)
-            .arg(&target);
+        let command = secure_mount::special_command(
+            &self.root,
+            identity(&self.root)?,
+            target_relative.as_ref(),
+            fs_type,
+            source,
+        )?;
         run_command(command, &format!("mount {fs_type} {}", target.display()))?;
         self.owned_mounts.push(OwnedMount {
             path: target,
@@ -143,22 +130,12 @@ impl ChrootInstance {
         let target_relative = target_relative.as_ref();
         let target = self.root.join(target_relative);
         ensure_mountpoint_free(&target)?;
-        let mut mkdir = Command::new("doas");
-        mkdir.arg("mkdir").arg("-p").arg(&target);
-        run_command(
-            mkdir,
-            &format!("create trusted tmpfs target {}", target.display()),
+        let command = secure_mount::tmpfs_command(
+            &self.root,
+            identity(&self.root)?,
+            target_relative,
+            options,
         )?;
-
-        let mut command = Command::new("doas");
-        command
-            .arg("mount")
-            .arg("-t")
-            .arg("tmpfs")
-            .arg("-o")
-            .arg(options)
-            .arg("tmpfs")
-            .arg(&target);
         run_command(command, &format!("mount tmpfs {}", target.display()))?;
         self.owned_mounts.push(OwnedMount {
             path: target,

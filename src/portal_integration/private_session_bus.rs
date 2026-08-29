@@ -191,7 +191,7 @@ fn document_portal_ready(bus_address: &str, mountpoint: &str) -> bool {
         .arg("call")
         .arg("--session")
         .arg("--dest")
-        .arg("org.freedesktop.portal.Desktop")
+        .arg("org.freedesktop.portal.Documents")
         .arg("--object-path")
         .arg("/org/freedesktop/portal/documents")
         .arg("--method")
@@ -204,23 +204,53 @@ fn document_portal_ready(bus_address: &str, mountpoint: &str) -> bool {
 }
 
 fn desktop_portal_ready(bus_address: &str) -> bool {
-    portal_property_ready(bus_address, "org.freedesktop.portal.FileChooser", "version")
-        && portal_property_ready(bus_address, "org.freedesktop.portal.OpenURI", "version")
-        && portal_property_ready(
-            bus_address,
-            "org.freedesktop.portal.ScreenCast",
-            "AvailableSourceTypes",
-        )
+    portal_property_ready(
+        bus_address,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.FileChooser",
+        "version",
+    ) && portal_property_ready(
+        bus_address,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.OpenURI",
+        "version",
+    ) && portal_property_ready(
+        bus_address,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.ScreenCast",
+        "AvailableSourceTypes",
+    ) && portal_property_ready(
+        bus_address,
+        "org.freedesktop.portal.Flatpak",
+        "/org/freedesktop/portal/Flatpak",
+        "org.freedesktop.portal.Flatpak",
+        "version",
+    ) && portal_property_ready(
+        bus_address,
+        "org.freedesktop.portal.Flatpak",
+        "/org/freedesktop/portal/Flatpak",
+        "org.freedesktop.portal.Flatpak",
+        "supports",
+    )
 }
 
-fn portal_property_ready(bus_address: &str, interface: &str, property: &str) -> bool {
+fn portal_property_ready(
+    bus_address: &str,
+    destination: &str,
+    object_path: &str,
+    interface: &str,
+    property: &str,
+) -> bool {
     let output = Command::new("gdbus")
         .arg("call")
         .arg("--session")
         .arg("--dest")
-        .arg("org.freedesktop.portal.Desktop")
+        .arg(destination)
         .arg("--object-path")
-        .arg("/org/freedesktop/portal/desktop")
+        .arg(object_path)
         .arg("--method")
         .arg("org.freedesktop.DBus.Properties.Get")
         .arg(interface)

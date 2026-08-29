@@ -8,6 +8,7 @@
 #include "portal_request.h"
 #include "sandbox_document_registration.h"
 #include "screencast_portal.h"
+#include "flatpak_spawn_portal.h"
 void log_line(const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
@@ -36,6 +37,7 @@ void portal_bridge_process_cleanup_documents(BridgeState *state) {
 gboolean portal_bridge_process_handle_signal(gpointer user_data) {
   BridgeState *state = user_data;
   portal_bridge_process_cleanup_documents(state);
+  flatpak_spawn_cleanup_lifecycles(state);
   if (state->loop != NULL) {
     g_main_loop_quit(state->loop);
   }
@@ -204,6 +206,9 @@ void portal_bridge_process_on_bus_acquired(GDBusConnection *connection,
     g_error_free(error);
     g_main_loop_quit(state->loop);
     return;
+  }
+  if (!portal_bridge_process_register_interfaces(connection, "/org/freedesktop/portal/Flatpak", state->flatpak_node, &FLATPAK_SPAWN_VTABLE, state, &error)) {
+    log_line("register Flatpak portal failed: %s", error->message); g_error_free(error); g_main_loop_quit(state->loop); return;
   }
   state->local_objects_registered = true;
 }

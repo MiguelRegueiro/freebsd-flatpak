@@ -17,7 +17,9 @@ FreeBSD Flatpak downloads applications and runtimes from configured Flatpak repo
 - FreeBSD with Linuxulator enabled and a Linux base under `/compat/linux`.
 - A Wayland session with D-Bus and a working `xdg-desktop-portal` backend.
 - FreeBSD `pkg`; the installer installs missing build/runtime packages.
-- `doas` access for chroot and mount operations.
+- Root access only while running the installer. Normal app launch uses the
+  installed, narrowly scoped set-user-ID helpers and does not prompt for a
+  `doas` or `sudo` password.
 
 ## Build
 
@@ -41,6 +43,13 @@ and installs it privately under `/usr/local/libexec/freebsd-flatpak`; no system
 libostree package or manual library setup is needed. Application launchers,
 icons, and metadata are published into the normal per-user XDG data paths; no
 `XDG_DATA_DIRS` change is needed.
+
+The installer marks `secure-mount` and `secure-launch` set-user-ID root. They
+accept only validated operations on a caller-owned, private
+`freebsd-flatpak/chroots/<app>/<instance>` sandbox and drop to the caller's
+credentials before an application payload is executed. Nested Spawn uses a
+separate root-owned local service with peer-credential authentication; it
+accepts only the same validated sandbox requests and explicitly forwarded FDs.
 
 ## Usage
 

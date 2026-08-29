@@ -1,0 +1,17 @@
+#!/bin/sh
+# PROVIDE: freebsd_flatpak_secure_launch
+# REQUIRE: DAEMON
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name=freebsd_flatpak_secure_launch
+rcvar=${name}_enable
+command=/usr/sbin/daemon
+procname=/usr/local/libexec/freebsd-flatpak/secure-launch-daemon
+pidfile=/var/run/freebsd-flatpak/secure-launch-daemon.pid
+command_args="-p ${pidfile} /usr/local/libexec/freebsd-flatpak/secure-launch-daemon"
+start_precmd="mkdir -p /var/run/freebsd-flatpak && chown root:wheel /var/run/freebsd-flatpak && chmod 755 /var/run/freebsd-flatpak"
+load_rc_config "$name"
+: "${freebsd_flatpak_secure_launch_enable:=YES}"
+run_rc_command "$1"

@@ -92,6 +92,9 @@ impl Installation {
     pub fn data_root(&self) -> &Path {
         &self.data_root
     }
+    pub fn runtime_root(&self) -> &Path {
+        &self.runtime_root
+    }
     pub fn launcher(&self) -> &Path {
         &self.launcher
     }
@@ -140,6 +143,9 @@ impl Installation {
     }
     pub fn runs(&self) -> PathBuf {
         self.runtime_root.join("runs")
+    }
+    pub fn spawn_brokers(&self) -> PathBuf {
+        self.runtime_root.join("spawn-brokers")
     }
     pub fn portal(&self) -> PathBuf {
         self.runtime_root.join("portal")

@@ -2,11 +2,18 @@ use super::*;
 use std::fs;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
+
+fn reaper_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[test]
 fn termination_kills_and_reaps_tracked_and_detached_processes() {
+    let _lock = reaper_lock();
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -52,6 +59,7 @@ fn termination_kills_and_reaps_tracked_and_detached_processes() {
 
     assert_ne!(unsafe { libc::kill(descendant, 0) }, 0);
     drop(process_tree);
+    drop(reaper);
 
     let ready_file = test_dir.join("tracked-child.ready");
     let reaper = ProcessReaper::acquire().unwrap();
@@ -84,4 +92,23 @@ fn termination_kills_and_reaps_tracked_and_detached_processes() {
 
     assert_eq!(status.signal(), Some(libc::SIGKILL));
     let _ = fs::remove_dir_all(test_dir);
+}
+
+#[test]
+fn one_reaper_tracks_independent_subtrees() {
+    let _lock = reaper_lock();
+    let reaper = ProcessReaper::acquire().unwrap();
+    let mut first = Command::new("sleep").arg("30").spawn().unwrap();
+    let mut second = Command::new("sleep").arg("30").spawn().unwrap();
+    let first_tree = reaper.track(first.id()).unwrap();
+    let second_tree = reaper.track(second.id()).unwrap();
+    drop(first_tree);
+    let _ = first.wait();
+    assert_eq!(unsafe { libc::kill(second.id() as i32, 0) }, 0);
+    let status = second_tree.wait_for_exit(&mut second, || true).unwrap();
+    assert!(matches!(
+        status.signal(),
+        Some(libc::SIGTERM | libc::SIGKILL)
+    ));
+    drop(reaper);
 }

@@ -11,6 +11,8 @@ mod portal_integration;
 mod remotes;
 mod sandbox;
 #[allow(dead_code)]
+mod secure_launch;
+#[allow(dead_code)]
 mod secure_mount;
 
 fn main() -> std::process::ExitCode {

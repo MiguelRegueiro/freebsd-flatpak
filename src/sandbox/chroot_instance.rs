@@ -1,4 +1,4 @@
-use super::application_entrypoint::{host_user, join_numeric_ids, launch_args, EntryLaunch};
+use super::application_entrypoint::{host_user, launch_args, EntryLaunch};
 use super::filesystem_grants::HostFilesystem;
 use super::launch_application::FlatpakApp;
 use super::launch_environment::{
@@ -8,6 +8,7 @@ use super::launch_environment::{
 use super::mount_operations::owned_mount_teardown_order;
 use super::process_signals::{install_signal_handlers, ACTIVE_PROCESS_GROUP, LAST_SIGNAL};
 use super::process_supervision::ProcessReaper;
+use super::spawn_broker::SpawnBroker;
 use super::stale_sandbox_recovery::{
     remove_instance_root, terminate_chroot_processes, unmount_mountpoint,
 };
@@ -25,11 +26,24 @@ use crate::installation as runtime;
 use crate::installation as state;
 use crate::installation::installation_paths::Installation;
 use crate::portal_integration::HostPortal;
+use crate::secure_launch;
 use anyhow::{bail, Context, Result};
+use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
+#[derive(Debug)]
+pub(super) struct SandboxExecutionContext {
+    pub(super) root: PathBuf,
+    pub(super) runtime_root: PathBuf,
+    pub(super) uid: u32,
+    pub(super) gid: u32,
+    pub(super) supplementary_gids: Vec<u32>,
+    pub(super) environment: Vec<(String, String)>,
+}
 
 #[derive(Debug)]
 pub(super) struct ChrootInstance {
@@ -59,6 +73,7 @@ pub(super) struct ChrootInstance {
     pub(super) nullfs_mounts: Vec<NullfsMapping>,
     pub(super) mount_staging_ready: bool,
     pub(super) next_mount_staging_id: usize,
+    supervisor: Option<Arc<ProcessReaper>>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +140,7 @@ impl ChrootInstance {
             nullfs_mounts: Vec::new(),
             mount_staging_ready: false,
             next_mount_staging_id: 0,
+            supervisor: None,
         }
     }
 
@@ -178,6 +194,18 @@ impl ChrootInstance {
         );
         merge_env(&mut env, self.host_video.env());
         ensure_metadata_runtime_dirs(&env, &desktop.xdg_runtime_dir, self.uid, &app.app_id)?;
+        let execution = Arc::new(SandboxExecutionContext {
+            root: fs::canonicalize(&self.root).context("canonicalize sandbox root")?,
+            runtime_root: fs::canonicalize(self.paths.runtime_root())
+                .context("canonicalize sandbox runtime root")?,
+            uid: self.uid,
+            gid: self.gid,
+            supplementary_gids: self.supplementary_gids.clone(),
+            environment: env.clone(),
+        });
+        let supervisor = Arc::new(ProcessReaper::acquire()?);
+        self.supervisor = Some(supervisor.clone());
+        let _spawn_broker = SpawnBroker::bind(&self.paths, execution.clone(), supervisor.clone())?;
         let translated_args = self.host_filesystem.translate_args(&app.args)?;
         let app_args = launch_args(app, translated_args)?;
         launch_configuration.finish("launch", "environment and arguments");
@@ -255,23 +283,20 @@ impl ChrootInstance {
         }
 
         let spawn = diagnostics.timer(Detail::Detailed);
-        let mut command = Command::new("doas");
-        command
-            .arg("chroot")
-            .arg("-u")
-            .arg(self.uid.to_string())
-            .arg("-g")
-            .arg(self.gid.to_string());
-        if !self.supplementary_gids.is_empty() {
-            command
-                .arg("-G")
-                .arg(join_numeric_ids(&self.supplementary_gids));
-        }
-        command.arg(&self.root).arg("/usr/bin/env").arg("-i");
-        for (key, value) in env {
-            command.arg(format!("{key}={value}"));
-        }
-        entry.append_command_args(&mut command, &app_args);
+        let entry_args = entry.command_args(&app_args);
+        let mut command = secure_launch::command(secure_launch::LaunchRequest {
+            root: &execution.root,
+            runtime_root: &execution.runtime_root,
+            uid: execution.uid,
+            gid: execution.gid,
+            supplementary_gids: &execution.supplementary_gids,
+            mapped_fds: &[],
+            cwd: None,
+            nested_sandbox: false,
+            no_network: false,
+            environment: &execution.environment,
+            argv: &entry_args,
+        })?;
         command
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
@@ -279,9 +304,8 @@ impl ChrootInstance {
             .process_group(0);
 
         LAST_SIGNAL.store(0, Ordering::SeqCst);
-        let reaper = ProcessReaper::acquire()?;
         let mut child = command.spawn().context("launch app through chroot")?;
-        let process_tree = reaper.track(child.id())?;
+        let process_tree = supervisor.track(child.id())?;
         spawn.finish("launch", "build command and spawn");
         launch.finish("run", "application spawn");
         diagnostics.startup_complete();

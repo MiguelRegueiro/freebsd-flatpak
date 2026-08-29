@@ -11,6 +11,18 @@ path = "src/main.rs"
 name = "freebsd-flatpak-secure-mount"
 path = "src/bin/freebsd-flatpak-secure-mount.rs"
 
+[[bin]]
+name = "freebsd-flatpak-secure-launch"
+path = "src/bin/freebsd-flatpak-secure-launch.rs"
+
+[[bin]]
+name = "freebsd-flatpak-secure-launch-daemon"
+path = "src/bin/freebsd-flatpak-secure-launch-daemon.rs"
+
+[[bin]]
+name = "freebsd-flatpak-secure-launch-client"
+path = "src/bin/freebsd-flatpak-secure-launch-client.rs"
+
 [dependencies]
 anyhow = "1.0"
 base64 = "0.20"

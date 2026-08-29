@@ -8,6 +8,7 @@
 #include "portal_request.h"
 #include "sandbox_document_registration.h"
 #include "screencast_portal.h"
+#include "flatpak_spawn_portal.h"
 const char *arg_value(int argc, char **argv, const char *name) {
   for (int i = 1; i + 1 < argc; i++) {
     if (strcmp(argv[i], name) == 0) {
@@ -95,7 +96,9 @@ int main(int argc, char **argv) {
       .request_node = NULL,
       .session_node = NULL,
       .control_node = NULL,
+      .flatpak_node = NULL,
       .enable_host_command = enable_host_command,
+      .spawn_lifecycles = g_ptr_array_new_with_free_func((GDestroyNotify)flatpak_spawn_lifecycle_free),
   };
   if (state.host_bus == NULL || state.desktop_node == NULL) {
     fprintf(stderr, "portal bridge setup failed: %s\n", error->message);
@@ -112,8 +115,9 @@ int main(int argc, char **argv) {
   state.request_node = g_dbus_node_info_new_for_xml(REQUEST_XML, &error);
   state.session_node = g_dbus_node_info_new_for_xml(SESSION_XML, &error);
   state.control_node = g_dbus_node_info_new_for_xml(CONTROL_XML, &error);
+  state.flatpak_node = g_dbus_node_info_new_for_xml(FLATPAK_SPAWN_XML, &error);
   if (state.documents_node == NULL || state.request_node == NULL ||
-      state.session_node == NULL || state.control_node == NULL) {
+      state.session_node == NULL || state.control_node == NULL || state.flatpak_node == NULL) {
     fprintf(stderr, "portal bridge introspection failed: %s\n", error->message);
     g_error_free(error);
     return 1;
@@ -148,18 +152,18 @@ int main(int argc, char **argv) {
       portal_bridge_process_on_name_acquired,
       portal_bridge_process_on_name_lost, &state, NULL);
   guint flatpak_owner_id = 0;
-  if (enable_host_command) {
-    flatpak_owner_id = g_bus_own_name(
-        G_BUS_TYPE_SESSION, "org.freedesktop.Flatpak",
+  flatpak_owner_id = g_bus_own_name(
+      G_BUS_TYPE_SESSION, "org.freedesktop.portal.Flatpak",
         G_BUS_NAME_OWNER_FLAGS_NONE, portal_bridge_process_on_bus_acquired,
         portal_bridge_process_on_name_acquired,
         portal_bridge_process_on_name_lost, &state, NULL);
-  }
   diagnostic_line("serving private portal for %s at %s", state.app_id,
                   state.documents.doc_dir);
   g_main_loop_run(state.loop);
 
   host_command_service_cleanup(&state.host_command);
+
+  flatpak_spawn_cleanup_lifecycles(&state);
 
   portal_bridge_process_cleanup_documents(&state);
   for (guint i = 0; i < state.request_store.requests->len; i++) {
@@ -203,7 +207,9 @@ int main(int argc, char **argv) {
   g_dbus_node_info_unref(state.request_node);
   g_dbus_node_info_unref(state.session_node);
   g_dbus_node_info_unref(state.control_node);
+  g_dbus_node_info_unref(state.flatpak_node);
   g_main_loop_unref(state.loop);
+  g_ptr_array_free(state.spawn_lifecycles, TRUE);
   g_ptr_array_free(state.documents.grants, TRUE);
   g_ptr_array_free(state.documents.sandbox_doc_dirs, TRUE);
   g_free(state.app_id);

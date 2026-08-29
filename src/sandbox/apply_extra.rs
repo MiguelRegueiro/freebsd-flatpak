@@ -1,14 +1,15 @@
-use super::application_entrypoint::{host_user, numeric_id};
+use super::application_entrypoint::{host_user, numeric_id, numeric_ids};
 use super::stale_sandbox_recovery::{
     ensure_mountpoint_free, remove_instance_root, run_command, unmount_mountpoint,
 };
 use crate::installation as state;
 use crate::installation::installation_paths::Installation;
+use crate::{secure_launch, secure_mount};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::os::unix::fs as unix_fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) fn run(
@@ -35,45 +36,49 @@ pub(crate) fn run(
     let root = paths.chroots().join(&app_id).join(&instance_id);
     let record =
         state::write_run_record(paths, &app_id, &instance_id, &root, std::process::id(), 0)?;
-    let mut sandbox = ApplySandbox::new(root, record);
+    let mut sandbox = ApplySandbox::new(root, paths.runtime_root().to_path_buf(), record);
     sandbox.prepare()?;
     sandbox.mount(runtime_dir.join("files"), "usr", true)?;
     sandbox.mount(checkout.join("files"), "app", true)?;
     sandbox.mount(extra_dir.to_path_buf(), "app/extra", false)?;
 
     let user = host_user(uid);
-    let command_text = "cd /app/extra && exec /app/bin/apply_extra";
-    let mut command = Command::new("doas");
-    command
-        .arg("chroot")
-        .arg("-n")
-        .arg("-u")
-        .arg(uid.to_string())
-        .arg("-g")
-        .arg(gid.to_string())
-        .arg(&sandbox.root)
-        .arg("/usr/bin/env")
-        .arg("-i")
-        .arg(format!("HOME=/home/{user}"))
-        .arg("PATH=/app/bin:/usr/bin")
-        .arg("/usr/bin/sh")
-        .arg("-c")
-        .arg(command_text);
+    let groups = numeric_ids("id", "-G")?;
+    let arguments = ["/app/bin/apply_extra".into()];
+    let environment = vec![
+        ("HOME".into(), format!("/home/{user}")),
+        ("PATH".into(), "/app/bin:/usr/bin".into()),
+    ];
+    let command = secure_launch::command(secure_launch::LaunchRequest {
+        root: &sandbox.root,
+        runtime_root: &sandbox.runtime_root,
+        uid,
+        gid,
+        supplementary_gids: &groups,
+        mapped_fds: &[],
+        cwd: Some(Path::new("/app/extra").as_os_str()),
+        nested_sandbox: false,
+        no_network: false,
+        environment: &environment,
+        argv: &arguments,
+    })?;
     run_command(command, "run /app/bin/apply_extra")?;
     sandbox.cleanup()
 }
 
 struct ApplySandbox {
     root: PathBuf,
+    runtime_root: PathBuf,
     record: PathBuf,
     mounts: Vec<(PathBuf, bool)>,
     cleaned: bool,
 }
 
 impl ApplySandbox {
-    fn new(root: PathBuf, record: PathBuf) -> Self {
+    fn new(root: PathBuf, runtime_root: PathBuf, record: PathBuf) -> Self {
         Self {
             root,
+            runtime_root,
             record,
             mounts: Vec::new(),
             cleaned: false,
@@ -99,14 +104,21 @@ impl ApplySandbox {
         let source = fs::canonicalize(&source)
             .with_context(|| format!("resolve nullfs source {}", source.display()))?;
         let target = self.root.join(target);
-        fs::create_dir_all(&target)?;
         ensure_mountpoint_free(&target)?;
-        let mut command = Command::new("doas");
-        command.arg("mount_nullfs");
-        if read_only {
-            command.args(["-o", "ro"]);
-        }
-        command.arg(source).arg(&target);
+        let root_metadata = fs::metadata(&self.root)?;
+        let source_metadata = fs::metadata(&source)?;
+        let command = secure_mount::nullfs_command(
+            &self.root,
+            (root_metadata.dev(), root_metadata.ino()),
+            &source,
+            Some((source_metadata.dev(), source_metadata.ino())),
+            Path::new(
+                target
+                    .strip_prefix(&self.root)
+                    .context("apply_extra target outside sandbox")?,
+            ),
+            read_only,
+        )?;
         run_command(command, &format!("mount apply_extra {}", target.display()))?;
         self.mounts.push((target, read_only));
         Ok(())

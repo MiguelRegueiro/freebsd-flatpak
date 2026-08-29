@@ -106,6 +106,7 @@ struct _PortalBridgeProcess {
   GDBusNodeInfo *request_node;
   GDBusNodeInfo *session_node;
   GDBusNodeInfo *control_node;
+  GDBusNodeInfo *flatpak_node;
   HostCommandService host_command;
   bool enable_host_command;
   DocumentGrantStore documents;
@@ -114,6 +115,7 @@ struct _PortalBridgeProcess {
   ScreenCastPortalState screencast;
   guint local_name_signal_id;
   bool local_objects_registered;
+  GPtrArray *spawn_lifecycles;
 };
 void log_line(const char *fmt, ...);
 void diagnostic_line(const char *fmt, ...);

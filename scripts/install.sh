@@ -451,6 +451,7 @@ print_install_tree() {
         "    ├── $install_libexec_branch" \
         '    │   ├── libostree-1.so.1' \
         '    │   ├── secure-mount' \
+        '    │   ├── secure-launch' \
         '    │   ├── portal-bridge' \
         '    │   ├── status-notifier-bridge' \
         '    │   ├── network-manager-compat' \
@@ -509,7 +510,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     dry_command "gmake install-libLTLIBRARIES install-pkgconfigDATA"
     ui_heading "Building FreeBSD Flatpak"
     ui_progress "Rust CLI"
-    dry_command "su '$BUILD_USER' -c \"env PKG_CONFIG_PATH='$OSTREE_PREFIX/lib/pkgconfig' LIBRARY_PATH='$OSTREE_PREFIX/lib' cargo build --locked --release --bin flatpak --bin freebsd-flatpak-secure-mount\""
+    dry_command "su '$BUILD_USER' -c \"env PKG_CONFIG_PATH='$OSTREE_PREFIX/lib/pkgconfig' LIBRARY_PATH='$OSTREE_PREFIX/lib' cargo build --locked --release --bin flatpak --bin freebsd-flatpak-secure-mount --bin freebsd-flatpak-secure-launch\""
     ui_heading "Building compatibility helpers"
     ui_progress "Portal bridge"
     dry_command "su '$BUILD_USER' -c \"/bin/sh ./scripts/build-compatibility-bridges.sh '$HELPER_BUILD_DIR'\""
@@ -526,7 +527,8 @@ if [ "$DRY_RUN" -eq 1 ]; then
     print_install_tree
     dry_command "install -d -o root -g wheel -m 755 '$INSTALL_BIN' '$INSTALL_LIBEXEC' '$INSTALL_LIBEXEC/linux-bin' '$INSTALL_LICENSES'"
     dry_command "install -o root -g wheel -m 755 target/release/flatpak '$INSTALL_BIN/flatpak'"
-    dry_command "install -o root -g wheel -m 755 target/release/freebsd-flatpak-secure-mount '$INSTALL_LIBEXEC/secure-mount'"
+    dry_command "install -o root -g wheel -m 4755 target/release/freebsd-flatpak-secure-mount '$INSTALL_LIBEXEC/secure-mount'"
+    dry_command "install -o root -g wheel -m 4755 target/release/freebsd-flatpak-secure-launch '$INSTALL_LIBEXEC/secure-launch'"
     dry_command "install -o root -g wheel -m 755 '$OSTREE_PREFIX/lib/libostree-1.so.1.0.0' '$INSTALL_LIBEXEC/libostree-1.so.1'"
     dry_command "install -o root -g wheel -m 644 LICENSE '$INSTALL_LICENSES/BSD-2-Clause.txt'"
     dry_command "install -o root -g wheel -m 644 LICENSES/LGPL-2.0-or-later.txt LICENSES/MIT-ostree-rs.txt '$INSTALL_LICENSES/'"
@@ -593,7 +595,7 @@ phase_finish
 
 phase_start "Building FreeBSD Flatpak" "Compiling application..." 1 1
 run_logged "Rust CLI build" su "$BUILD_USER" -c \
-    "env PKG_CONFIG_PATH='$OSTREE_PREFIX/lib/pkgconfig' LIBRARY_PATH='$OSTREE_PREFIX/lib' cargo build --locked --release --bin flatpak --bin freebsd-flatpak-secure-mount"
+    "env PKG_CONFIG_PATH='$OSTREE_PREFIX/lib/pkgconfig' LIBRARY_PATH='$OSTREE_PREFIX/lib' cargo build --locked --release --bin flatpak --bin freebsd-flatpak-secure-mount --bin freebsd-flatpak-secure-launch --bin freebsd-flatpak-secure-launch-client --bin freebsd-flatpak-secure-launch-daemon"
 phase_finish 0
 
 phase_start "Building compatibility helpers" "Compiling native helpers..."
@@ -619,6 +621,9 @@ run_logged "flatpak-spawn compatibility wrapper build" su "$BUILD_USER" -c \
 for artifact in \
     target/release/flatpak \
     target/release/freebsd-flatpak-secure-mount \
+    target/release/freebsd-flatpak-secure-launch \
+    target/release/freebsd-flatpak-secure-launch-client \
+    target/release/freebsd-flatpak-secure-launch-daemon \
     "$OSTREE_PREFIX/lib/libostree-1.so.1.0.0" \
     "$HELPER_BUILD_DIR/portal-bridge" \
     "$HELPER_BUILD_DIR/status-notifier-bridge" \
@@ -640,8 +645,18 @@ run_logged "Installation directory creation" install -d -o root -g wheel -m 755 
     "$INSTALL_BIN" "$INSTALL_LIBEXEC" "$INSTALL_LIBEXEC/linux-bin" "$INSTALL_LICENSES"
 run_logged "CLI installation" install -o root -g wheel -m 755 \
     target/release/flatpak "$INSTALL_BIN/flatpak"
-run_logged "Secure mount helper installation" install -o root -g wheel -m 755 \
+run_logged "Secure mount helper installation" install -o root -g wheel -m 4755 \
     target/release/freebsd-flatpak-secure-mount "$INSTALL_LIBEXEC/secure-mount"
+run_logged "Secure launch helper installation" install -o root -g wheel -m 4755 \
+    target/release/freebsd-flatpak-secure-launch "$INSTALL_LIBEXEC/secure-launch"
+run_logged "Nested secure launch client installation" install -o root -g wheel -m 755 \
+    target/release/freebsd-flatpak-secure-launch-client "$INSTALL_LIBEXEC/secure-launch-client"
+run_logged "Nested secure launch daemon installation" install -o root -g wheel -m 755 \
+    target/release/freebsd-flatpak-secure-launch-daemon "$INSTALL_LIBEXEC/secure-launch-daemon"
+run_logged "Nested secure launch service installation" install -o root -g wheel -m 755 \
+    scripts/freebsd-flatpak-secure-launch.rc /usr/local/etc/rc.d/freebsd_flatpak_secure_launch
+run_logged "Nested secure launch service restart" /bin/sh -c \
+    "service freebsd_flatpak_secure_launch restart || service freebsd_flatpak_secure_launch start"
 run_logged "Private libostree installation" install -o root -g wheel -m 755 \
     "$OSTREE_PREFIX/lib/libostree-1.so.1.0.0" \
     "$INSTALL_LIBEXEC/libostree-1.so.1"

@@ -1,6 +1,7 @@
 use super::launch_application::FlatpakApp;
 use crate::flatpak_metadata::value;
 use anyhow::{bail, Context, Result};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -61,6 +62,7 @@ impl EntryLaunch {
         display
     }
 
+    #[cfg(test)]
     pub(super) fn append_command_args(&self, command: &mut Command, args: &[String]) {
         // Let execve(2) select an ELF executable's PT_INTERP after chroot(2).
         // Invoking ld-linux as the executable changes /proc/self/exe to the
@@ -68,6 +70,13 @@ impl EntryLaunch {
         // to their application executable.
         command.arg(&self.chroot_path);
         command.args(args);
+    }
+
+    pub(super) fn command_args(&self, args: &[String]) -> Vec<OsString> {
+        let mut command = Vec::with_capacity(args.len() + 1);
+        command.push(OsString::from(&self.chroot_path));
+        command.extend(args.iter().map(OsString::from));
+        command
     }
 }
 
@@ -141,10 +150,6 @@ pub(super) fn numeric_ids(program: &str, arg: &str) -> Result<Vec<u32>> {
                 .with_context(|| format!("parse numeric id from {value:?}"))
         })
         .collect()
-}
-
-pub(super) fn join_numeric_ids(ids: &[u32]) -> String {
-    ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
 }
 
 pub(super) fn host_user(uid: u32) -> String {

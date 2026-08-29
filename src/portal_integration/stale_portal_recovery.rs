@@ -2,6 +2,7 @@ use super::portal_scope::{
     app_has_active_run, app_scope_name, lock_portal_scope, stop_shared_portal,
 };
 use crate::installation::installation_paths::Installation;
+use crate::sandbox::unmount_mountpoint;
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -119,19 +120,10 @@ fn mount_points_under(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn unmount_one(path: &Path, force: bool) -> Result<()> {
-    let mut command = Command::new("doas");
-    command.arg("umount");
-    if force {
-        command.arg("-f");
-    }
-    command.arg(path);
-    let status = command
-        .status()
-        .with_context(|| format!("umount {}", path.display()))?;
-    if !status.success() {
-        bail!("umount {} failed with status {}", path.display(), status);
-    }
-    Ok(())
+    // Only the set-user-ID mount helper may unmount at runtime. It resolves
+    // the target from a caller-owned sandbox root and rejects every other
+    // pathname, including stale records outside the active chroot layout.
+    unmount_mountpoint(path, force, "recover portal mount")
 }
 
 fn remove_doc_dir(path: &Path) -> Result<()> {

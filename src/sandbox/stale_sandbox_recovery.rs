@@ -2,9 +2,11 @@ use super::application_entrypoint::sandbox_name;
 use super::process_supervision::process_rooted_in;
 use crate::installation as state;
 use crate::installation::installation_paths::Installation;
+use crate::secure_mount;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -320,19 +322,19 @@ fn mountpoint_is_read_only(mountpoint: &Path) -> Result<bool> {
         .unwrap_or(false))
 }
 
-pub(super) fn unmount_mountpoint(mountpoint: &Path, allow_force: bool, action: &str) -> Result<()> {
+pub(crate) fn unmount_mountpoint(mountpoint: &Path, allow_force: bool, action: &str) -> Result<()> {
+    let (root, target_relative, root_identity) = sandbox_mount_target(mountpoint)?;
     unmount_mountpoint_with(
         mountpoint,
         allow_force,
         action,
         is_mounted,
         |path, force| {
-            let mut command = Command::new("doas");
-            command.arg("umount");
-            if force {
-                command.arg("-f");
+            if path != mountpoint {
+                bail!("secure unmount target changed during retry");
             }
-            command.arg(path);
+            let command =
+                secure_mount::unmount_command(&root, root_identity, &target_relative, force)?;
             let force_label = if force { " -f" } else { "" };
             run_command(
                 command,
@@ -341,6 +343,24 @@ pub(super) fn unmount_mountpoint(mountpoint: &Path, allow_force: bool, action: &
         },
         || thread::sleep(Duration::from_millis(250)),
     )
+}
+
+fn sandbox_mount_target(mountpoint: &Path) -> Result<(PathBuf, PathBuf, (u64, u64))> {
+    let root = mountpoint
+        .ancestors()
+        .find(|ancestor| ancestor.join(".flatpak-info").is_file())
+        .context("mountpoint is not below a freebsd-flatpak sandbox root")?
+        .to_path_buf();
+    let target_relative = mountpoint
+        .strip_prefix(&root)
+        .context("mountpoint is outside its sandbox root")?
+        .to_path_buf();
+    if target_relative.as_os_str().is_empty() {
+        bail!("refusing to unmount sandbox root");
+    }
+    let metadata =
+        fs::metadata(&root).with_context(|| format!("inspect sandbox root {}", root.display()))?;
+    Ok((root, target_relative, (metadata.dev(), metadata.ino())))
 }
 
 pub(super) fn unmount_mountpoint_with(

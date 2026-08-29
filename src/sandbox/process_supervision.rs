@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TERMINATION_GRACE: Duration = Duration::from_secs(2);
 
+#[derive(Debug)]
 pub(super) struct ProcessReaper {
     acquired: bool,
 }
@@ -16,9 +17,13 @@ impl ProcessReaper {
         Ok(Self { acquired: true })
     }
 
-    pub(super) fn track(mut self, subtree: u32) -> Result<SandboxProcessTree> {
+    #[cfg(test)]
+    pub(super) fn test_inert() -> Self {
+        Self { acquired: false }
+    }
+
+    pub(super) fn track(&self, subtree: u32) -> Result<SandboxProcessTree> {
         let subtree = i32::try_from(subtree).context("sandbox process id exceeds pid_t")?;
-        self.acquired = false;
         Ok(SandboxProcessTree { subtree })
     }
 }
@@ -180,7 +185,6 @@ impl SandboxProcessTree {
 impl Drop for SandboxProcessTree {
     fn drop(&mut self) {
         let _ = self.terminate();
-        let _ = set_reaper_status(false);
     }
 }
 

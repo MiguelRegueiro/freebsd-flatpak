@@ -14,9 +14,10 @@ mod process_signals;
 mod process_supervision;
 mod sandbox_identity;
 mod sandbox_root;
+mod spawn_broker;
 mod stale_sandbox_recovery;
 pub(crate) mod static_overrides;
 
 pub(crate) use chroot_backend::*;
 pub(crate) use launch_application::*;
-pub(crate) use stale_sandbox_recovery::{app_has_mounts, recover_stale_mounts};
+pub(crate) use stale_sandbox_recovery::{app_has_mounts, recover_stale_mounts, unmount_mountpoint};
