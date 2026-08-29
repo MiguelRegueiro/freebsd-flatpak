@@ -455,6 +455,7 @@ print_install_tree() {
         '    │   ├── portal-bridge' \
         '    │   ├── status-notifier-bridge' \
         '    │   ├── network-manager-compat' \
+        '    │   ├── network-manager-privileged' \
         '    │   ├── libwayland-drm-devt-shim.so' \
         '    │   ├── libgtk3-wayland-geometry-shim.so' \
         '    │   ├── libdrm-syncobj-errno-shim.so' \
@@ -529,6 +530,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     dry_command "install -o root -g wheel -m 755 target/release/flatpak '$INSTALL_BIN/flatpak'"
     dry_command "install -o root -g wheel -m 4755 target/release/freebsd-flatpak-secure-mount '$INSTALL_LIBEXEC/secure-mount'"
     dry_command "install -o root -g wheel -m 4755 target/release/freebsd-flatpak-secure-launch '$INSTALL_LIBEXEC/secure-launch'"
+    dry_command "install -o root -g wheel -m 4755 '$HELPER_BUILD_DIR/network-manager-privileged' '$INSTALL_LIBEXEC/network-manager-privileged'"
     dry_command "install -o root -g wheel -m 755 '$OSTREE_PREFIX/lib/libostree-1.so.1.0.0' '$INSTALL_LIBEXEC/libostree-1.so.1'"
     dry_command "install -o root -g wheel -m 644 LICENSE '$INSTALL_LICENSES/BSD-2-Clause.txt'"
     dry_command "install -o root -g wheel -m 644 LICENSES/LGPL-2.0-or-later.txt LICENSES/MIT-ostree-rs.txt '$INSTALL_LICENSES/'"
@@ -602,7 +604,7 @@ phase_start "Building compatibility helpers" "Compiling native helpers..."
 run_logged "Helper build-directory creation" su "$BUILD_USER" -c \
     "mkdir -p '$HELPER_BUILD_DIR'"
 run_logged "Compatibility bridge build" su "$BUILD_USER" -c \
-    "env INSTALL_PROGRESS_FD=3 INSTALL_SUPPRESS_PROGRESS=1 /bin/sh ./scripts/build-compatibility-bridges.sh '$HELPER_BUILD_DIR'"
+    "env INSTALL_PROGRESS_FD=3 INSTALL_SUPPRESS_PROGRESS=1 NM_PRIVILEGED_OWNER_UID='$BUILD_UID' /bin/sh ./scripts/build-compatibility-bridges.sh '$HELPER_BUILD_DIR'"
 run_logged "Wayland DRM compatibility shim build" su "$BUILD_USER" -c \
     "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/wayland-drm-devt-shim.c -o '$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so' -ldl"
 run_logged "GTK3 Wayland geometry compatibility shim build" su "$BUILD_USER" -c \
@@ -628,6 +630,7 @@ for artifact in \
     "$HELPER_BUILD_DIR/portal-bridge" \
     "$HELPER_BUILD_DIR/status-notifier-bridge" \
     "$HELPER_BUILD_DIR/network-manager-compat" \
+    "$HELPER_BUILD_DIR/network-manager-privileged" \
     "$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so" \
     "$HELPER_BUILD_DIR/libgtk3-wayland-geometry-shim.so" \
     "$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so" \
@@ -676,6 +679,8 @@ run_logged "Compatibility helper installation" install -o root -g wheel -m 755 \
     "$HELPER_BUILD_DIR/libnetlink-route-flags-shim.so" \
     "$HELPER_BUILD_DIR/libsignalfd-shim.so" \
     "$INSTALL_LIBEXEC/"
+run_logged "NetworkManager privileged backend installation" install -o root -g wheel -m 4755 \
+    "$HELPER_BUILD_DIR/network-manager-privileged" "$INSTALL_LIBEXEC/network-manager-privileged"
 run_logged "flatpak-spawn compatibility wrapper installation" install -o root -g wheel -m 755 \
     "$HELPER_BUILD_DIR/flatpak-spawn-wrapper" "$INSTALL_LIBEXEC/linux-bin/flatpak-spawn"
 

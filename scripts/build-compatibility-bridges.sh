@@ -14,6 +14,10 @@ mkdir -p "$OUTPUT_DIR"
 PORTAL_RESPONSE=$OUTPUT_DIR/portal-bridge.pkg-config.rsp
 STATUS_NOTIFIER_RESPONSE=$OUTPUT_DIR/status-notifier-bridge.pkg-config.rsp
 NETWORK_MANAGER_RESPONSE=$OUTPUT_DIR/network-manager-compat.pkg-config.rsp
+NM_PRIVILEGED_OWNER_UID=${NM_PRIVILEGED_OWNER_UID:-$(id -u)}
+case $NM_PRIVILEGED_OWNER_UID in
+    ""|*[!0-9]*) printf '%s\n' "invalid NetworkManager helper owner uid" >&2; exit 64 ;;
+esac
 trap 'rm -f "$PORTAL_RESPONSE" "$STATUS_NOTIFIER_RESPONSE" "$NETWORK_MANAGER_RESPONSE"' EXIT HUP INT TERM
 
 ui_progress "Portal bridge"
@@ -58,4 +62,10 @@ pkg-config --cflags --libs gio-2.0 gio-unix-2.0 glib-2.0 \
 cc -O2 -Wall -Wextra -Werror \
     compatibility_helpers/network_manager_compat.c \
     -o "$OUTPUT_DIR/network-manager-compat" \
+    @"$NETWORK_MANAGER_RESPONSE"
+
+ui_progress "NetworkManager privileged backend"
+cc -O2 -Wall -Wextra -Werror -DFREEBSD_FLATPAK_OWNER_UID=$NM_PRIVILEGED_OWNER_UID \
+    compatibility_helpers/network_manager_privileged.c \
+    -o "$OUTPUT_DIR/network-manager-privileged" \
     @"$NETWORK_MANAGER_RESPONSE"
