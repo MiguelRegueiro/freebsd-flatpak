@@ -39,6 +39,51 @@ fn nested_lifecycle_transfers_owning_descriptor() {
     assert!(unsafe { libc::fcntl(received.as_raw_fd(), libc::F_GETFD) } >= 0);
 }
 
+fn serve_test_nested_request(fd: RawFd) -> Result<()> {
+    let mut request = [0u8; 1];
+    read_exact(fd, &mut request)?;
+    write_all(fd, &[request[0].wrapping_add(1)])
+}
+
+#[test]
+fn second_nested_request_is_serviced_while_first_worker_is_blocked() {
+    let listener: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+    let (first_daemon, first_client) = nested_jail_lifecycle_socket().unwrap();
+    let first = fork_nested_request_worker_with(
+        listener.as_raw_fd(),
+        first_daemon,
+        serve_test_nested_request,
+    )
+    .unwrap();
+    let (second_daemon, second_client) = nested_jail_lifecycle_socket().unwrap();
+    let second = fork_nested_request_worker_with(
+        listener.as_raw_fd(),
+        second_daemon,
+        serve_test_nested_request,
+    )
+    .unwrap();
+
+    write_all(second_client.as_raw_fd(), &[41]).unwrap();
+    let mut response = [0u8; 1];
+    read_exact(second_client.as_raw_fd(), &mut response).unwrap();
+    assert_eq!(response, [42]);
+    assert_ne!(first, second);
+    assert_eq!(
+        unsafe { libc::waitpid(first, std::ptr::null_mut(), libc::WNOHANG) },
+        0
+    );
+    unsafe { libc::kill(first, libc::SIGKILL) };
+    assert_eq!(
+        unsafe { libc::waitpid(first, std::ptr::null_mut(), 0) },
+        first
+    );
+    assert_eq!(
+        unsafe { libc::waitpid(second, std::ptr::null_mut(), 0) },
+        second
+    );
+    drop(first_client);
+}
+
 #[test]
 fn nested_client_disconnect_uses_normal_shutdown_signal() {
     let (daemon, client) = nested_jail_lifecycle_socket().unwrap();

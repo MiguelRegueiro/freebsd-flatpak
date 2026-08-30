@@ -883,6 +883,9 @@ pub(crate) fn run_nested_daemon() -> Result<()> {
         bail!("nested secure-launch daemon must run as root");
     }
     let listener = bind_nested_socket()?;
+    if unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) } == libc::SIG_ERR {
+        return Err(io::Error::last_os_error()).context("ignore nested request worker exits");
+    }
     loop {
         let connection = unsafe {
             libc::accept4(
@@ -899,12 +902,36 @@ pub(crate) fn run_nested_daemon() -> Result<()> {
             return Err(io::Error::last_os_error()).context("accept nested secure-launch request");
         }
         let connection = unsafe { OwnedFd::from_raw_fd(connection) };
-        if let Err(error) = serve_nested_request(connection.as_raw_fd()) {
-            eprintln!("freebsd-flatpak secure-launch daemon: {error:#}");
-        }
+        fork_nested_request_worker(listener.as_raw_fd(), connection)?;
     }
 }
 
+fn fork_nested_request_worker(listener: RawFd, connection: OwnedFd) -> Result<libc::pid_t> {
+    fork_nested_request_worker_with(listener, connection, serve_nested_request)
+}
+
+fn fork_nested_request_worker_with(
+    listener: RawFd,
+    connection: OwnedFd,
+    serve: fn(RawFd) -> Result<()>,
+) -> Result<libc::pid_t> {
+    let worker = unsafe { libc::fork() };
+    if worker < 0 {
+        return Err(io::Error::last_os_error()).context("fork nested request worker");
+    }
+    if worker == 0 {
+        unsafe {
+            libc::close(listener);
+            libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+        }
+        if let Err(error) = serve(connection.as_raw_fd()) {
+            eprintln!("freebsd-flatpak secure-launch daemon: {error:#}");
+        }
+        unsafe { libc::_exit(0) };
+    }
+    drop(connection);
+    Ok(worker)
+}
 impl Request {
     fn wire_arguments(&self) -> Vec<OsString> {
         let mut args = vec![
