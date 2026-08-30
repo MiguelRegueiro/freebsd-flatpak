@@ -3,6 +3,7 @@ mod error_output;
 mod help;
 mod info;
 mod install;
+mod kill;
 mod list;
 mod list_table;
 mod permissions;
@@ -75,6 +76,7 @@ pub(crate) fn run() -> Result<()> {
         let handled = match command.as_deref() {
             Some("install") => help::print_install_help(),
             Some("info") => help::print_info_help(),
+            Some("kill") => help::print_kill_help(),
             Some("list") => help::print_list_help(),
             Some("update" | "upgrade") => help::print_update_help(),
             Some("uninstall" | "remove") => help::print_uninstall_help(),
@@ -91,17 +93,18 @@ pub(crate) fn run() -> Result<()> {
         }
     }
 
-    let paths = if command.as_deref() == Some("run") {
-        diagnostics.measure(Detail::Summary, "run", "installation startup", || {
+    let paths = match command.as_deref() {
+        Some("kill") => startup::initialize_for_lifecycle(&diagnostics),
+        Some("run") => diagnostics.measure(Detail::Summary, "run", "installation startup", || {
             startup::initialize_for_run(&diagnostics)
-        })
-    } else {
-        startup::initialize(&diagnostics)
+        }),
+        _ => startup::initialize(&diagnostics),
     }?;
     match command.as_deref() {
         Some("search") => search::cmd_search(&paths, args.collect()),
         Some("install") => install::cmd_install(&paths, args.collect(), &diagnostics),
         Some("info") => info::cmd_info(&paths, args.collect()),
+        Some("kill") => kill::cmd_kill(&paths, args.collect()),
         Some("list") => list::cmd_list(&paths, args.collect()),
         Some("permissions") => permissions::cmd_permissions(&paths, args.collect()),
         Some("ps") => ps::cmd_ps(&paths, args.collect()),

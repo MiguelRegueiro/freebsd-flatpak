@@ -16,6 +16,7 @@ Commands:
   search        Search configured remotes
   run           Run an application
   ps            List running applications
+  kill          Stop a running application
   permissions   Show application permissions
   repair        Verify and repair the installation
   prune         Remove unused stored data
@@ -69,6 +70,15 @@ Options:
 Columns:
   application, arch, branch, runtime, ref, origin, installation,
   active, size, all, help
+"#;
+
+const KILL_HELP: &str = r#"Usage:
+  flatpak kill INSTANCE
+
+Stop a running application by application ID or instance ID.
+
+Options:
+  -h, --help    Show help
 "#;
 
 const INFO_HELP: &str = r#"Usage:
@@ -166,6 +176,7 @@ pub(super) fn print_usage() {
     eprintln!("  flatpak list [--app | --runtime] [--columns=FIELD,...]");
     eprintln!("  flatpak permissions <app-id>");
     eprintln!("  flatpak ps [--columns=FIELD,...]");
+    eprintln!("  flatpak kill INSTANCE");
     eprintln!("  flatpak prune");
     eprintln!("  flatpak repair");
     eprintln!("  flatpak run <app-id> [-- app-args...]");
@@ -194,6 +205,11 @@ pub(super) fn print_list_help() -> bool {
 
 pub(super) fn print_info_help() -> bool {
     print!("{INFO_HELP}");
+    true
+}
+
+pub(super) fn print_kill_help() -> bool {
+    print!("{KILL_HELP}");
     true
 }
 

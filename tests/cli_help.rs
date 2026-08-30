@@ -20,6 +20,7 @@ Commands:
   search        Search configured remotes
   run           Run an application
   ps            List running applications
+  kill          Stop a running application
   permissions   Show application permissions
   repair        Verify and repair the installation
   prune         Remove unused stored data
@@ -58,6 +59,14 @@ Options:
   -y, --assumeyes      Automatically answer yes for all questions
   --noninteractive     Produce minimal output and don't ask questions
   -h, --help           Show help
+"#;
+const EXPECTED_KILL_HELP: &str = r#"Usage:
+  flatpak kill INSTANCE
+
+Stop a running application by application ID or instance ID.
+
+Options:
+  -h, --help    Show help
 "#;
 
 #[test]
@@ -111,6 +120,23 @@ fn transaction_command_help_documents_visible_options() {
     }
 }
 
+#[test]
+fn kill_help_is_available_without_initializing_an_installation() {
+    for flag in ["-h", "--help"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_flatpak"))
+            .args(["kill", flag])
+            .env_remove("HOME")
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "{flag} failed: {output:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            EXPECTED_KILL_HELP
+        );
+        assert!(output.stderr.is_empty());
+    }
+}
 #[test]
 fn compatibility_aliases_work_but_stay_hidden_from_top_level_help() {
     for (alias, expected) in [

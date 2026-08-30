@@ -3,6 +3,7 @@ use super::generation_cleanup::deployment_marker;
 use super::installation_paths::Installation;
 use super::record_storage::{ensure_layout, read_kv_file, required, safe_name, write_atomic};
 use super::AppRecord;
+use crate::process_identity::ProcessIdentity;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::fs;
@@ -118,6 +119,10 @@ fn write_run_record_inner(
         "app_id={app_id}\ninstance_id={instance_id}\nroot={}\nlauncher_pid={launcher_pid}\nchild_pid={child_pid}\n",
         root.display()
     );
+    if let Some(identity) = ProcessIdentity::for_pid(launcher_pid as libc::pid_t)? {
+        use std::fmt::Write as _;
+        writeln!(data, "launcher_start={identity}")?;
+    }
     if let Some(app) = deployment {
         use std::fmt::Write as _;
         writeln!(data, "app_ref={}", app.app_ref)?;
@@ -215,6 +220,31 @@ pub fn read_run_records(paths: &Installation) -> Result<Vec<BTreeMap<String, Str
         records.push(record);
     }
     Ok(records)
+}
+
+pub fn run_record_launcher_active(values: &BTreeMap<String, String>) -> Result<bool> {
+    let Some(pid) = values
+        .get("launcher_pid")
+        .and_then(|value| value.parse::<libc::pid_t>().ok())
+        .filter(|pid| *pid > 0)
+    else {
+        return Ok(false);
+    };
+    let Some(recorded_value) = values.get("launcher_start") else {
+        // Records from older versions did not carry a kernel process identity.
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return Ok(true);
+        }
+        let error = std::io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ESRCH) => Ok(false),
+            Some(libc::EPERM) => Ok(true),
+            _ => Err(error).with_context(|| format!("inspect legacy run-record launcher {pid}")),
+        };
+    };
+    let recorded = ProcessIdentity::parse(recorded_value)
+        .with_context(|| format!("invalid identity for run-record launcher {pid}"))?;
+    Ok(ProcessIdentity::for_pid(pid)?.is_some_and(|current| current == recorded))
 }
 
 #[cfg(test)]

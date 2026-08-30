@@ -9,6 +9,25 @@ pub(crate) fn initialize(diagnostics: &Diagnostics) -> Result<Installation> {
     initialize_inner(diagnostics, true)
 }
 
+// Lifecycle commands only inspect already-published run records. Avoid remote
+// initialization and broad stale-resource recovery so process control remains
+// responsive while another launcher is still constructing its sandbox.
+pub(crate) fn initialize_for_lifecycle(diagnostics: &Diagnostics) -> Result<Installation> {
+    let paths = diagnostics.measure(
+        Detail::Detailed,
+        "installation",
+        "resolve paths",
+        Installation::from_env,
+    )?;
+    diagnostics.measure(
+        Detail::Detailed,
+        "installation",
+        "ensure state layout",
+        || state::ensure_layout(&paths),
+    )?;
+    Ok(paths)
+}
+
 // `run` resolves already-installed deployments from local state and never uses
 // OSTree remotes. Keep crash and transient-resource recovery below, but avoid
 // rewriting remote configuration and importing trust keys on every launch.

@@ -12,6 +12,18 @@ fn reaper_lock() -> std::sync::MutexGuard<'static, ()> {
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[test]
+fn force_stop_rejects_a_reused_launcher_pid_identity() {
+    let pid = std::process::id() as libc::pid_t;
+    let current = ProcessIdentity::for_pid(pid).unwrap().unwrap();
+    let stale = ProcessIdentity::parse("0:0").unwrap();
+    assert_ne!(current, stale);
+    assert_eq!(
+        force_stop_launcher(pid, stale).unwrap(),
+        ForceStopResult::Stale
+    );
+}
+
+#[test]
 fn termination_kills_and_reaps_tracked_and_detached_processes() {
     let _lock = reaper_lock();
     let suffix = SystemTime::now()

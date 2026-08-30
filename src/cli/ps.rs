@@ -98,7 +98,7 @@ pub fn output(paths: &Installation, args: Vec<String>) -> Result<String> {
             .get("launcher_pid")
             .and_then(|value| value.parse::<i32>().ok())
             .unwrap_or(0);
-        if launcher_pid <= 0 || !process_alive(launcher_pid) {
+        if launcher_pid <= 0 || !state::run_record_launcher_active(&record)? {
             continue;
         }
         instances.push(Instance {
@@ -202,10 +202,6 @@ fn append_row(output: &mut String, row: &[String], widths: &[usize]) {
         }
     }
     output.push('\n');
-}
-
-fn process_alive(pid: i32) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 pub(crate) fn cmd_ps(paths: &Installation, args: Vec<String>) -> Result<()> {

@@ -30,7 +30,7 @@ pub fn recover_stale_mounts(paths: &Installation) -> Result<()> {
             .unwrap_or(0);
         let root = record.get("root").map(PathBuf::from);
 
-        if launcher_pid > 0 && process_alive(launcher_pid) {
+        if launcher_pid > 0 && state::run_record_launcher_active(&record)? {
             continue;
         }
 
@@ -130,16 +130,15 @@ fn mount_identity(path: &Path) -> Result<(u64, u64)> {
 }
 
 fn active_run_roots(paths: &Installation) -> Result<Vec<PathBuf>> {
-    Ok(state::read_run_records(paths)?
-        .into_iter()
-        .filter(|record| {
-            record
-                .get("launcher_pid")
-                .and_then(|value| value.parse::<i32>().ok())
-                .is_some_and(|pid| pid > 0 && process_alive(pid))
-        })
-        .filter_map(|record| record.get("root").map(PathBuf::from))
-        .collect())
+    let mut roots = Vec::new();
+    for record in state::read_run_records(paths)? {
+        if state::run_record_launcher_active(&record)? {
+            if let Some(root) = record.get("root") {
+                roots.push(PathBuf::from(root));
+            }
+        }
+    }
+    Ok(roots)
 }
 
 pub(super) fn belongs_to_any_root(path: &Path, roots: &[PathBuf]) -> bool {

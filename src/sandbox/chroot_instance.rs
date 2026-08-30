@@ -6,7 +6,9 @@ use super::launch_environment::{
     ensure_metadata_runtime_dirs, launch_env, merge_env, prepend_env_paths,
 };
 use super::mount_operations::owned_mount_teardown_order;
-use super::process_signals::{install_signal_handlers, ACTIVE_PROCESS_GROUP, LAST_SIGNAL};
+use super::process_signals::{
+    install_signal_handlers, ACTIVE_PROCESS_GROUP, FORCE_STOP_SIGNAL, LAST_SIGNAL,
+};
 use super::process_supervision::ProcessReaper;
 use super::spawn_broker::SpawnBroker;
 use super::stale_sandbox_recovery::{
@@ -73,7 +75,7 @@ pub(super) struct ChrootInstance {
     pub(super) nullfs_mounts: Vec<NullfsMapping>,
     pub(super) mount_staging_ready: bool,
     pub(super) next_mount_staging_id: usize,
-    supervisor: Option<Arc<ProcessReaper>>,
+    supervisor: Arc<ProcessReaper>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +114,7 @@ impl ChrootInstance {
         run_record: PathBuf,
         deployment: state::AppRecord,
         extension_refs: Vec<String>,
+        supervisor: Arc<ProcessReaper>,
     ) -> Self {
         Self {
             paths,
@@ -140,7 +143,7 @@ impl ChrootInstance {
             nullfs_mounts: Vec::new(),
             mount_staging_ready: false,
             next_mount_staging_id: 0,
-            supervisor: None,
+            supervisor,
         }
     }
 
@@ -203,8 +206,7 @@ impl ChrootInstance {
             supplementary_gids: self.supplementary_gids.clone(),
             environment: env.clone(),
         });
-        let supervisor = Arc::new(ProcessReaper::acquire()?);
-        self.supervisor = Some(supervisor.clone());
+        let supervisor = self.supervisor.clone();
         let _spawn_broker = SpawnBroker::bind(&self.paths, execution.clone(), supervisor.clone())?;
         let translated_args = self.host_filesystem.translate_args(&app.args)?;
         let app_args = launch_args(app, translated_args)?;
@@ -303,7 +305,6 @@ impl ChrootInstance {
             .stderr(Stdio::inherit())
             .process_group(0);
 
-        LAST_SIGNAL.store(0, Ordering::SeqCst);
         let mut child = command.spawn().context("launch app through chroot")?;
         let process_tree = supervisor.track(child.id())?;
         spawn.finish("launch", "build command and spawn");
@@ -324,19 +325,21 @@ impl ChrootInstance {
                 &self.deployment,
                 &self.extension_refs,
             )?;
-            let status = process_tree.wait_for_exit(&mut child, || {
-                matches!(
-                    LAST_SIGNAL.load(Ordering::SeqCst),
-                    libc::SIGINT | libc::SIGTERM
-                )
-            })?;
+            let status =
+                process_tree.wait_for_exit_with_signal(&mut child, || {
+                    match LAST_SIGNAL.load(Ordering::SeqCst) {
+                        FORCE_STOP_SIGNAL => Some(libc::SIGKILL),
+                        libc::SIGINT | libc::SIGTERM => Some(libc::SIGTERM),
+                        _ => None,
+                    }
+                })?;
             Ok(status)
         })();
         ACTIVE_PROCESS_GROUP.store(0, Ordering::SeqCst);
         let status = launch_result?;
 
         let signal = LAST_SIGNAL.swap(0, Ordering::SeqCst);
-        if signal != 0 {
+        if signal != 0 && signal != FORCE_STOP_SIGNAL {
             eprintln!("received signal {signal}; app process exited, cleaning up sandbox");
         }
 

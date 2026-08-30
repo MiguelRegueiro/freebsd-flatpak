@@ -1,3 +1,5 @@
+use super::process_signals::FORCE_STOP_SIGNAL;
+use crate::process_identity::ProcessIdentity;
 use anyhow::{bail, Context, Result};
 use std::process::{Child, ExitStatus};
 use std::thread;
@@ -208,6 +210,56 @@ impl Drop for SandboxProcessTree {
     fn drop(&mut self) {
         let _ = self.terminate();
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ForceStopResult {
+    Signaled,
+    Exited,
+    Stale,
+}
+
+pub(crate) fn force_stop_launcher(
+    pid: libc::pid_t,
+    expected: ProcessIdentity,
+) -> Result<ForceStopResult> {
+    if ProcessIdentity::for_pid(pid)? != Some(expected) {
+        return Ok(ForceStopResult::Stale);
+    }
+    let mut status = ReaperStatus::default();
+    let result = unsafe {
+        libc::procctl(
+            libc::P_PID,
+            pid.into(),
+            libc::PROC_REAP_STATUS,
+            (&mut status as *mut ReaperStatus).cast(),
+        )
+    };
+    if result == -1 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(ForceStopResult::Exited);
+        }
+        return Err(error).with_context(|| format!("inspect launcher process {pid}"));
+    }
+    const REAPER_STATUS_OWNED: u32 = 0x0000_0001;
+    if status.flags & REAPER_STATUS_OWNED == 0 {
+        return Ok(ForceStopResult::Stale);
+    }
+    // Narrow the identity/status inspection window before delivering the signal.
+    if ProcessIdentity::for_pid(pid)? != Some(expected) {
+        return Ok(ForceStopResult::Exited);
+    }
+
+    let result = unsafe { libc::kill(pid, FORCE_STOP_SIGNAL) };
+    if result == -1 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(ForceStopResult::Exited);
+        }
+        return Err(error).with_context(|| format!("request force-stop from launcher {pid}"));
+    }
+    Ok(ForceStopResult::Signaled)
 }
 
 fn set_reaper_status(acquire: bool) -> Result<()> {

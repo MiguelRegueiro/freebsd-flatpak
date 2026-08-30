@@ -8,6 +8,7 @@ mod host_resources;
 mod installation;
 mod ostree;
 mod portal_integration;
+mod process_identity;
 mod remotes;
 mod sandbox;
 #[allow(dead_code)]

@@ -58,6 +58,15 @@ fn checkout_pin_records_both_pending_deployments() {
     )
     .unwrap();
     let values = read_run_records(&paths).unwrap();
+    let launcher_identity =
+        crate::process_identity::ProcessIdentity::for_pid(std::process::id() as libc::pid_t)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        values[0].get("launcher_start"),
+        Some(&launcher_identity.to_string())
+    );
+    assert!(run_record_launcher_active(&values[0]).unwrap());
     assert_eq!(
         values[0].get("app_dir"),
         Some(&app_dir.display().to_string())
@@ -66,6 +75,25 @@ fn checkout_pin_records_both_pending_deployments() {
         values[0].get("runtime_dir"),
         Some(&runtime_dir.display().to_string())
     );
+
+    let mut reused_pid = values[0].clone();
+    reused_pid.insert("launcher_start".to_string(), "0:0".to_string());
+    assert!(!run_record_launcher_active(&reused_pid).unwrap());
+
+    let mut missing_pid = values[0].clone();
+    missing_pid.insert("launcher_pid".to_string(), i32::MAX.to_string());
+    assert!(!run_record_launcher_active(&missing_pid).unwrap());
+
+    let mut legacy = values[0].clone();
+    legacy.remove("launcher_start");
+    assert!(run_record_launcher_active(&legacy).unwrap());
+
+    legacy.insert("launcher_pid".to_string(), i32::MAX.to_string());
+    assert!(!run_record_launcher_active(&legacy).unwrap());
+
+    let mut malformed = values[0].clone();
+    malformed.insert("launcher_start".to_string(), "invalid".to_string());
+    assert!(run_record_launcher_active(&malformed).is_err());
 
     remove_run_record(&record).unwrap();
     let _ = fs::remove_dir_all(&temp);

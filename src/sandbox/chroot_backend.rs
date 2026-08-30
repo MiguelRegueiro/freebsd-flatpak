@@ -4,7 +4,8 @@ use super::filesystem_grants::HostFilesystem;
 use super::flatpak_data_mount_plan::FlatpakDataMountPlan;
 use super::flatpak_installation::FlatpakInstallationProjection;
 use super::launch_application::FlatpakApp;
-use super::process_signals::install_signal_handlers;
+use super::process_signals::{install_signal_handlers, reset_signal_state};
+use super::process_supervision::ProcessReaper;
 use super::sandbox_identity::SandboxIdentity;
 use super::sandbox_root::{app_allows_network, prepare_root, write_flatpak_info};
 use super::static_overrides::{effective_metadata, permission_enabled};
@@ -27,6 +28,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static INSTANCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -131,6 +133,7 @@ impl ChrootNullfsBackend {
         app: &FlatpakApp,
         desktop: &DesktopSession,
         diagnostics: &Diagnostics,
+        supervisor: Arc<ProcessReaper>,
     ) -> Result<ChrootInstance> {
         let host_resources = diagnostics.timer(Detail::Summary);
         let identity_timing = diagnostics.timer(Detail::Detailed);
@@ -247,6 +250,7 @@ impl ChrootNullfsBackend {
             run_record,
             deployment,
             extension_refs,
+            supervisor,
         );
 
         root_layout.finish("sandbox", "root layout and metadata");
@@ -394,6 +398,7 @@ impl SandboxBackend for ChrootNullfsBackend {
         diagnostics: &Diagnostics,
     ) -> Result<ExitStatus> {
         install_signal_handlers();
+        reset_signal_state();
         if !desktop.wayland_socket().exists() {
             bail!(
                 "Wayland socket does not exist: {}",
@@ -402,7 +407,8 @@ impl SandboxBackend for ChrootNullfsBackend {
         }
 
         let entry = resolve_entry(app)?;
-        let mut instance = self.prepare(app, desktop, diagnostics)?;
+        let supervisor = Arc::new(ProcessReaper::acquire()?);
+        let mut instance = self.prepare(app, desktop, diagnostics, supervisor)?;
         let status = instance.launch(app, desktop, &entry, diagnostics)?;
         instance.cleanup()?;
         Ok(status)
