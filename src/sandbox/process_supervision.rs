@@ -38,13 +38,20 @@ impl ProcessReaper {
             .map(|process| SandboxSubtree(process.subtree)))
     }
 
-    pub(super) fn terminate_subtree_with_signal(
+    pub(super) fn terminate_orphaned_subtree_with_signal(
         &self,
         subtree: SandboxSubtree,
         signal: libc::c_int,
-    ) -> Result<()> {
+    ) -> Result<bool> {
+        if reaper_pid_info()?
+            .into_iter()
+            .any(|process| process.pid == subtree.0)
+        {
+            return Ok(false);
+        }
         let tree = std::mem::ManuallyDrop::new(SandboxProcessTree { subtree: subtree.0 });
-        tree.terminate_with_signal_mode(signal, false)
+        tree.terminate_with_signal_mode(signal, false)?;
+        Ok(true)
     }
 }
 

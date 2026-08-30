@@ -2,7 +2,7 @@ use super::*;
 use std::fs;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 fn reaper_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -107,23 +107,54 @@ fn termination_kills_and_reaps_tracked_and_detached_processes() {
 }
 
 #[test]
-fn one_reaper_tracks_independent_subtrees() {
+fn orphan_cleanup_waits_for_the_tracked_root_to_exit() {
     let _lock = reaper_lock();
-    let reaper = Arc::new(ProcessReaper::acquire().unwrap());
-    let mut first = Command::new("sleep").arg("30").spawn().unwrap();
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let pid_file = std::env::temp_dir().join(format!(
+        "freebsd-flatpak-orphan-cleanup-{}-{suffix}.pid",
+        std::process::id()
+    ));
+    let reaper = ProcessReaper::acquire().unwrap();
+    let mut first = Command::new("/bin/sh")
+        .args([
+            "-c",
+            &format!(
+                "trap '' INT TERM; sleep 30 & echo $! > '{}'; wait",
+                pid_file.display()
+            ),
+        ])
+        .spawn()
+        .unwrap();
     let mut second = Command::new("sleep").arg("30").spawn().unwrap();
     let first_tree = reaper.track(first.id()).unwrap();
     let second_tree = reaper.track(second.id()).unwrap();
     let first_subtree = reaper.subtree_for_descendant(first.id()).unwrap().unwrap();
-    let cleanup_reaper = reaper.clone();
-    let cleanup = thread::spawn(move || {
-        cleanup_reaper
-            .terminate_subtree_with_signal(first_subtree, libc::SIGINT)
-            .unwrap();
-    });
-    let first_status = first.wait().unwrap();
-    assert_eq!(first_status.signal(), Some(libc::SIGINT));
-    cleanup.join().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let descendant = loop {
+        if let Ok(pid) = fs::read_to_string(&pid_file) {
+            if let Ok(pid) = pid.trim().parse::<i32>() {
+                break pid;
+            }
+        }
+        assert!(Instant::now() < deadline, "child pid was not published");
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(!reaper
+        .terminate_orphaned_subtree_with_signal(first_subtree, libc::SIGINT)
+        .unwrap());
+    assert_eq!(unsafe { libc::kill(first.id() as i32, 0) }, 0);
+    assert_eq!(unsafe { libc::kill(descendant, 0) }, 0);
+
+    assert_eq!(unsafe { libc::kill(first.id() as i32, libc::SIGKILL) }, 0);
+    assert_eq!(first.wait().unwrap().signal(), Some(libc::SIGKILL));
+    assert!(reaper
+        .terminate_orphaned_subtree_with_signal(first_subtree, libc::SIGINT)
+        .unwrap());
+    assert_ne!(unsafe { libc::kill(descendant, 0) }, 0);
     drop(first_tree);
     assert_eq!(unsafe { libc::kill(second.id() as i32, 0) }, 0);
     let status = second_tree.wait_for_exit(&mut second, || true).unwrap();
@@ -131,5 +162,6 @@ fn one_reaper_tracks_independent_subtrees() {
         status.signal(),
         Some(libc::SIGTERM | libc::SIGKILL)
     ));
+    let _ = fs::remove_file(pid_file);
     drop(reaper);
 }

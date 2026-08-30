@@ -688,17 +688,21 @@ fn raw_wait_status(status: ExitStatus) -> u32 {
     status.into_raw() as u32
 }
 
-fn terminate_watch_bus_owner(
+fn cleanup_exited_watch_bus_owner(
     supervisor: &ProcessReaper,
     owner_subtree: Option<super::process_supervision::SandboxSubtree>,
     caller_pid: u32,
-) {
+) -> bool {
     let Some(owner_subtree) = owner_subtree else {
         eprintln!("spawn broker WATCH_BUS caller pid {caller_pid} has no tracked reaper subtree");
-        return;
+        return true;
     };
-    if let Err(error) = supervisor.terminate_subtree_with_signal(owner_subtree, libc::SIGINT) {
-        eprintln!("spawn broker WATCH_BUS caller subtree cleanup failed: {error:#}");
+    match supervisor.terminate_orphaned_subtree_with_signal(owner_subtree, libc::SIGINT) {
+        Ok(cleaned) => cleaned,
+        Err(error) => {
+            eprintln!("spawn broker WATCH_BUS orphaned subtree cleanup failed: {error:#}");
+            true
+        }
     }
 }
 
@@ -825,7 +829,6 @@ unsafe fn handle_connection(
                         );
                         if signal == Some(libc::SIGINT) && !watch_bus_triggered {
                             watch_bus_triggered = true;
-                            terminate_watch_bus_owner(&supervisor, watch_owner_subtree, caller_pid);
                         }
                         signal
                     });
@@ -835,12 +838,17 @@ unsafe fn handle_connection(
                         exited[4..].copy_from_slice(&raw_wait_status(status).to_be_bytes());
                         let _ = send_frame(fd, &frame(SPAWN_EXITED, request, &exited, 0), &exited);
                     }
-                    while watch_bus
-                        && !watch_bus_triggered
-                        && !connections.stopping.load(Ordering::SeqCst)
-                    {
-                        if watch_bus_termination_requested(fd, request) {
-                            terminate_watch_bus_owner(&supervisor, watch_owner_subtree, caller_pid);
+                    while watch_bus && !connections.stopping.load(Ordering::SeqCst) {
+                        if !watch_bus_triggered && watch_bus_termination_requested(fd, request) {
+                            watch_bus_triggered = true;
+                        }
+                        if watch_bus_triggered
+                            && cleanup_exited_watch_bus_owner(
+                                &supervisor,
+                                watch_owner_subtree,
+                                caller_pid,
+                            )
+                        {
                             break;
                         }
                         thread::sleep(std::time::Duration::from_millis(100));
