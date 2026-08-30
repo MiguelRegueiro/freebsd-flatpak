@@ -29,12 +29,15 @@ const LIFECYCLE_TEST_EXITED: u16 = 7;
 const SPAWN: u16 = 8;
 const SPAWN_ACCEPTED: u16 = 9;
 const SPAWN_EXITED: u16 = 10;
+const SPAWN_TERMINATE: u16 = 11;
 const MAX_TARGET_FD: i32 = 65_535;
+const SPAWN_WATCH_BUS: u32 = 1 << 4;
 
 struct SpawnRequest {
     cwd: Option<Vec<u8>>,
     flags: u32,
     argv: Vec<Vec<u8>>,
+    caller_pid: u32,
     environment: Vec<(Vec<u8>, Vec<u8>)>,
     mappings: Vec<(i32, OwnedFd)>,
 }
@@ -458,6 +461,45 @@ unsafe fn send_frame(fd: i32, header: &[u8], payload: &[u8]) -> bool {
     }
 }
 
+unsafe fn watch_bus_termination_requested(fd: i32, request: u32) -> bool {
+    let mut state = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    if unsafe { libc::poll(&mut state, 1, 0) } <= 0 {
+        return false;
+    }
+    if state.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+        return true;
+    }
+    if state.revents & libc::POLLIN == 0 {
+        return false;
+    }
+    let Some((packet, fds)) = receive_packet(fd) else {
+        return true;
+    };
+    matches!(
+        parse_frame(&packet),
+        Some((SPAWN_TERMINATE, message_request, 0, 0)) if message_request == request
+    ) && fds.is_empty()
+}
+
+unsafe fn spawn_termination_signal(
+    fd: i32,
+    request: u32,
+    watch_bus: bool,
+    broker_stopping: bool,
+) -> Option<libc::c_int> {
+    if broker_stopping {
+        Some(libc::SIGTERM)
+    } else if watch_bus && watch_bus_termination_requested(fd, request) {
+        Some(libc::SIGINT)
+    } else {
+        None
+    }
+}
+
 fn decode_u32(payload: &[u8], offset: &mut usize) -> Option<u32> {
     let end = offset.checked_add(4)?;
     let value = u32::from_be_bytes(payload.get(*offset..end)?.try_into().ok()?);
@@ -526,12 +568,14 @@ fn parse_spawn(
         }
         mappings.push((target, source));
     }
+    let caller_pid = decode_u32(payload, &mut offset).ok_or("missing caller process id")?;
     if offset != payload.len() {
         return Err("trailing payload bytes");
     }
     Ok(SpawnRequest {
         flags,
         cwd: (!cwd.is_empty()).then_some(cwd),
+        caller_pid,
         argv,
         environment,
         mappings,
@@ -644,6 +688,36 @@ fn raw_wait_status(status: ExitStatus) -> u32 {
     status.into_raw() as u32
 }
 
+fn terminate_watch_bus_owner(
+    supervisor: &ProcessReaper,
+    owner_subtree: Option<super::process_supervision::SandboxSubtree>,
+    caller_pid: u32,
+) {
+    let Some(owner_subtree) = owner_subtree else {
+        eprintln!("spawn broker WATCH_BUS caller pid {caller_pid} has no tracked reaper subtree");
+        return;
+    };
+    if let Err(error) = supervisor.terminate_subtree_with_signal(owner_subtree, libc::SIGINT) {
+        eprintln!("spawn broker WATCH_BUS caller subtree cleanup failed: {error:#}");
+    }
+}
+
+fn resolve_watch_bus_owner<T>(
+    watch_bus: bool,
+    caller_pid: u32,
+    resolve: impl FnOnce(u32) -> Result<Option<T>>,
+) -> Result<Option<T>> {
+    if !watch_bus {
+        return Ok(None);
+    }
+    if caller_pid == 0 {
+        bail!("WATCH_BUS caller has no authenticated process id");
+    }
+    resolve(caller_pid)?
+        .with_context(|| format!("WATCH_BUS caller pid {caller_pid} has no current reaper subtree"))
+        .map(Some)
+}
+
 unsafe fn handle_connection(
     connection: OwnedFd,
     context: Arc<SandboxExecutionContext>,
@@ -701,7 +775,21 @@ unsafe fn handle_connection(
                         }
                     };
                     let cwd_bytes = spawn_request.cwd.as_ref().map_or(0, Vec::len);
-                    eprintln!("spawn broker request {request}: flags={} cwd_bytes={cwd_bytes} argv_count={} environment_count={} fd_mappings={} payload_bytes={}", spawn_request.flags, spawn_request.argv.len(), spawn_request.environment.len(), spawn_request.mappings.len(), payload.len());
+                    eprintln!("spawn broker request {request}: flags={} caller_pid={} cwd_bytes={cwd_bytes} argv_count={} environment_count={} fd_mappings={} payload_bytes={}", spawn_request.flags, spawn_request.caller_pid, spawn_request.argv.len(), spawn_request.environment.len(), spawn_request.mappings.len(), payload.len());
+                    let watch_bus = spawn_request.flags & SPAWN_WATCH_BUS != 0;
+                    let caller_pid = spawn_request.caller_pid;
+                    let watch_owner_subtree = match resolve_watch_bus_owner(
+                        watch_bus,
+                        caller_pid,
+                        |pid| supervisor.subtree_for_descendant(pid),
+                    ) {
+                        Ok(subtree) => subtree,
+                        Err(error) => {
+                            eprintln!("spawn broker rejected request {request}: stage=watch-bus-owner error={error:#}");
+                            connections.release(fd);
+                            return;
+                        }
+                    };
                     let mut child = match spawn_in_existing_sandbox(&context, spawn_request) {
                         Ok(child) => child,
                         Err(error) => {
@@ -711,21 +799,51 @@ unsafe fn handle_connection(
                         }
                     };
                     let portal_pid = child.id();
+                    let tree = match supervisor.track(portal_pid) {
+                        Ok(tree) => tree,
+                        Err(error) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            eprintln!("spawn broker rejected request {request}: stage=track error={error:#}");
+                            connections.release(fd);
+                            return;
+                        }
+                    };
                     let accepted = portal_pid.to_be_bytes();
                     if !send_frame(fd, &frame(SPAWN_ACCEPTED, request, &accepted, 0), &accepted) {
+                        let _ = tree.wait_for_exit(&mut child, || true);
                         connections.release(fd);
                         return;
                     }
-                    let status = supervisor.track(portal_pid).and_then(|tree| {
-                        tree.wait_for_exit(&mut child, || {
-                            connections.stopping.load(Ordering::SeqCst)
-                        })
+                    let mut watch_bus_triggered = false;
+                    let status = tree.wait_for_exit_with_signal(&mut child, || {
+                        let signal = spawn_termination_signal(
+                            fd,
+                            request,
+                            watch_bus,
+                            connections.stopping.load(Ordering::SeqCst),
+                        );
+                        if signal == Some(libc::SIGINT) && !watch_bus_triggered {
+                            watch_bus_triggered = true;
+                            terminate_watch_bus_owner(&supervisor, watch_owner_subtree, caller_pid);
+                        }
+                        signal
                     });
                     if let Ok(status) = status {
                         let mut exited = [0; 8];
                         exited[..4].copy_from_slice(&portal_pid.to_be_bytes());
                         exited[4..].copy_from_slice(&raw_wait_status(status).to_be_bytes());
                         let _ = send_frame(fd, &frame(SPAWN_EXITED, request, &exited, 0), &exited);
+                    }
+                    while watch_bus
+                        && !watch_bus_triggered
+                        && !connections.stopping.load(Ordering::SeqCst)
+                    {
+                        if watch_bus_termination_requested(fd, request) {
+                            terminate_watch_bus_owner(&supervisor, watch_owner_subtree, caller_pid);
+                            break;
+                        }
+                        thread::sleep(std::time::Duration::from_millis(100));
                     }
                 }
                 _ => {}
@@ -878,6 +996,7 @@ mod tests {
         field(&mut payload, b"marker");
         field(&mut payload, b"PATH");
         field(&mut payload, b"/custom/bin");
+        payload.extend_from_slice(&1234u32.to_be_bytes());
 
         let request = parse_spawn(&payload, Vec::new()).unwrap();
         assert_eq!(request.cwd.as_deref(), Some(b"/app".as_slice()));
@@ -889,6 +1008,7 @@ mod tests {
             merge_environment(&[("PATH".into(), "/usr/bin".into())], &request.environment),
             Some(vec![("PATH".into(), "/custom/bin".into())])
         );
+        assert_eq!(request.caller_pid, 1234);
     }
     #[test]
     fn spawn_payload_rejects_duplicate_fd_targets() {
@@ -903,6 +1023,7 @@ mod tests {
         payload.extend_from_slice(b"x");
         payload.extend_from_slice(&3u32.to_be_bytes());
         payload.extend_from_slice(&3u32.to_be_bytes());
+        payload.extend_from_slice(&1234u32.to_be_bytes());
         assert!(parse_spawn(&payload, vec![a, b]).is_err());
     }
     #[test]
@@ -1046,3 +1167,7 @@ mod tests {
         p
     }
 }
+
+#[cfg(test)]
+#[path = "tests/spawn_broker_watch_bus.rs"]
+mod watch_bus_tests;

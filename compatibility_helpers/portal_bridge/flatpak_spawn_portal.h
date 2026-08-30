@@ -6,7 +6,10 @@
 extern const char FLATPAK_SPAWN_XML[];
 extern const GDBusInterfaceVTable FLATPAK_SPAWN_VTABLE;
 void flatpak_spawn_watch_lifecycle(BridgeState *state, int fd, guint32 request,
-                                   guint32 pid, const char *sender);
+                                   guint32 pid, const char *sender,
+                                   guint32 flags);
+void flatpak_spawn_close_watch_bus_lifecycles(BridgeState *state,
+                                              const char *sender);
 void flatpak_spawn_cleanup_lifecycles(BridgeState *state);
 void flatpak_spawn_lifecycle_free(gpointer lifecycle);
 void flatpak_spawn_cache_sender_root(BridgeState *state, const char *sender);

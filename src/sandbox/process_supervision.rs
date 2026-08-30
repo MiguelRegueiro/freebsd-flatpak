@@ -26,6 +26,24 @@ impl ProcessReaper {
         let subtree = i32::try_from(subtree).context("sandbox process id exceeds pid_t")?;
         Ok(SandboxProcessTree { subtree })
     }
+
+    pub(super) fn subtree_for_descendant(&self, descendant: u32) -> Result<Option<SandboxSubtree>> {
+        let descendant =
+            i32::try_from(descendant).context("sandbox descendant id exceeds pid_t")?;
+        Ok(reaper_pid_info()?
+            .into_iter()
+            .find(|process| process.pid == descendant)
+            .map(|process| SandboxSubtree(process.subtree)))
+    }
+
+    pub(super) fn terminate_subtree_with_signal(
+        &self,
+        subtree: SandboxSubtree,
+        signal: libc::c_int,
+    ) -> Result<()> {
+        let tree = std::mem::ManuallyDrop::new(SandboxProcessTree { subtree: subtree.0 });
+        tree.terminate_with_signal_mode(signal, false)
+    }
 }
 
 impl Drop for ProcessReaper {
@@ -40,11 +58,22 @@ pub(super) struct SandboxProcessTree {
     subtree: libc::pid_t,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SandboxSubtree(libc::pid_t);
+
 impl SandboxProcessTree {
     pub(super) fn wait_for_exit(
         &self,
         child: &mut Child,
         mut termination_requested: impl FnMut() -> bool,
+    ) -> Result<ExitStatus> {
+        self.wait_for_exit_with_signal(child, || termination_requested().then_some(libc::SIGTERM))
+    }
+
+    pub(super) fn wait_for_exit_with_signal(
+        &self,
+        child: &mut Child,
+        mut termination_signal: impl FnMut() -> Option<libc::c_int>,
     ) -> Result<ExitStatus> {
         let mut status = None;
         let mut termination = None;
@@ -57,8 +86,9 @@ impl SandboxProcessTree {
                 return status.context("sandbox process tree exited without app status");
             }
 
-            if termination.is_none() && termination_requested() {
-                termination = Some((libc::SIGTERM, Instant::now() + TERMINATION_GRACE));
+            if termination.is_none() {
+                termination =
+                    termination_signal().map(|signal| (signal, Instant::now() + TERMINATION_GRACE));
             }
             if let Some((signal, deadline)) = termination {
                 self.signal(signal)?;
@@ -77,10 +107,22 @@ impl SandboxProcessTree {
     }
 
     fn terminate(&self) -> Result<()> {
-        if self.wait_until_empty(TERMINATION_GRACE, libc::SIGTERM)? {
+        self.terminate_with_signal(libc::SIGTERM)
+    }
+
+    fn terminate_with_signal(&self, signal: libc::c_int) -> Result<()> {
+        self.terminate_with_signal_mode(signal, true)
+    }
+
+    fn terminate_with_signal_mode(
+        &self,
+        signal: libc::c_int,
+        reap_subtree_root: bool,
+    ) -> Result<()> {
+        if self.wait_until_empty(TERMINATION_GRACE, signal, reap_subtree_root)? {
             return Ok(());
         }
-        if self.wait_until_empty(TERMINATION_GRACE, libc::SIGKILL)? {
+        if self.wait_until_empty(TERMINATION_GRACE, libc::SIGKILL, reap_subtree_root)? {
             return Ok(());
         }
 
@@ -90,10 +132,15 @@ impl SandboxProcessTree {
         )
     }
 
-    fn wait_until_empty(&self, timeout: Duration, signal: libc::c_int) -> Result<bool> {
+    fn wait_until_empty(
+        &self,
+        timeout: Duration,
+        signal: libc::c_int,
+        reap_subtree_root: bool,
+    ) -> Result<bool> {
         let deadline = Instant::now() + timeout;
         loop {
-            if !self.processes_remain(true)? {
+            if !self.processes_remain(reap_subtree_root)? {
                 return Ok(true);
             }
             self.signal(signal)?;
@@ -125,33 +172,8 @@ impl SandboxProcessTree {
     }
 
     fn subtree_pids(&self) -> Result<Vec<libc::pid_t>> {
-        let descendant_count = reaper_status()?.descendants as usize;
-        if descendant_count == 0 {
-            return Ok(Vec::new());
-        }
-
-        let mut info = vec![ReaperPidInfo::default(); descendant_count + 16];
-        let mut request = ReaperPids {
-            count: info.len() as u32,
-            pad: [0; 15],
-            pids: info.as_mut_ptr(),
-        };
-        let result = unsafe {
-            libc::procctl(
-                libc::P_PID,
-                0,
-                libc::PROC_REAP_GETPIDS,
-                (&mut request as *mut ReaperPids).cast(),
-            )
-        };
-        if result == -1 {
-            return Err(std::io::Error::last_os_error())
-                .context("list sandbox process descendants");
-        }
-
-        Ok(info
+        Ok(reaper_pid_info()?
             .into_iter()
-            .take_while(|process| process.flags & REAPER_PIDINFO_VALID != 0)
             .filter(|process| process.subtree == self.subtree)
             .map(|process| process.pid)
             .collect())
@@ -219,6 +241,36 @@ fn reaper_status() -> Result<ReaperStatus> {
         return Err(std::io::Error::last_os_error()).context("read sandbox process reaper status");
     }
     Ok(status)
+}
+
+fn reaper_pid_info() -> Result<Vec<ReaperPidInfo>> {
+    let descendant_count = reaper_status()?.descendants as usize;
+    if descendant_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut info = vec![ReaperPidInfo::default(); descendant_count + 16];
+    let mut request = ReaperPids {
+        count: info.len() as u32,
+        pad: [0; 15],
+        pids: info.as_mut_ptr(),
+    };
+    let result = unsafe {
+        libc::procctl(
+            libc::P_PID,
+            0,
+            libc::PROC_REAP_GETPIDS,
+            (&mut request as *mut ReaperPids).cast(),
+        )
+    };
+    if result == -1 {
+        return Err(std::io::Error::last_os_error()).context("list sandbox process descendants");
+    }
+
+    Ok(info
+        .into_iter()
+        .take_while(|process| process.flags & REAPER_PIDINFO_VALID != 0)
+        .collect())
 }
 
 const REAPER_PIDINFO_VALID: u32 = 0x0000_0001;

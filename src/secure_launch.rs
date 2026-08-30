@@ -9,6 +9,8 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::{Duration, Instant};
 
 const HELPER_PATH: &str = "/usr/local/libexec/freebsd-flatpak/secure-launch";
 const NESTED_CLIENT_PATH: &str = "/usr/local/libexec/freebsd-flatpak/secure-launch-client";
@@ -19,6 +21,7 @@ const MAX_ENVIRONMENT: usize = 512;
 const NESTED_DAEMON_SOCKET: &str = "/var/run/freebsd-flatpak/secure-launch.sock";
 const MAX_NESTED_PACKET: usize = 65_536;
 const JAIL_OWN_DESC: libc::c_int = 0x80;
+static NESTED_CLIENT_SIGNAL_FD: AtomicI32 = AtomicI32::new(-1);
 
 pub(crate) struct LaunchRequest<'a> {
     pub(crate) root: &'a Path,
@@ -837,6 +840,7 @@ pub(crate) fn run_nested_client() -> Result<()> {
     }
     request.validate(uid, gid)?;
     let socket = connect_nested_socket()?;
+    install_nested_client_signal_handlers(socket.as_raw_fd());
     let args = request.wire_arguments();
     let fds = request
         .mapped_fds
@@ -847,6 +851,31 @@ pub(crate) fn run_nested_client() -> Result<()> {
     drop(fds);
     let status = read_status(socket.as_raw_fd())?;
     exit_from_wait_status(status)
+}
+
+fn install_nested_client_signal_handlers(fd: RawFd) {
+    NESTED_CLIENT_SIGNAL_FD.store(fd, Ordering::SeqCst);
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            forward_nested_client_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            forward_nested_client_signal as *const () as libc::sighandler_t,
+        );
+    }
+}
+
+extern "C" fn forward_nested_client_signal(signal: libc::c_int) {
+    let fd = NESTED_CLIENT_SIGNAL_FD.load(Ordering::SeqCst);
+    if fd >= 0 {
+        let byte = signal as u8;
+        unsafe {
+            libc::send(fd, (&byte as *const u8).cast(), 1, libc::MSG_NOSIGNAL);
+        }
+    }
+    unsafe { libc::_exit(128 + signal) }
 }
 
 pub(crate) fn run_nested_daemon() -> Result<()> {
@@ -965,6 +994,9 @@ fn serve_nested_request(fd: RawFd) -> Result<()> {
     }
     if child == 0 {
         drop(parent_lifecycle);
+        if unsafe { libc::setpgid(0, 0) } != 0 {
+            unsafe { libc::_exit(127) };
+        }
         unsafe { libc::close(fd) };
         let targets = request.mapped_fds.clone();
         if let Err(error) = request.execute_with_mappings(
@@ -977,6 +1009,14 @@ fn serve_nested_request(fd: RawFd) -> Result<()> {
             eprintln!("freebsd-flatpak secure-launch child: {error:#}");
         }
         unsafe { libc::_exit(127) };
+    }
+    if unsafe { libc::setpgid(child, child) } != 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EACCES) {
+            unsafe { libc::kill(child, libc::SIGKILL) };
+            let _ = wait_for_nested_child(child);
+            return Err(error).context("isolate nested sandbox process group");
+        }
     }
     drop(child_lifecycle);
     drop(fds);
@@ -992,7 +1032,7 @@ fn serve_nested_request(fd: RawFd) -> Result<()> {
             return Err(error);
         }
         child_wait_started = true;
-        let status = wait_for_nested_child(child)?;
+        let status = wait_for_nested_child_or_client(child, fd)?;
         drop(owner);
         write_status(fd, status as u32)
     })();
@@ -1001,6 +1041,55 @@ fn serve_nested_request(fd: RawFd) -> Result<()> {
         let _ = wait_for_nested_child(child);
     }
     result
+}
+
+fn wait_for_nested_child_or_client(child: libc::pid_t, client_fd: RawFd) -> Result<i32> {
+    let mut termination_deadline = None;
+    loop {
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
+        if waited == child {
+            return Ok(status);
+        }
+        if waited < 0 {
+            return Err(io::Error::last_os_error()).context("wait nested sandbox child");
+        }
+
+        let mut client = libc::pollfd {
+            fd: client_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if unsafe { libc::poll(&mut client, 1, 100) } < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error).context("watch nested launch client");
+            }
+        }
+        let requested_signal = if client.revents & libc::POLLIN != 0 {
+            let mut byte = 0u8;
+            (unsafe {
+                libc::recv(
+                    client_fd,
+                    (&mut byte as *mut u8).cast(),
+                    1,
+                    libc::MSG_DONTWAIT,
+                )
+            } == 1)
+                .then_some(byte as libc::c_int)
+                .filter(|signal| matches!(*signal, libc::SIGINT | libc::SIGTERM))
+        } else {
+            None
+        };
+        let disconnected = client.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0;
+        if termination_deadline.is_none() && (requested_signal.is_some() || disconnected) {
+            let signal = requested_signal.unwrap_or(libc::SIGTERM);
+            unsafe { libc::kill(-child, signal) };
+            termination_deadline = Some(Instant::now() + Duration::from_secs(2));
+        } else if termination_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            unsafe { libc::kill(-child, libc::SIGKILL) };
+        }
+    }
 }
 
 fn wait_for_nested_child(child: libc::pid_t) -> Result<i32> {

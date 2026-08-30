@@ -796,7 +796,7 @@ static void test_flatpak_lifecycle_source_is_async(void) {
   int pair[2];
   g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, pair), ==, 0);
   BridgeState state = { .spawn_lifecycles = g_ptr_array_new_with_free_func((GDestroyNotify)flatpak_spawn_lifecycle_free) };
-  flatpak_spawn_watch_lifecycle(&state, pair[1], 55, 55, NULL);
+  flatpak_spawn_watch_lifecycle(&state, pair[1], 55, 55, NULL, 0);
   unsigned char accepted[24] = {0}; guint32 magic = htonl(0x46534250), request = htonl(55), length = htonl(4); guint16 version = htons(1), type = htons(6);
   memcpy(accepted, &magic, 4); memcpy(accepted + 4, &version, 2); memcpy(accepted + 6, &type, 2); memcpy(accepted + 8, &request, 4); memcpy(accepted + 12, &length, 4); memcpy(accepted + 20, &request, 4);
   g_assert_cmpint(send(pair[0], accepted, sizeof(accepted), 0), ==, sizeof(accepted));
@@ -811,10 +811,49 @@ static void test_flatpak_lifecycle_source_is_async(void) {
   g_ptr_array_free(state.spawn_lifecycles, TRUE);
 }
 
+static void test_flatpak_watch_bus_lifecycle_closes_only_matching_spawns(void) {
+  int watched[2], ordinary[2], other_sender[2];
+  g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, watched), ==, 0);
+  g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, ordinary), ==, 0);
+  g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, other_sender), ==, 0);
+  BridgeState state = { .spawn_lifecycles = g_ptr_array_new_with_free_func((GDestroyNotify)flatpak_spawn_lifecycle_free) };
+  flatpak_spawn_watch_lifecycle(&state, watched[1], 1, 101, ":1.5", 16);
+  flatpak_spawn_watch_lifecycle(&state, ordinary[1], 2, 102, ":1.5", 0);
+  flatpak_spawn_watch_lifecycle(&state, other_sender[1], 3, 103, ":1.6", 16);
+
+  unsigned char exited[28] = {0}; guint32 magic = htonl(0x46534250), exited_request = htonl(1), length = htonl(8), exited_pid = htonl(101); guint16 version = htons(1), exited_type = htons(10);
+  memcpy(exited, &magic, 4); memcpy(exited + 4, &version, 2); memcpy(exited + 6, &exited_type, 2); memcpy(exited + 8, &exited_request, 4); memcpy(exited + 12, &length, 4); memcpy(exited + 20, &exited_pid, 4);
+  g_assert_cmpint(send(watched[0], exited, sizeof(exited), 0), ==, sizeof(exited));
+  while (g_main_context_iteration(NULL, FALSE));
+  g_assert_cmpuint(state.spawn_lifecycles->len, ==, 3);
+
+  flatpak_spawn_close_watch_bus_lifecycles(&state, ":1.5");
+
+  g_assert_cmpuint(state.spawn_lifecycles->len, ==, 2);
+  unsigned char terminate[20]; guint16 type; guint32 request;
+  g_assert_cmpint(recv(watched[0], terminate, sizeof(terminate), MSG_DONTWAIT), ==, sizeof(terminate));
+  memcpy(&type, terminate + 6, sizeof(type));
+  memcpy(&request, terminate + 8, sizeof(request));
+  g_assert_cmpuint(ntohs(type), ==, 11);
+  g_assert_cmpuint(ntohl(request), ==, 1);
+  char byte;
+  g_assert_cmpint(recv(ordinary[0], &byte, sizeof(byte), MSG_DONTWAIT), ==, -1);
+  g_assert_true(errno == EAGAIN || errno == EWOULDBLOCK);
+  g_assert_cmpint(recv(other_sender[0], &byte, sizeof(byte), MSG_DONTWAIT), ==, -1);
+  g_assert_true(errno == EAGAIN || errno == EWOULDBLOCK);
+
+  flatpak_spawn_cleanup_lifecycles(&state);
+  close(watched[0]);
+  close(ordinary[0]);
+  close(other_sender[0]);
+  g_ptr_array_free(state.spawn_lifecycles, TRUE);
+}
+
 int main(void) {
   test_helper_diagnostics_use_stdout_and_warnings_use_stderr();
   test_flatpak_spawn_contract();
   test_flatpak_lifecycle_source_is_async();
+  test_flatpak_watch_bus_lifecycle_closes_only_matching_spawns();
   test_introspection();
   test_shared_sandbox_scope_validation();
   test_remove_sandbox_is_per_instance_and_idempotent();

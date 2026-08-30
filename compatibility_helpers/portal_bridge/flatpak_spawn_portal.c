@@ -9,6 +9,8 @@
 #define SPAWN_MAX_PAYLOAD 4096
 #define SPAWN_MAX_FDS 32
 #define SPAWN_MAX_TARGET_FD 65535
+#define SPAWN_WATCH_BUS (1u << 4)
+#define SPAWN_TERMINATE 11
 
 /* The Rust broker owns sandbox/process execution. This helper is deliberately
  * limited to the D-Bus portal boundary and transports only validated data. */
@@ -23,7 +25,9 @@ const char FLATPAK_SPAWN_XML[] =
     "<signal name='SpawnExited'><arg type='u' name='pid'/><arg type='u' name='exit_status'/></signal><signal name='SpawnStarted'><arg type='u' name='pid'/><arg type='u' name='relpid'/></signal>"
     "</interface></node>";
 
-static char *sender_root(BridgeState *state, const char *sender) {
+static char *sender_root(BridgeState *state, const char *sender,
+                         guint32 *sender_pid) {
+  if (sender_pid != NULL) *sender_pid = 0;
   GError *error = NULL;
   GVariant *reply = g_dbus_connection_call_sync(
       state->local_bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
@@ -32,6 +36,7 @@ static char *sender_root(BridgeState *state, const char *sender) {
   if (reply == NULL) { g_clear_error(&error); return NULL; }
   guint32 pid; g_variant_get(reply, "(u)", &pid); g_variant_unref(reply);
   gchar *pid_text = g_strdup_printf("%u", pid);
+  if (sender_pid != NULL) *sender_pid = pid;
   gchar *argv[] = {"/usr/bin/procstat", "-f", pid_text, NULL};
   gchar *stdout_text = NULL;
   gboolean ok = g_spawn_sync(NULL, argv, NULL, G_SPAWN_STDERR_TO_DEV_NULL,
@@ -124,7 +129,7 @@ static void cache_sender_root_value(BridgeState *state, const char *sender, char
 }
 
 void flatpak_spawn_cache_sender_root(BridgeState *state, const char *sender) {
-  cache_sender_root_value(state, sender, sender_root(state, sender));
+  cache_sender_root_value(state, sender, sender_root(state, sender, NULL));
 }
 
 static char *cached_sender_root(BridgeState *state, const char *sender) {
@@ -144,7 +149,7 @@ static bool broker_send_packet(int fd, guint16 type, guint32 request,
   struct iovec iov[2] = {{ .iov_base = header, .iov_len = sizeof(header) }, { .iov_base = (void *)payload, .iov_len = payload_size }};
   char *control = NULL; struct msghdr msg = { .msg_iov = iov, .msg_iovlen = payload_size ? 2 : 1 };
   if (fd_count) { control = g_malloc0(CMSG_SPACE(fd_count * sizeof(int))); msg.msg_control = control; msg.msg_controllen = CMSG_SPACE(fd_count * sizeof(int)); struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg->cmsg_level = SOL_SOCKET; cmsg->cmsg_type = SCM_RIGHTS; cmsg->cmsg_len = CMSG_LEN(fd_count * sizeof(int)); memcpy(CMSG_DATA(cmsg), fds, fd_count * sizeof(int)); }
-  ssize_t sent; do { sent = sendmsg(fd, &msg, 0); } while (sent < 0 && errno == EINTR);
+  ssize_t sent; do { sent = sendmsg(fd, &msg, MSG_NOSIGNAL); } while (sent < 0 && errno == EINTR);
   g_free(control); return sent == (ssize_t)(sizeof(header) + payload_size);
 }
 typedef struct {
@@ -154,8 +159,8 @@ typedef struct {
   guint32 request;
   guint32 pid;
   char *sender;
+  gboolean watch_bus;
 } SpawnLifecycle;
-
 static void close_received_rights(struct msghdr *message) {
   for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(message); cmsg != NULL;
        cmsg = CMSG_NXTHDR(message, cmsg)) {
@@ -211,13 +216,15 @@ static gboolean lifecycle_ready(gint fd, GIOCondition condition, gpointer data) 
         memcpy(&pid, payload, 4); memcpy(&status, payload + 4, 4);
         if (ntohl(pid) == lifecycle->pid) {
           GError *error = NULL;
-          if (!g_dbus_connection_emit_signal(lifecycle->state->local_bus,
+          if (lifecycle->state->local_bus != NULL &&
+              !g_dbus_connection_emit_signal(lifecycle->state->local_bus,
               lifecycle->sender, "/org/freedesktop/portal/Flatpak",
               "org.freedesktop.portal.Flatpak", "SpawnExited",
               g_variant_new("(uu)", lifecycle->pid, ntohl(status)), &error)) {
             log_line("emit Flatpak SpawnExited failed: %s", error->message);
             g_error_free(error);
           }
+          if (lifecycle->watch_bus) return G_SOURCE_CONTINUE;
         }
       }
     }
@@ -228,16 +235,47 @@ static gboolean lifecycle_ready(gint fd, GIOCondition condition, gpointer data) 
 }
 
 void flatpak_spawn_watch_lifecycle(BridgeState *state, int fd, guint32 request,
-                                   guint32 pid, const char *sender) {
+                                   guint32 pid, const char *sender,
+                                   guint32 spawn_flags) {
   SpawnLifecycle *lifecycle = g_new0(SpawnLifecycle, 1);
   lifecycle->state = state; lifecycle->fd = fd; lifecycle->request = request;
   lifecycle->pid = pid; lifecycle->sender = g_strdup(sender);
+  lifecycle->watch_bus = (spawn_flags & SPAWN_WATCH_BUS) != 0;
   int flags = fcntl(fd, F_GETFL); if (flags >= 0) (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
   lifecycle->source_id = g_unix_fd_add_full(G_PRIORITY_DEFAULT, fd, G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL, lifecycle_ready, lifecycle, NULL);
   g_ptr_array_add(state->spawn_lifecycles, lifecycle);
 }
 
+static void request_watch_bus_termination(SpawnLifecycle *lifecycle) {
+  if (!broker_send_packet(lifecycle->fd, SPAWN_TERMINATE, lifecycle->request,
+                          NULL, 0, NULL, 0)) {
+    log_line("request Flatpak Spawn WATCH_BUS termination failed for pid=%u",
+             lifecycle->pid);
+  }
+}
+
+void flatpak_spawn_close_watch_bus_lifecycles(BridgeState *state,
+                                              const char *sender) {
+  if (state->spawn_lifecycles == NULL || sender == NULL) return;
+  for (guint index = state->spawn_lifecycles->len; index > 0; index--) {
+    SpawnLifecycle *lifecycle =
+        g_ptr_array_index(state->spawn_lifecycles, index - 1);
+    if (!lifecycle->watch_bus ||
+        g_strcmp0(lifecycle->sender, sender) != 0) continue;
+    request_watch_bus_termination(lifecycle);
+    diagnostic_line("Flatpak Spawn WATCH_BUS caller disappeared pid=%u",
+                    lifecycle->pid);
+    g_ptr_array_remove_index_fast(state->spawn_lifecycles, index - 1);
+  }
+}
+
 void flatpak_spawn_cleanup_lifecycles(BridgeState *state) {
+  if (state->spawn_lifecycles != NULL) {
+    for (guint index = 0; index < state->spawn_lifecycles->len; index++) {
+      SpawnLifecycle *lifecycle = g_ptr_array_index(state->spawn_lifecycles, index);
+      if (lifecycle->watch_bus) request_watch_bus_termination(lifecycle);
+    }
+  }
   if (state->spawn_lifecycles != NULL) g_ptr_array_set_size(state->spawn_lifecycles, 0);
 }
 
@@ -260,8 +298,9 @@ static bool path_is_descendant(const char *path, const char *parent) {
   return path[parent_length] == '/';
 }
 
-static int broker_connect(BridgeState *state, const char *sender) {
-  char *root = sender_root(state, sender);
+static int broker_connect(BridgeState *state, const char *sender,
+                          guint32 *sender_pid) {
+  char *root = sender_root(state, sender, sender_pid);
   if (root != NULL) cache_sender_root_value(state, sender, g_strdup(root));
   if (root == NULL) root = cached_sender_root(state, sender);
   guint registered_instances = 0;
@@ -337,7 +376,7 @@ static bool build_spawn_payload(GVariant *cwd, GVariant *argv, GVariant *fd_map,
     int source = ok ? g_unix_fd_list_get(fd_list, handle, error) : -1; if (source < 0) { ok = false; break; }
     g_array_append_val(fds, source); append_u32(payload, target);
   }
-  if (ok && payload->len > SPAWN_MAX_PAYLOAD) { g_set_error(error, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS, "Spawn request is too large"); ok = false; }
+  if (ok && payload->len > SPAWN_MAX_PAYLOAD - sizeof(guint32)) { g_set_error(error, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS, "Spawn request is too large"); ok = false; }
   if (!ok) { g_byte_array_unref(payload); close_fd_array(fds); return false; }
   *out_payload = payload; *out_fds = fds; return true;
 }
@@ -391,13 +430,15 @@ static void call(GDBusConnection *c, const gchar *s, const gchar *p,
   if (!build_spawn_payload(cwd, argv, fd_map, envs, flags, g_dbus_message_get_unix_fd_list(message), &payload, &fds, &error)) {
     g_dbus_method_invocation_return_gerror(inv, error); g_error_free(error);
   } else {
-    int fd = broker_connect(state, s); guint32 pid = 0;
+    guint32 sender_pid = 0;
+    int fd = broker_connect(state, s, &sender_pid); guint32 pid = 0;
+    append_u32(payload, sender_pid);
     bool sent = fd >= 0 && broker_send_packet(fd, 8, 1, payload->data, payload->len, (const int *)fds->data, fds->len);
     bool accepted = sent && broker_spawn_accepted(fd, 1, &pid);
     if (!accepted) diagnostic_line("Flatpak Spawn broker rejection request=1 stage=%s payload_bytes=%" G_GSIZE_FORMAT " fd_mappings=%u", fd < 0 ? "connect" : (!sent ? "send" : "reply"), payload->len, fds->len);
     g_byte_array_unref(payload); close_fd_array(fds);
     if (!accepted) { if (fd >= 0) close(fd); g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.portal.Error.Failed", "Spawn broker rejected request"); }
-    else { diagnostic_line("Flatpak Spawn accepted pid=%u", pid); flatpak_spawn_watch_lifecycle(state, fd, 1, pid, s); g_dbus_method_invocation_return_value(inv, g_variant_new("(u)", pid)); }
+    else { diagnostic_line("Flatpak Spawn accepted pid=%u sender=%s flags=%u", pid, s, flags); flatpak_spawn_watch_lifecycle(state, fd, 1, pid, s, flags); g_dbus_method_invocation_return_value(inv, g_variant_new("(u)", pid)); }
   }
   g_variant_unref(cwd); g_variant_unref(argv); g_variant_unref(fd_map); g_variant_unref(envs); g_variant_unref(options);
 }

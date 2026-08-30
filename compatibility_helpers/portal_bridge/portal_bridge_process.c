@@ -143,6 +143,7 @@ void on_local_name_owner_changed(GDBusConnection *connection,
   }
   if (name[0] == ':' && old_owner[0] != 0 && new_owner[0] == 0) {
     portal_bridge_process_close_client_resources(state, name);
+    flatpak_spawn_close_watch_bus_lifecycles(state, name);
   }
 }
 

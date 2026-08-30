@@ -2,7 +2,7 @@ use super::*;
 use std::fs;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 fn reaper_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -97,13 +97,22 @@ fn termination_kills_and_reaps_tracked_and_detached_processes() {
 #[test]
 fn one_reaper_tracks_independent_subtrees() {
     let _lock = reaper_lock();
-    let reaper = ProcessReaper::acquire().unwrap();
+    let reaper = Arc::new(ProcessReaper::acquire().unwrap());
     let mut first = Command::new("sleep").arg("30").spawn().unwrap();
     let mut second = Command::new("sleep").arg("30").spawn().unwrap();
     let first_tree = reaper.track(first.id()).unwrap();
     let second_tree = reaper.track(second.id()).unwrap();
+    let first_subtree = reaper.subtree_for_descendant(first.id()).unwrap().unwrap();
+    let cleanup_reaper = reaper.clone();
+    let cleanup = thread::spawn(move || {
+        cleanup_reaper
+            .terminate_subtree_with_signal(first_subtree, libc::SIGINT)
+            .unwrap();
+    });
+    let first_status = first.wait().unwrap();
+    assert_eq!(first_status.signal(), Some(libc::SIGINT));
+    cleanup.join().unwrap();
     drop(first_tree);
-    let _ = first.wait();
     assert_eq!(unsafe { libc::kill(second.id() as i32, 0) }, 0);
     let status = second_tree.wait_for_exit(&mut second, || true).unwrap();
     assert!(matches!(

@@ -38,3 +38,66 @@ fn nested_lifecycle_transfers_owning_descriptor() {
     assert_eq!(jail, 1234);
     assert!(unsafe { libc::fcntl(received.as_raw_fd(), libc::F_GETFD) } >= 0);
 }
+
+#[test]
+fn nested_client_disconnect_uses_normal_shutdown_signal() {
+    let (daemon, client) = nested_jail_lifecycle_socket().unwrap();
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0);
+    if child == 0 {
+        unsafe {
+            libc::close(daemon.as_raw_fd());
+            libc::close(client.as_raw_fd());
+            libc::setpgid(0, 0);
+            loop {
+                libc::pause();
+            }
+        }
+    }
+    unsafe { libc::setpgid(child, child) };
+    drop(client);
+
+    let status = wait_for_nested_child_or_client(child, daemon.as_raw_fd()).unwrap();
+    assert!(libc::WIFSIGNALED(status));
+    assert_eq!(libc::WTERMSIG(status), libc::SIGTERM);
+}
+
+#[test]
+fn nested_client_forwards_watch_bus_signal_to_the_real_child_group() {
+    let (daemon, client) = nested_jail_lifecycle_socket().unwrap();
+    let proxy = unsafe { libc::fork() };
+    assert!(proxy >= 0);
+    if proxy == 0 {
+        unsafe { libc::close(daemon.as_raw_fd()) };
+        install_nested_client_signal_handlers(client.as_raw_fd());
+        unsafe {
+            loop {
+                libc::pause();
+            }
+        }
+    }
+
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0);
+    if child == 0 {
+        unsafe {
+            libc::close(daemon.as_raw_fd());
+            libc::close(client.as_raw_fd());
+            libc::setpgid(0, 0);
+            loop {
+                libc::pause();
+            }
+        }
+    }
+    unsafe { libc::setpgid(child, child) };
+    assert_eq!(unsafe { libc::kill(proxy, libc::SIGINT) }, 0);
+    let mut proxy_status = 0;
+    assert_eq!(unsafe { libc::waitpid(proxy, &mut proxy_status, 0) }, proxy);
+    assert!(libc::WIFEXITED(proxy_status));
+    assert_eq!(libc::WEXITSTATUS(proxy_status), 128 + libc::SIGINT);
+    drop(client);
+
+    let status = wait_for_nested_child_or_client(child, daemon.as_raw_fd()).unwrap();
+    assert!(libc::WIFSIGNALED(status));
+    assert_eq!(libc::WTERMSIG(status), libc::SIGINT);
+}
