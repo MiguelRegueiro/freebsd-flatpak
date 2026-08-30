@@ -238,6 +238,12 @@ impl HostPortal {
         env
     }
 
+    pub fn sandbox_bus_address(&self) -> Option<&str> {
+        self.proxy
+            .as_ref()
+            .map(|proxy| proxy.sandbox_bus_address.as_str())
+    }
+
     pub fn doc_dir(&self) -> Option<&Path> {
         self.proxy.as_ref().map(|proxy| proxy.doc_dir.as_path())
     }

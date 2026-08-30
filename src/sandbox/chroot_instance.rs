@@ -181,10 +181,19 @@ impl ChrootInstance {
         prepend_env_paths(&mut env, "LD_PRELOAD", self.host_network.preload_paths());
         prepend_env_paths(
             &mut env,
+            "LD_PRELOAD",
+            self.host_linux_compat.preload_paths(),
+        );
+        prepend_env_paths(
+            &mut env,
             "ZYPAK_LD_PRELOAD",
             self.host_network.preload_paths(),
         );
-        prepend_env_paths(&mut env, "PATH", self.host_linux_compat.path_entries());
+        prepend_env_paths(
+            &mut env,
+            "ZYPAK_LD_PRELOAD",
+            self.host_linux_compat.preload_paths(),
+        );
         prepend_env_paths(
             &mut env,
             "LD_LIBRARY_PATH",

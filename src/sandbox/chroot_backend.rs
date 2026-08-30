@@ -283,8 +283,18 @@ impl ChrootNullfsBackend {
         }
         let graphics_mounts = instance.host_graphics.runtime_mounts();
         let (linux_compat_source, linux_compat_target) = instance.host_linux_compat.runtime_mount();
+        let linux_compat_binary_mounts = instance.host_linux_compat.prepare_runtime_binary_mounts(
+            &instance.root,
+            &app.runtime_dir.join("files"),
+            instance.host_portal.sandbox_bus_address(),
+        )?;
         let network_mount = instance.host_network.runtime_mount();
         instance.mount_nullfs(&linux_compat_source, &linux_compat_target, true)?;
+        // Preserve runtime executables before projecting compatibility wrappers
+        // at their canonical paths. The ordering is part of the projection.
+        for mount in linux_compat_binary_mounts {
+            instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
+        }
         for mount in &graphics_mounts {
             let target = mount.sandbox_target_relative()?;
             if target != linux_compat_target {

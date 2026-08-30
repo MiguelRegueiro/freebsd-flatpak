@@ -461,6 +461,7 @@ print_install_tree() {
         '    │   ├── libdrm-syncobj-errno-shim.so' \
         '    │   ├── libchromium-zygote-drm-preload.so' \
         '    │   ├── libnetlink-route-flags-shim.so' \
+        '    │   ├── libsocket-option-errno-shim.so' \
         '    │   ├── libsignalfd-shim.so' \
         '    │   └── linux-bin' \
         '    │       └── flatpak-spawn' \
@@ -522,6 +523,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     dry_command "su '$BUILD_USER' -c \"env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/drm-syncobj-errno-shim.c -o '$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so' -ldl -pthread\""
     dry_command "su '$BUILD_USER' -c \"env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/chromium-zygote-drm-preload.c -o '$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so' -ldl -pthread\""
     dry_command "su '$BUILD_USER' -c \"env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/netlink-route-flags-shim.c -o '$HELPER_BUILD_DIR/libnetlink-route-flags-shim.so' -ldl -pthread\""
+    dry_command "su '$BUILD_USER' -c \"env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/socket-option-errno-shim.c -o '$HELPER_BUILD_DIR/libsocket-option-errno-shim.so'\""
     dry_command "su '$BUILD_USER' -c \"env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/signalfd-shim.c -o '$HELPER_BUILD_DIR/libsignalfd-shim.so' -pthread\""
     dry_command "su '$BUILD_USER' -c \"env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -O2 -Wall -Wextra compatibility_helpers/flatpak-spawn-wrapper.c -o '$HELPER_BUILD_DIR/flatpak-spawn-wrapper'\""
     ui_heading "Installing FreeBSD Flatpak"
@@ -534,7 +536,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     dry_command "install -o root -g wheel -m 755 '$OSTREE_PREFIX/lib/libostree-1.so.1.0.0' '$INSTALL_LIBEXEC/libostree-1.so.1'"
     dry_command "install -o root -g wheel -m 644 LICENSE '$INSTALL_LICENSES/BSD-2-Clause.txt'"
     dry_command "install -o root -g wheel -m 644 LICENSES/LGPL-2.0-or-later.txt LICENSES/MIT-ostree-rs.txt '$INSTALL_LICENSES/'"
-    dry_command "install -o root -g wheel -m 755 '$HELPER_BUILD_DIR/portal-bridge' '$HELPER_BUILD_DIR/status-notifier-bridge' '$HELPER_BUILD_DIR/network-manager-compat' '$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so' '$HELPER_BUILD_DIR/libgtk3-wayland-geometry-shim.so' '$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so' '$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so' '$HELPER_BUILD_DIR/libnetlink-route-flags-shim.so' '$HELPER_BUILD_DIR/libsignalfd-shim.so' '$INSTALL_LIBEXEC/'"
+    dry_command "install -o root -g wheel -m 755 '$HELPER_BUILD_DIR/portal-bridge' '$HELPER_BUILD_DIR/status-notifier-bridge' '$HELPER_BUILD_DIR/network-manager-compat' '$HELPER_BUILD_DIR/libwayland-drm-devt-shim.so' '$HELPER_BUILD_DIR/libgtk3-wayland-geometry-shim.so' '$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so' '$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so' '$HELPER_BUILD_DIR/libnetlink-route-flags-shim.so' '$HELPER_BUILD_DIR/libsocket-option-errno-shim.so' '$HELPER_BUILD_DIR/libsignalfd-shim.so' '$INSTALL_LIBEXEC/'"
     dry_command "install -o root -g wheel -m 755 '$HELPER_BUILD_DIR/flatpak-spawn-wrapper' '$INSTALL_LIBEXEC/linux-bin/flatpak-spawn'"
     dry_command "ldd '$INSTALL_BIN/flatpak'  # verify shared-library dependencies"
     ui_heading "Installation complete (dry run)"
@@ -615,6 +617,8 @@ run_logged "Chromium zygote compatibility shim build" su "$BUILD_USER" -c \
     "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/chromium-zygote-drm-preload.c -o '$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so' -ldl -pthread"
 run_logged "Netlink route flags compatibility shim build" su "$BUILD_USER" -c \
     "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/netlink-route-flags-shim.c -o '$HELPER_BUILD_DIR/libnetlink-route-flags-shim.so' -ldl -pthread"
+run_logged "Socket-option errno compatibility shim build" su "$BUILD_USER" -c \
+    "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/socket-option-errno-shim.c -o '$HELPER_BUILD_DIR/libsocket-option-errno-shim.so'"
 run_logged "signalfd compatibility shim build" su "$BUILD_USER" -c \
     "env PATH='$LINUX_BUILD_PATH' '$LINUX_CC' -shared -fPIC -O2 -Wall -Wextra compatibility_helpers/signalfd-shim.c -o '$HELPER_BUILD_DIR/libsignalfd-shim.so' -pthread"
 run_logged "flatpak-spawn compatibility wrapper build" su "$BUILD_USER" -c \
@@ -636,6 +640,7 @@ for artifact in \
     "$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so" \
     "$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so" \
     "$HELPER_BUILD_DIR/libnetlink-route-flags-shim.so" \
+    "$HELPER_BUILD_DIR/libsocket-option-errno-shim.so" \
     "$HELPER_BUILD_DIR/libsignalfd-shim.so" \
     "$HELPER_BUILD_DIR/flatpak-spawn-wrapper"
 do
@@ -677,6 +682,7 @@ run_logged "Compatibility helper installation" install -o root -g wheel -m 755 \
     "$HELPER_BUILD_DIR/libdrm-syncobj-errno-shim.so" \
     "$HELPER_BUILD_DIR/libchromium-zygote-drm-preload.so" \
     "$HELPER_BUILD_DIR/libnetlink-route-flags-shim.so" \
+    "$HELPER_BUILD_DIR/libsocket-option-errno-shim.so" \
     "$HELPER_BUILD_DIR/libsignalfd-shim.so" \
     "$INSTALL_LIBEXEC/"
 run_logged "NetworkManager privileged backend installation" install -o root -g wheel -m 4755 \
