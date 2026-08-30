@@ -70,6 +70,7 @@ fn prepares_standard_gtk_cursor_settings_for_x11_toolkits() {
     fs::create_dir_all(&root).unwrap();
     let cursor = HostCursorTheme {
         icon_theme: None,
+        gtk_theme: None,
         xcursor_theme: Some("Bibata-Modern-Classic".to_string()),
         xcursor_size: Some("24".to_string()),
         hyprcursor_theme: None,
@@ -110,6 +111,7 @@ fn unsafe_cursor_theme_does_not_create_toolkit_settings() {
     fs::create_dir_all(&root).unwrap();
     let cursor = HostCursorTheme {
         icon_theme: None,
+        gtk_theme: None,
         xcursor_theme: Some("../escape".to_string()),
         xcursor_size: Some("24".to_string()),
         hyprcursor_theme: None,

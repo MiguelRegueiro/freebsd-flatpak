@@ -10,6 +10,7 @@ const SANDBOX_CURSOR_CONFIG_ROOT: &str = "/run/host/freebsd-flatpak-cursor-confi
 
 #[derive(Debug, Clone)]
 pub struct HostCursorTheme {
+    gtk_theme: Option<String>,
     icon_theme: Option<String>,
     xcursor_theme: Option<String>,
     xcursor_size: Option<String>,
@@ -29,6 +30,7 @@ pub struct CursorThemeMount {
 impl HostCursorTheme {
     pub fn from_host(desktop: &DesktopSession) -> Self {
         let desktop_env = desktop_environment();
+        let gtk_theme = host_gtk_theme(desktop.dbus_session_bus_address.as_deref());
         let icon_theme = host_icon_theme(desktop.dbus_session_bus_address.as_deref());
         let xcursor_theme = host_var("XCURSOR_THEME", &desktop_env);
         let xcursor_size = host_var("XCURSOR_SIZE", &desktop_env);
@@ -52,6 +54,7 @@ impl HostCursorTheme {
         let mounts = theme_mounts(&themes, &search_dirs, &mut warnings);
 
         Self {
+            gtk_theme,
             icon_theme,
             xcursor_theme,
             xcursor_size,
@@ -70,8 +73,15 @@ impl HostCursorTheme {
         &self.warnings
     }
 
+    pub fn gtk_theme(&self) -> Option<&str> {
+        self.gtk_theme.as_deref()
+    }
+
     pub fn describe(&self) -> Vec<String> {
         let mut lines = Vec::new();
+        if let Some(theme) = &self.gtk_theme {
+            lines.push(format!("GTK3: {theme}"));
+        }
         if let Some(theme) = &self.icon_theme {
             lines.push(format!("icons: {theme}"));
         }
@@ -151,6 +161,28 @@ impl HostCursorTheme {
     }
 }
 
+pub(crate) fn active_gtk_theme() -> Option<String> {
+    let bus_address = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok();
+    host_gtk_theme(bus_address.as_deref())
+}
+
+fn host_gtk_theme(bus_address: Option<&str>) -> Option<String> {
+    if let Some(theme) =
+        bus_address.and_then(|address| portal_interface_setting(address, "gtk-theme"))
+    {
+        return Some(theme);
+    }
+
+    if let Ok(theme) = std::env::var("GTK_THEME") {
+        let theme = theme.split(':').next().unwrap_or_default();
+        if !theme.is_empty() {
+            return Some(theme.to_string());
+        }
+    }
+
+    gsettings_interface_setting("gtk-theme")
+}
+
 fn host_icon_theme(bus_address: Option<&str>) -> Option<String> {
     // GTK reads this exact setting through the sandbox's proxied Settings
     // portal, so use the host portal as the source of truth for what to mount.
@@ -164,19 +196,14 @@ fn host_icon_theme(bus_address: Option<&str>) -> Option<String> {
         }
     }
 
-    let output = Command::new("gsettings")
-        .arg("get")
-        .arg("org.gnome.desktop.interface")
-        .arg("icon-theme")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    parse_gsettings_string(&String::from_utf8_lossy(&output.stdout))
+    gsettings_interface_setting("icon-theme")
 }
 
 fn portal_icon_theme(bus_address: &str) -> Option<String> {
+    portal_interface_setting(bus_address, "icon-theme")
+}
+
+fn portal_interface_setting(bus_address: &str, key: &str) -> Option<String> {
     let output = Command::new("gdbus")
         .arg("call")
         .arg("--address")
@@ -188,13 +215,26 @@ fn portal_icon_theme(bus_address: &str) -> Option<String> {
         .arg("--method")
         .arg("org.freedesktop.portal.Settings.Read")
         .arg("org.gnome.desktop.interface")
-        .arg("icon-theme")
+        .arg(key)
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
     parse_quoted_variant_string(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn gsettings_interface_setting(key: &str) -> Option<String> {
+    let output = Command::new("gsettings")
+        .arg("get")
+        .arg("org.gnome.desktop.interface")
+        .arg(key)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_gsettings_string(&String::from_utf8_lossy(&output.stdout))
 }
 
 fn parse_gsettings_string(value: &str) -> Option<String> {

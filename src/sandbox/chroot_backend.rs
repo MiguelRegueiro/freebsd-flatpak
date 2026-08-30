@@ -198,10 +198,21 @@ impl ChrootNullfsBackend {
             "activate local VAAPI extension",
             || HostVideo::prepare(&self.paths, app),
         )?;
+        let gtk_theme_extension = runtime::activate_gtk_theme_extension(
+            &self.paths,
+            &app.runtime_ref,
+            &app.runtime_dir,
+            host_cursor.gtk_theme(),
+        )?;
         let app_extensions = runtime::activate_app_codec_extensions(&self.paths, app)?;
         let mut extension_refs = host_graphics
             .extension_refs()
             .chain(host_video.extension_refs())
+            .chain(
+                gtk_theme_extension
+                    .iter()
+                    .map(|extension| extension.ref_name()),
+            )
             .map(ToOwned::to_owned)
             .chain(
                 app_extensions
@@ -246,6 +257,7 @@ impl ChrootNullfsBackend {
             host_network,
             host_system_bus,
             host_video,
+            gtk_theme_extension,
             app_extensions,
             run_record,
             deployment,
@@ -278,6 +290,13 @@ impl ChrootNullfsBackend {
             instance.mount_nullfs(
                 &extension.checkout_dir.join("files"),
                 PathBuf::from("app").join(&extension.app_mount_relative),
+                true,
+            )?;
+        }
+        if let Some(extension) = instance.gtk_theme_extension.clone() {
+            instance.mount_nullfs(
+                &extension.checkout_dir.join("files"),
+                PathBuf::from("usr").join(&extension.runtime_mount_relative),
                 true,
             )?;
         }

@@ -18,6 +18,7 @@ fn fixture() -> (Installation, PathBuf, PathBuf) {
     fs::write(
         runtime_dir.join("metadata"),
         "[Runtime]\nname=org.example.Platform\n\
+         [Extension org.gtk.Gtk3theme]\nversion=3.22\nversions=9.99;3.22\ndirectory=share/runtime/share/themes\nsubdirectory-suffix=gtk-3.0\n\
          [Extension org.freedesktop.Platform.GL]\nversions=25.08;24.08\ndirectory=lib/GL\n\
          [Extension org.freedesktop.Platform.VAAPI.Intel]\nversion=24.08\ndirectory=lib/dri/intel\nadd-ld-path=lib\n",
     )
@@ -77,6 +78,101 @@ fn valid_gl_and_vaapi_activate_from_local_deployments_with_selected_branches() {
     );
     assert_eq!(vaapi.checkout_dir, vaapi_checkout);
     assert_eq!(vaapi.ld_library_relative.as_deref(), Some(Path::new("lib")));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn active_gtk_theme_extension_prepares_runtime_declared_target() {
+    let (paths, runtime_dir, root) = fixture();
+    let checkout = install_extension(
+        &paths,
+        "org.gtk.Gtk3theme.Example-Dark",
+        "3.22",
+        "runtime-origin",
+    );
+
+    let extension = activate_gtk_theme_extension(
+        &paths,
+        "org.example.Platform/x86_64/24.08",
+        &runtime_dir,
+        Some("Example-Dark"),
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(extension.checkout_dir, checkout);
+    assert_eq!(
+        extension.runtime_mount_relative,
+        Path::new("share/runtime/share/themes/Example-Dark/gtk-3.0")
+    );
+    assert!(runtime_dir
+        .join("files/share/runtime/share/themes/Example-Dark/gtk-3.0")
+        .is_dir());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn gtk_theme_uses_first_declared_versions_branch_when_version_is_absent() {
+    let (paths, runtime_dir, root) = fixture();
+    fs::write(
+        runtime_dir.join("metadata"),
+        "[Runtime]\nname=org.example.Platform\n\
+         [Extension org.gtk.Gtk3theme]\nversions=; 3.24;3.22;\ndirectory=share/runtime/share/themes\nsubdirectory-suffix=gtk-3.0\n",
+    )
+    .unwrap();
+    let checkout = install_extension(
+        &paths,
+        "org.gtk.Gtk3theme.Example-Dark",
+        "3.24",
+        "runtime-origin",
+    );
+
+    let extension = activate_gtk_theme_extension(
+        &paths,
+        "org.example.Platform/x86_64/24.08",
+        &runtime_dir,
+        Some("Example-Dark"),
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(
+        extension.ref_name,
+        "runtime/org.gtk.Gtk3theme.Example-Dark/x86_64/3.24"
+    );
+    assert_eq!(extension.checkout_dir, checkout);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unavailable_or_corrupt_gtk_theme_extension_is_skipped() {
+    let (paths, runtime_dir, root) = fixture();
+
+    let missing = activate_gtk_theme_extension(
+        &paths,
+        "org.example.Platform/x86_64/24.08",
+        &runtime_dir,
+        Some("Missing"),
+    )
+    .unwrap();
+    assert!(missing.is_none());
+
+    let checkout = install_extension(
+        &paths,
+        "org.gtk.Gtk3theme.Example-Dark",
+        "3.22",
+        "runtime-origin",
+    );
+    fs::write(checkout.join(".ostree-commit"), "wrong-ref\n").unwrap();
+    let corrupt = activate_gtk_theme_extension(
+        &paths,
+        "org.example.Platform/x86_64/24.08",
+        &runtime_dir,
+        Some("Example-Dark"),
+    )
+    .unwrap();
+    assert!(corrupt.is_none());
+
     fs::remove_dir_all(root).unwrap();
 }
 

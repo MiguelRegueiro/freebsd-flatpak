@@ -1,4 +1,4 @@
-use super::{RuntimeGlExtension, RuntimeVaapiExtension};
+use super::{RuntimeGlExtension, RuntimeGtkThemeExtension, RuntimeVaapiExtension};
 use crate::flatpak_metadata::{has_section, value};
 use crate::installation::installation_paths::Installation;
 use anyhow::{bail, Context, Result};
@@ -90,6 +90,75 @@ pub fn activate_intel_vaapi_extension(
         checkout_dir,
         runtime_mount_relative,
         ld_library_relative,
+    }))
+}
+
+pub fn activate_gtk_theme_extension(
+    paths: &Installation,
+    runtime_ref: &str,
+    runtime_dir: &Path,
+    theme: Option<&str>,
+) -> Result<Option<RuntimeGtkThemeExtension>> {
+    let Some(theme) = theme.filter(|theme| valid_extension_suffix(theme)) else {
+        return Ok(None);
+    };
+    let metadata_path = runtime_dir.join("metadata");
+    let Ok(metadata) = fs::read_to_string(&metadata_path) else {
+        return Ok(None);
+    };
+    let section = "Extension org.gtk.Gtk3theme";
+    if !has_section(&metadata, section) {
+        return Ok(None);
+    }
+
+    let Ok(parts) = split_runtime_ref(runtime_ref) else {
+        return Ok(None);
+    };
+    let branch = value(&metadata, section, "version")
+        .or_else(|| {
+            value(&metadata, section, "versions")
+                .and_then(|versions| first_extension_version(&versions))
+        })
+        .unwrap_or_else(|| parts.branch.clone());
+    let name = format!("org.gtk.Gtk3theme.{theme}");
+    let ref_name = format!("runtime/{name}/{}/{}", parts.arch, branch);
+    let checkout_dir = paths.extensions().join(format!(
+        "{}-{}",
+        safe_dir_fragment(&name),
+        safe_dir_fragment(&branch)
+    ));
+    if !checkout_dir.is_dir() {
+        return Ok(None);
+    }
+    if validate_extension_checkout(&ref_name, &checkout_dir).is_err() {
+        return Ok(None);
+    }
+
+    let directory = value(&metadata, section, "directory")
+        .unwrap_or_else(|| "share/runtime/share/themes".to_string());
+    if !valid_relative_extension_path(&directory) {
+        return Ok(None);
+    }
+    let mut runtime_mount_relative = PathBuf::from(directory).join(theme);
+    if let Some(suffix) =
+        value(&metadata, section, "subdirectory-suffix").filter(|suffix| !suffix.is_empty())
+    {
+        if !valid_relative_extension_path(&suffix) {
+            return Ok(None);
+        }
+        runtime_mount_relative.push(suffix);
+    }
+    let runtime_mountpoint = runtime_dir.join("files").join(&runtime_mount_relative);
+    // Native Flatpak constructs extension destinations while assembling each
+    // sandbox. nullfs needs the destination to exist in the runtime tree.
+    if fs::create_dir_all(&runtime_mountpoint).is_err() {
+        return Ok(None);
+    }
+
+    Ok(Some(RuntimeGtkThemeExtension {
+        ref_name,
+        checkout_dir,
+        runtime_mount_relative,
     }))
 }
 
@@ -191,6 +260,21 @@ pub(super) fn first_extension_version(versions: &str) -> Option<String> {
         .map(str::trim)
         .find(|version| !version.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn valid_relative_extension_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+pub(super) fn valid_extension_suffix(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
 }
 
 pub(super) fn safe_dir_fragment(value: &str) -> String {

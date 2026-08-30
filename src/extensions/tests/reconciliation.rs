@@ -17,6 +17,7 @@ fn fixture() -> (Installation, AppRecord, PathBuf) {
     fs::write(
         runtime_dir.join("metadata"),
         "[Runtime]\nname=org.example.Platform\n\
+         [Extension org.gtk.Gtk3theme]\nversion=3.22\ndirectory=share/runtime/share/themes\nsubdirectory-suffix=gtk-3.0\n\
          [Extension org.freedesktop.Platform.GL]\nversions=24.08;23.08;\nversion=1.4\ndirectory=lib/GL\n\
          [Extension org.freedesktop.Platform.VAAPI.Intel]\nversion=24.08\ndirectory=lib/dri/intel\n",
     )
@@ -50,7 +51,7 @@ fn fixture() -> (Installation, AppRecord, PathBuf) {
 fn discovers_gl_and_supported_app_extensions_without_vaapi_on_non_intel_hosts() {
     let (paths, app, root) = fixture();
 
-    let required = required_for_app(&paths, &app, false).unwrap();
+    let required = required_for_app(&paths, &app, false, None).unwrap();
     let refs = required
         .iter()
         .map(|extension| extension.ref_name.as_str())
@@ -79,10 +80,32 @@ fn discovers_gl_and_supported_app_extensions_without_vaapi_on_non_intel_hosts() 
 }
 
 #[test]
+fn active_gtk_theme_adds_optional_runtime_extension() {
+    let (paths, app, root) = fixture();
+
+    let required = required_for_app(&paths, &app, false, Some("Example-Dark")).unwrap();
+    let theme = required
+        .iter()
+        .find(|extension| extension.ref_name.contains("org.gtk.Gtk3theme"))
+        .unwrap();
+
+    assert_eq!(
+        theme.ref_name,
+        "runtime/org.gtk.Gtk3theme.Example-Dark/x86_64/3.22"
+    );
+    assert!(theme.optional);
+    assert!(!crate::installation::absolute(&paths, &app.runtime_dir)
+        .join("files/share/runtime/share/themes/Example-Dark/gtk-3.0")
+        .exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn adds_hardware_dependent_vaapi_when_intel_is_present() {
     let (paths, app, root) = fixture();
 
-    let required = required_for_app(&paths, &app, true).unwrap();
+    let required = required_for_app(&paths, &app, true, None).unwrap();
 
     assert!(required.iter().any(|extension| {
         extension.ref_name == "runtime/org.freedesktop.Platform.VAAPI.Intel/x86_64/24.08"
@@ -118,7 +141,7 @@ fn discovers_extensions_from_the_activated_runtime_deployment() {
     )
     .unwrap();
 
-    let required = required_for_app(&paths, &app, false).unwrap();
+    let required = required_for_app(&paths, &app, false, None).unwrap();
 
     assert!(required.iter().any(|extension| {
         extension.ref_name == "runtime/org.freedesktop.Platform.GL.default/x86_64/25.08"

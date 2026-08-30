@@ -66,6 +66,7 @@ pub(super) struct ChrootInstance {
     pub(super) host_network: HostNetwork,
     pub(super) host_system_bus: HostSystemBus,
     pub(super) host_video: HostVideo,
+    pub(super) gtk_theme_extension: Option<runtime::RuntimeGtkThemeExtension>,
     pub(super) app_extensions: Vec<runtime::AppExtension>,
     pub(super) owned_mounts: Vec<OwnedMount>,
     run_record: PathBuf,
@@ -110,6 +111,7 @@ impl ChrootInstance {
         host_network: HostNetwork,
         host_system_bus: HostSystemBus,
         host_video: HostVideo,
+        gtk_theme_extension: Option<runtime::RuntimeGtkThemeExtension>,
         app_extensions: Vec<runtime::AppExtension>,
         run_record: PathBuf,
         deployment: state::AppRecord,
@@ -134,6 +136,7 @@ impl ChrootInstance {
             host_network,
             host_system_bus,
             host_video,
+            gtk_theme_extension,
             app_extensions,
             owned_mounts: Vec::new(),
             run_record,
@@ -281,6 +284,13 @@ impl ChrootInstance {
             }
             for warning in self.host_video.warnings() {
                 eprintln!("  video warning: {warning}");
+            }
+            if let Some(extension) = &self.gtk_theme_extension {
+                eprintln!(
+                    "  GTK3 theme extension: {} -> /usr/{}",
+                    extension.ref_name,
+                    extension.runtime_mount_relative.display()
+                );
             }
             for extension in &self.app_extensions {
                 eprintln!(

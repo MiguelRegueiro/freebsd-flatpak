@@ -1,5 +1,7 @@
 use super::application_extensions::is_supported_app_extension;
-use super::runtime_extensions::{first_extension_version, safe_dir_fragment, split_runtime_ref};
+use super::runtime_extensions::{
+    first_extension_version, safe_dir_fragment, split_runtime_ref, valid_extension_suffix,
+};
 use crate::flatpak_metadata::{has_section, sections_with_prefix, value};
 use crate::installation::installation_paths::Installation;
 use crate::installation::AppRecord;
@@ -18,6 +20,7 @@ struct RequiredExtension {
     ref_name: String,
     checkout_dir: PathBuf,
     preferred_origin: String,
+    optional: bool,
 }
 
 struct CachedRemote {
@@ -54,9 +57,10 @@ pub(crate) fn reconcile_extensions_with_metadata(
     }
 
     let intel_vaapi = crate::host_resources::video_acceleration::host_has_intel_drm_device();
+    let gtk_theme = crate::host_resources::cursor_themes::active_gtk_theme();
     let mut requirements = BTreeMap::new();
     for app in apps {
-        for requirement in required_for_app(paths, app, intel_vaapi)? {
+        for requirement in required_for_app(paths, app, intel_vaapi, gtk_theme.as_deref())? {
             requirements
                 .entry(requirement.ref_name.clone())
                 .or_insert(requirement);
@@ -125,6 +129,9 @@ pub(crate) fn reconcile_extensions_with_metadata(
                 break;
             }
         }
+        if selected.is_none() && requirement.optional {
+            continue;
+        }
         let (origin, checksum) = selected.with_context(|| {
             let failures = unavailable
                 .iter()
@@ -182,6 +189,7 @@ fn required_for_app(
     paths: &Installation,
     app: &AppRecord,
     intel_vaapi: bool,
+    gtk_theme: Option<&str>,
 ) -> Result<Vec<RequiredExtension>> {
     let app_dir = crate::installation::absolute(paths, &app.app_dir);
     let runtime_dir =
@@ -193,6 +201,18 @@ fn required_for_app(
         .with_context(|| format!("read runtime metadata {}", runtime_metadata_path.display()))?;
     let runtime = split_runtime_ref(&app.runtime_ref)?;
     let mut requirements = Vec::new();
+
+    let gtk_section = "Extension org.gtk.Gtk3theme";
+    if let Some(theme) = gtk_theme.filter(|theme| valid_extension_suffix(theme)) {
+        if has_section(&runtime_metadata, gtk_section) {
+            let branch = extension_branch(&runtime_metadata, gtk_section, &runtime.branch);
+            let name = format!("org.gtk.Gtk3theme.{theme}");
+            let mut requirement =
+                requirement(paths, &name, &runtime.arch, &branch, &app.runtime_origin);
+            requirement.optional = true;
+            requirements.push(requirement);
+        }
+    }
 
     let gl_section = format!("Extension {GL_EXTENSION}");
     if has_section(&runtime_metadata, &gl_section) {
@@ -285,6 +305,7 @@ fn requirement(
             safe_dir_fragment(branch)
         )),
         preferred_origin: preferred_origin.to_string(),
+        optional: false,
     }
 }
 
