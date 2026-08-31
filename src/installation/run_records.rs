@@ -35,6 +35,29 @@ pub fn write_run_record(
         child_pid,
         None,
         None,
+        None,
+        &[],
+    )
+}
+
+pub fn write_nested_run_record(
+    paths: &Installation,
+    app_id: &str,
+    instance_id: &str,
+    root: &Path,
+    parent_root: &Path,
+    launcher_pid: u32,
+) -> Result<PathBuf> {
+    write_run_record_inner(
+        paths,
+        app_id,
+        instance_id,
+        root,
+        launcher_pid,
+        0,
+        Some(parent_root),
+        None,
+        None,
         &[],
     )
 }
@@ -54,6 +77,7 @@ pub fn write_checkout_pin(
         root,
         std::process::id(),
         0,
+        None,
         None,
         Some((app_dir, runtime_dir)),
         &[],
@@ -95,6 +119,7 @@ pub fn write_pinned_run_record_with_extensions(
         root,
         launcher_pid,
         child_pid,
+        None,
         Some(app),
         None,
         extension_refs,
@@ -109,6 +134,7 @@ fn write_run_record_inner(
     root: &Path,
     launcher_pid: u32,
     child_pid: u32,
+    parent_root: Option<&Path>,
     deployment: Option<&AppRecord>,
     checkout_paths: Option<(&Path, &Path)>,
     extension_refs: &[String],
@@ -119,6 +145,10 @@ fn write_run_record_inner(
         "app_id={app_id}\ninstance_id={instance_id}\nroot={}\nlauncher_pid={launcher_pid}\nchild_pid={child_pid}\n",
         root.display()
     );
+    if let Some(parent_root) = parent_root {
+        use std::fmt::Write as _;
+        writeln!(data, "parent_root={}", parent_root.display())?;
+    }
     if let Some(identity) = ProcessIdentity::for_pid(launcher_pid as libc::pid_t)? {
         use std::fmt::Write as _;
         writeln!(data, "launcher_start={identity}")?;
@@ -208,6 +238,15 @@ pub fn mark_run_record_portal_inactive(path: &Path) -> Result<()> {
 }
 
 pub fn read_run_records(paths: &Installation) -> Result<Vec<BTreeMap<String, String>>> {
+    Ok(read_sandbox_ownership_records(paths)?
+        .into_iter()
+        .filter(|record| !record.contains_key("parent_root"))
+        .collect())
+}
+
+pub fn read_sandbox_ownership_records(
+    paths: &Installation,
+) -> Result<Vec<BTreeMap<String, String>>> {
     ensure_layout(paths)?;
     let mut records = Vec::new();
     for entry in fs::read_dir(paths.runs()).context("read run state directory")? {

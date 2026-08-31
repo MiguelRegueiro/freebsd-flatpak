@@ -4,7 +4,7 @@ use crate::installation as state;
 use crate::installation::installation_paths::Installation;
 use crate::secure_mount;
 use anyhow::{bail, Context, Result};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ pub fn recover_stale_mounts(paths: &Installation) -> Result<()> {
     state::ensure_layout(paths)?;
     recover_orphaned_document_mounts(paths)?;
 
-    for record in state::read_run_records(paths)? {
+    for record in order_run_records_for_recovery(state::read_sandbox_ownership_records(paths)?) {
         let Some(record_path) = record.get("_path").map(PathBuf::from) else {
             continue;
         };
@@ -131,7 +131,7 @@ fn mount_identity(path: &Path) -> Result<(u64, u64)> {
 
 fn active_run_roots(paths: &Installation) -> Result<Vec<PathBuf>> {
     let mut roots = Vec::new();
-    for record in state::read_run_records(paths)? {
+    for record in state::read_sandbox_ownership_records(paths)? {
         if state::run_record_launcher_active(&record)? {
             if let Some(root) = record.get("root") {
                 roots.push(PathBuf::from(root));
@@ -139,6 +139,45 @@ fn active_run_roots(paths: &Installation) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(roots)
+}
+
+fn order_run_records_for_recovery(
+    mut records: Vec<BTreeMap<String, String>>,
+) -> Vec<BTreeMap<String, String>> {
+    let parents = records
+        .iter()
+        .filter_map(|record| {
+            record.get("root").map(|root| {
+                (
+                    PathBuf::from(root),
+                    record.get("parent_root").map(PathBuf::from),
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    records.sort_by(|left, right| {
+        record_ownership_depth(right, &parents)
+            .cmp(&record_ownership_depth(left, &parents))
+            .then_with(|| right.get("root").cmp(&left.get("root")))
+    });
+    records
+}
+
+fn record_ownership_depth(
+    record: &BTreeMap<String, String>,
+    parents: &BTreeMap<PathBuf, Option<PathBuf>>,
+) -> usize {
+    let mut depth = 0;
+    let mut seen = BTreeSet::new();
+    let mut parent = record.get("parent_root").map(PathBuf::from);
+    while let Some(root) = parent {
+        if !seen.insert(root.clone()) {
+            break;
+        }
+        depth += 1;
+        parent = parents.get(&root).and_then(Clone::clone);
+    }
+    depth
 }
 
 pub(super) fn belongs_to_any_root(path: &Path, roots: &[PathBuf]) -> bool {

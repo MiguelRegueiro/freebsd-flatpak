@@ -344,7 +344,7 @@ impl ChrootNullfsBackend {
             self.paths.data_root(),
         )?;
         for grant in flatpak_data_plan.grants_before_mask {
-            instance.mount_nullfs_secure(
+            instance.mount_nullfs_extra_permission(
                 grant.host_path(),
                 grant.sandbox_target_relative()?,
                 grant.access().is_read_only(),
@@ -363,7 +363,7 @@ impl ChrootNullfsBackend {
             )?;
         }
         for grant in flatpak_data_plan.grants_after_mask {
-            instance.mount_nullfs_secure(
+            instance.mount_nullfs_extra_permission(
                 grant.host_path(),
                 grant.sandbox_target_relative()?,
                 grant.access().is_read_only(),
@@ -376,9 +376,17 @@ impl ChrootNullfsBackend {
         )?;
         if expose_flatpak_apps {
             let projection = FlatpakInstallationProjection::prepare(&instance.root, &self.paths)?;
-            instance.mount_nullfs_secure(&projection.source_root, &projection.target_root, true)?;
+            instance.mount_nullfs_extra_permission(
+                &projection.source_root,
+                &projection.target_root,
+                true,
+            )?;
             for deployment in projection.deployments {
-                instance.mount_nullfs_secure(&deployment.source, &deployment.target, true)?;
+                instance.mount_nullfs_extra_permission(
+                    &deployment.source,
+                    &deployment.target,
+                    true,
+                )?;
             }
         }
         for mount in instance.host_cursor.mounts().to_vec() {

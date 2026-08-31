@@ -39,12 +39,16 @@ use std::sync::Arc;
 
 #[derive(Debug)]
 pub(super) struct SandboxExecutionContext {
+    pub(super) paths: Installation,
+    pub(super) app_id: String,
     pub(super) root: PathBuf,
     pub(super) runtime_root: PathBuf,
     pub(super) uid: u32,
     pub(super) gid: u32,
     pub(super) supplementary_gids: Vec<u32>,
     pub(super) environment: Vec<(String, String)>,
+    pub(super) nested_mounts: Vec<OwnedMount>,
+    pub(super) mounts: Vec<OwnedMount>,
 }
 
 #[derive(Debug)]
@@ -70,6 +74,7 @@ pub(super) struct ChrootInstance {
     pub(super) app_extensions: Vec<runtime::AppExtension>,
     pub(super) owned_mounts: Vec<OwnedMount>,
     run_record: PathBuf,
+    pub(super) nested_excluded_mounts: Vec<PathBuf>,
     deployment: state::AppRecord,
     extension_refs: Vec<String>,
     cleaned: bool,
@@ -140,6 +145,7 @@ impl ChrootInstance {
             app_extensions,
             owned_mounts: Vec::new(),
             run_record,
+            nested_excluded_mounts: Vec::new(),
             deployment,
             extension_refs,
             cleaned: false,
@@ -217,6 +223,8 @@ impl ChrootInstance {
         merge_env(&mut env, self.host_video.env());
         ensure_metadata_runtime_dirs(&env, &desktop.xdg_runtime_dir, self.uid, &app.app_id)?;
         let execution = Arc::new(SandboxExecutionContext {
+            paths: self.paths.clone(),
+            app_id: app.app_id.clone(),
             root: fs::canonicalize(&self.root).context("canonicalize sandbox root")?,
             runtime_root: fs::canonicalize(self.paths.runtime_root())
                 .context("canonicalize sandbox runtime root")?,
@@ -224,6 +232,8 @@ impl ChrootInstance {
             gid: self.gid,
             supplementary_gids: self.supplementary_gids.clone(),
             environment: env.clone(),
+            nested_mounts: nested_mount_plan(&self.owned_mounts, &self.nested_excluded_mounts),
+            mounts: self.owned_mounts.clone(),
         });
         let supervisor = self.supervisor.clone();
         let _spawn_broker = SpawnBroker::bind(&self.paths, execution.clone(), supervisor.clone())?;
@@ -322,6 +332,7 @@ impl ChrootInstance {
             cwd: None,
             nested_sandbox: false,
             no_network: false,
+            started_fd: None,
             environment: &execution.environment,
             argv: &entry_args,
         })?;
@@ -440,6 +451,14 @@ impl ChrootInstance {
             bail!("cleanup failed:\n{}", errors.join("\n"));
         }
     }
+}
+
+pub(super) fn nested_mount_plan(mounts: &[OwnedMount], excluded: &[PathBuf]) -> Vec<OwnedMount> {
+    mounts
+        .iter()
+        .filter(|mount| !excluded.contains(&mount.path))
+        .cloned()
+        .collect()
 }
 
 impl Drop for ChrootInstance {

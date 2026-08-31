@@ -5,6 +5,7 @@
 
 extern const char FLATPAK_SPAWN_XML[];
 extern const GDBusInterfaceVTable FLATPAK_SPAWN_VTABLE;
+bool flatpak_spawn_flags_supported(guint32 flags);
 void flatpak_spawn_watch_lifecycle(BridgeState *state, int fd, guint32 request,
                                    guint32 pid, const char *sender,
                                    guint32 flags);

@@ -19,6 +19,7 @@ const MAX_TARGET_FD: i32 = 65_535;
 const MAX_ARGUMENTS: usize = 1024;
 const MAX_ENVIRONMENT: usize = 512;
 const NESTED_DAEMON_SOCKET: &str = "/var/run/freebsd-flatpak/secure-launch.sock";
+const LAUNCH_STARTED_FD_ENV: &str = "FREEBSD_FLATPAK_LAUNCH_STARTED_FD";
 const MAX_NESTED_PACKET: usize = 65_536;
 const JAIL_OWN_DESC: libc::c_int = 0x80;
 static NESTED_CLIENT_SIGNAL_FD: AtomicI32 = AtomicI32::new(-1);
@@ -33,6 +34,7 @@ pub(crate) struct LaunchRequest<'a> {
     pub(crate) cwd: Option<&'a OsStr>,
     pub(crate) nested_sandbox: bool,
     pub(crate) no_network: bool,
+    pub(crate) started_fd: Option<RawFd>,
     pub(crate) environment: &'a [(String, String)],
     pub(crate) argv: &'a [OsString],
 }
@@ -48,6 +50,7 @@ pub(crate) fn command(request: LaunchRequest<'_>) -> Result<Command> {
         cwd,
         nested_sandbox,
         no_network,
+        started_fd,
         environment,
         argv,
     } = request;
@@ -99,6 +102,17 @@ pub(crate) fn command(request: LaunchRequest<'_>) -> Result<Command> {
                 .join(","),
         )
         .arg(environment.len().to_string());
+    if let Some(fd) = started_fd {
+        command.env(LAUNCH_STARTED_FD_ENV, fd.to_string());
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
     for (key, value) in environment {
         if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
             bail!("invalid launch environment entry");
@@ -323,6 +337,11 @@ impl Request {
         }
         if unsafe { libc::geteuid() } != real_uid || unsafe { libc::getegid() } != real_gid {
             bail!("secure launch could not drop privilege");
+        }
+        if let Some(lifecycle) = jail_lifecycle {
+            write_all_fd(lifecycle, &[2])?;
+        } else {
+            notify_launch_started(unsafe { libc::getpid() } as u32)?;
         }
         let error = Command::new(&self.argv[0])
             .args(&self.argv[1..])
@@ -849,8 +868,45 @@ pub(crate) fn run_nested_client() -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
     send_nested_request(socket.as_raw_fd(), &args, &fds)?;
     drop(fds);
+    let relative_pid = read_started(socket.as_raw_fd())?;
+    notify_launch_started(relative_pid)?;
     let status = read_status(socket.as_raw_fd())?;
     exit_from_wait_status(status)
+}
+
+fn notify_launch_started(pid: u32) -> Result<()> {
+    let Some(value) = env::var_os(LAUNCH_STARTED_FD_ENV) else {
+        return Ok(());
+    };
+    let fd = value
+        .to_str()
+        .context("launch readiness descriptor is not UTF-8")?
+        .parse::<RawFd>()
+        .context("invalid launch readiness descriptor")?;
+    if !(0..=MAX_TARGET_FD).contains(&fd) {
+        bail!("invalid launch readiness descriptor");
+    }
+    write_launch_started(fd, pid)
+}
+
+fn write_launch_started(fd: RawFd, pid: u32) -> Result<()> {
+    let bytes = pid.to_be_bytes();
+    let mut written = 0;
+    loop {
+        let count =
+            unsafe { libc::write(fd, bytes[written..].as_ptr().cast(), bytes.len() - written) };
+        if count > 0 {
+            written += count as usize;
+            if written == bytes.len() {
+                return Ok(());
+            }
+            continue;
+        }
+        if count < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        return Err(io::Error::last_os_error()).context("notify launch readiness");
+    }
 }
 
 fn install_nested_client_signal_handlers(fd: RawFd) {
@@ -1058,6 +1114,12 @@ fn serve_nested_request(fd: RawFd) -> Result<()> {
             unsafe { jail_remove(jail) };
             return Err(error);
         }
+        let mut started = [0];
+        read_exact_fd(parent_lifecycle.as_raw_fd(), &mut started)?;
+        if started != [2] {
+            bail!("nested sandbox child returned invalid readiness response");
+        }
+        write_started(fd, child as u32)?;
         child_wait_started = true;
         let status = wait_for_nested_child_or_client(child, fd)?;
         drop(owner);
@@ -1470,6 +1532,18 @@ fn read_status(fd: RawFd) -> Result<u32> {
     let mut bytes = [0; 4];
     read_exact(fd, &mut bytes)?;
     Ok(u32::from_be_bytes(bytes))
+}
+fn read_started(fd: RawFd) -> Result<u32> {
+    let mut bytes = [0; 4];
+    read_exact(fd, &mut bytes)?;
+    let pid = u32::from_be_bytes(bytes);
+    if pid == 0 {
+        bail!("nested daemon returned invalid readiness response");
+    }
+    Ok(pid)
+}
+fn write_started(fd: RawFd, pid: u32) -> Result<()> {
+    write_all(fd, &pid.to_be_bytes())
 }
 fn write_status(fd: RawFd, status: u32) -> Result<()> {
     write_all(fd, &status.to_be_bytes())

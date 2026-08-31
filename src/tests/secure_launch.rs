@@ -39,6 +39,36 @@ fn nested_lifecycle_transfers_owning_descriptor() {
     assert!(unsafe { libc::fcntl(received.as_raw_fd(), libc::F_GETFD) } >= 0);
 }
 
+#[test]
+fn nested_readiness_precedes_exit_status() {
+    let (daemon, client) = nested_jail_lifecycle_socket().unwrap();
+
+    write_started(daemon.as_raw_fd(), 1234).unwrap();
+    write_status(daemon.as_raw_fd(), 42).unwrap();
+
+    assert_eq!(read_started(client.as_raw_fd()).unwrap(), 1234);
+    assert_eq!(read_status(client.as_raw_fd()).unwrap(), 42);
+}
+
+#[test]
+fn launch_readiness_is_written_to_a_pipe() {
+    let mut pipe = [-1; 2];
+    assert_eq!(
+        unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) },
+        0
+    );
+    let read = unsafe { OwnedFd::from_raw_fd(pipe[0]) };
+    let write = unsafe { OwnedFd::from_raw_fd(pipe[1]) };
+
+    write_launch_started(write.as_raw_fd(), 5678).unwrap();
+    let mut bytes = [0; 4];
+    assert_eq!(
+        unsafe { libc::read(read.as_raw_fd(), bytes.as_mut_ptr().cast(), 4) },
+        4
+    );
+    assert_eq!(u32::from_be_bytes(bytes), 5678);
+}
+
 fn serve_test_nested_request(fd: RawFd) -> Result<()> {
     let mut request = [0u8; 1];
     read_exact(fd, &mut request)?;

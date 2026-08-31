@@ -59,6 +59,7 @@ pub(crate) fn run(
         cwd: Some(Path::new("/app/extra").as_os_str()),
         nested_sandbox: false,
         no_network: false,
+        started_fd: None,
         environment: &environment,
         argv: &arguments,
     })?;

@@ -88,6 +88,32 @@ fn launch_data_dirs_include_projected_host_icon_themes() {
 }
 
 #[test]
+fn zypak_uses_secure_mimic_strategy() {
+    let app = app_with_metadata("[Application]\nname=org.example.App\n");
+    let desktop = DesktopSession {
+        xdg_runtime_dir: PathBuf::from("/run/host-user"),
+        wayland_display: "wayland-0".into(),
+        display: None,
+        dbus_session_bus_address: None,
+    };
+
+    let env = launch_env(
+        &app,
+        &desktop,
+        1001,
+        "user",
+        PathBuf::from("/host/data").as_path(),
+    );
+
+    assert_eq!(
+        env.iter()
+            .find(|(key, _)| key == "ZYPAK_ZYGOTE_STRATEGY_SPAWN")
+            .map(|(_, value)| value.as_str()),
+        Some("false")
+    );
+}
+
+#[test]
 fn app_metadata_environment_supports_braced_variables() {
     let app = app_with_metadata("[Environment]\nEXAMPLE=${XDG_RUNTIME_DIR}/app/${FLATPAK_ID}\n");
     let base_env = vec![

@@ -10,7 +10,12 @@
 #define SPAWN_MAX_FDS 32
 #define SPAWN_MAX_TARGET_FD 65535
 #define SPAWN_WATCH_BUS (1u << 4)
+#define SPAWN_EXPOSE_PIDS (1u << 5)
+#define SPAWN_NOTIFY_START (1u << 6)
+#define SPAWN_SUPPORTED_FLAGS (0x1fu | SPAWN_EXPOSE_PIDS | SPAWN_NOTIFY_START)
+#define FLATPAK_SUPPORTS_EXPOSE_PIDS (1u << 0)
 #define SPAWN_TERMINATE 11
+#define SPAWN_STARTED 12
 
 /* The Rust broker owns sandbox/process execution. This helper is deliberately
  * limited to the D-Bus portal boundary and transports only validated data. */
@@ -211,6 +216,22 @@ static gboolean lifecycle_ready(gint fd, GIOCondition condition, gpointer data) 
         guint32 status; memcpy(&status, payload + 4, 4);
         diagnostic_line("Flatpak broker lifecycle exited request=%u status=%u", request, ntohl(status));
       }
+      if (request == lifecycle->request && type == SPAWN_STARTED && length == 8) {
+        guint32 pid, relpid;
+        memcpy(&pid, payload, 4); memcpy(&relpid, payload + 4, 4);
+        if (ntohl(pid) == lifecycle->pid) {
+          GError *error = NULL;
+          if (lifecycle->state->local_bus != NULL &&
+              !g_dbus_connection_emit_signal(lifecycle->state->local_bus,
+              lifecycle->sender, "/org/freedesktop/portal/Flatpak",
+              "org.freedesktop.portal.Flatpak", "SpawnStarted",
+              g_variant_new("(uu)", lifecycle->pid, ntohl(relpid)), &error)) {
+            log_line("emit Flatpak SpawnStarted failed: %s", error->message);
+            g_error_free(error);
+          }
+          return G_SOURCE_CONTINUE;
+        }
+      }
       if (request == lifecycle->request && type == 10 && length == 8) {
         guint32 pid, status;
         memcpy(&pid, payload, 4); memcpy(&status, payload + 4, 4);
@@ -406,6 +427,10 @@ static bool validate_nested_options(guint32 flags, GVariant *options, GUnixFDLis
   }
   return true;
 }
+bool flatpak_spawn_flags_supported(guint32 flags) {
+  return (flags & ~SPAWN_SUPPORTED_FLAGS) == 0;
+}
+
 static void call(GDBusConnection *c, const gchar *s, const gchar *p,
                  const gchar *i, const gchar *m, GVariant *v,
                  GDBusMethodInvocation *inv, gpointer data) {
@@ -416,7 +441,7 @@ static void call(GDBusConnection *c, const gchar *s, const gchar *p,
   GVariant *cwd = NULL, *argv = NULL, *fd_map = NULL, *envs = NULL, *options = NULL; guint32 flags;
   g_variant_get(v, "(@ay@aay@a{uh}@a{ss}u@a{sv})", &cwd, &argv, &fd_map, &envs, &flags, &options);
   diagnostic_line("Flatpak Spawn request=1 flags=%u cwd_bytes=%" G_GSIZE_FORMAT " argv_count=%" G_GSIZE_FORMAT " environment_count=%" G_GSIZE_FORMAT " fd_mappings=%" G_GSIZE_FORMAT " options=%" G_GSIZE_FORMAT, flags, g_variant_n_children(cwd), g_variant_n_children(argv), g_variant_n_children(envs), g_variant_n_children(fd_map), g_variant_n_children(options));
-  if ((flags & ~0x1fU) != 0) {
+  if (!flatpak_spawn_flags_supported(flags)) {
     g_dbus_method_invocation_return_dbus_error(inv, "org.freedesktop.portal.Error.NotAllowed", "Unsupported Flatpak Spawn flags");
     g_variant_unref(cwd); g_variant_unref(argv); g_variant_unref(fd_map); g_variant_unref(envs); g_variant_unref(options); return;
   }
@@ -446,7 +471,7 @@ static GVariant *prop(GDBusConnection *c, const gchar *s, const gchar *p,
                       const gchar *i, const gchar *n, GError **e, gpointer d) {
   (void)c;(void)s;(void)p;(void)i;(void)e;(void)d;
   if (g_str_equal(n, "version")) return g_variant_new_uint32(4);
-  if (g_str_equal(n, "supports")) return g_variant_new_uint32(0);
+  if (g_str_equal(n, "supports")) return g_variant_new_uint32(FLATPAK_SUPPORTS_EXPOSE_PIDS);
   g_set_error(e, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_PROPERTY, "Unknown property %s", n);
   return NULL;
 }

@@ -20,6 +20,12 @@ pub(super) fn launch_env(
         ("SHELL".to_string(), "/bin/sh".to_string()),
         ("container".to_string(), "flatpak".to_string()),
         ("FLATPAK_ID".to_string(), app.app_id.clone()),
+        // Zypak's spawn strategy requires Linux PID namespaces across the nested jail;
+        // its mimic strategy still uses the secure SANDBOX Spawn path for renderers.
+        (
+            "ZYPAK_ZYGOTE_STRATEGY_SPAWN".to_string(),
+            "false".to_string(),
+        ),
         ("XDG_RUNTIME_DIR".to_string(), format!("/run/user/{uid}")),
         ("WAYLAND_DISPLAY".to_string(), desktop.wayland_display.clone()),
         ("XDG_SESSION_TYPE".to_string(), "wayland".to_string()),

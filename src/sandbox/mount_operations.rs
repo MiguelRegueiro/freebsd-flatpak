@@ -33,6 +33,18 @@ impl ChrootInstance {
         self.mount_nullfs_impl(source, target_relative.as_ref(), read_only, true)
     }
 
+    pub(super) fn mount_nullfs_extra_permission(
+        &mut self,
+        source: &Path,
+        target_relative: impl AsRef<Path>,
+        read_only: bool,
+    ) -> Result<()> {
+        let target_relative = target_relative.as_ref();
+        self.mount_nullfs_impl(source, target_relative, read_only, true)?;
+        self.nested_excluded_mounts
+            .push(self.root.join(target_relative));
+        Ok(())
+    }
     fn mount_nullfs_impl(
         &mut self,
         source: &Path,

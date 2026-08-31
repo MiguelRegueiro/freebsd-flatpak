@@ -81,6 +81,94 @@ fn active_instance_roots_exclude_only_their_own_mounts_from_recovery() {
     assert!(belongs_to_any_root(&second.join("proc"), &active));
     assert!(!belongs_to_any_root(&other.join("app"), &active));
 }
+
+#[test]
+fn live_nested_root_is_skipped_by_startup_recovery() {
+    let base = std::env::temp_dir().join(format!(
+        "freebsd-flatpak-live-nested-recovery-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&base);
+    let paths = Installation::for_test(&base);
+    let parent = paths.chroots().join("org.example.App/parent");
+    let nested = paths.chroots().join("org.example.App/parent-nested-1");
+    fs::create_dir_all(&parent).unwrap();
+    fs::create_dir_all(&nested).unwrap();
+    let parent_record = state::write_run_record(
+        &paths,
+        "org.example.App",
+        "parent",
+        &parent,
+        std::process::id(),
+        0,
+    )
+    .unwrap();
+    let nested_record = state::write_nested_run_record(
+        &paths,
+        "org.example.App",
+        "parent-nested-1",
+        &nested,
+        &parent,
+        std::process::id(),
+    )
+    .unwrap();
+
+    recover_stale_mounts(&paths).unwrap();
+    assert!(parent.exists());
+    assert!(nested.exists());
+    assert!(parent_record.exists());
+    assert!(nested_record.exists());
+    let active = active_run_roots(&paths).unwrap();
+    assert!(belongs_to_any_root(&parent.join("usr"), &active));
+    assert!(belongs_to_any_root(
+        &nested.join(".freebsd-flatpak-mount-sources/0"),
+        &active
+    ));
+
+    state::remove_run_record(&nested_record).unwrap();
+    state::remove_run_record(&parent_record).unwrap();
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn abandoned_nested_root_is_recovered_before_parent() {
+    let base = std::env::temp_dir().join(format!(
+        "freebsd-flatpak-abandoned-nested-recovery-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&base);
+    let paths = Installation::for_test(&base);
+    let parent = paths.chroots().join("org.example.App/parent");
+    let nested = paths.chroots().join("org.example.App/parent-nested-1");
+    fs::create_dir_all(&parent).unwrap();
+    fs::create_dir_all(&nested).unwrap();
+    state::write_run_record(&paths, "org.example.App", "parent", &parent, 999_999, 0).unwrap();
+    state::write_nested_run_record(
+        &paths,
+        "org.example.App",
+        "parent-nested-1",
+        &nested,
+        &parent,
+        999_999,
+    )
+    .unwrap();
+
+    let ordered =
+        order_run_records_for_recovery(state::read_sandbox_ownership_records(&paths).unwrap());
+    let roots = ordered
+        .iter()
+        .filter_map(|record| record.get("root").map(PathBuf::from))
+        .collect::<Vec<_>>();
+    assert_eq!(roots, vec![nested.clone(), parent.clone()]);
+
+    recover_stale_mounts(&paths).unwrap();
+    assert!(!nested.exists());
+    assert!(!parent.exists());
+    assert!(state::read_sandbox_ownership_records(&paths)
+        .unwrap()
+        .is_empty());
+    fs::remove_dir_all(base).unwrap();
+}
 #[test]
 fn orphaned_regular_document_mounts_are_recovered_only_after_the_instance_is_gone() {
     let base = std::env::temp_dir().join(format!(

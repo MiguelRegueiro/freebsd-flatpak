@@ -1,16 +1,19 @@
-use super::chroot_instance::SandboxExecutionContext;
+use super::chroot_instance::{OwnedMount, SandboxExecutionContext};
 use super::process_supervision::ProcessReaper;
+use super::stale_sandbox_recovery::{run_command, unmount_mountpoint};
+use crate::installation as state;
 use crate::installation::installation_paths::Installation;
-use crate::secure_launch;
+use crate::{secure_launch, secure_mount};
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::fs;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -29,9 +32,15 @@ const LIFECYCLE_TEST_EXITED: u16 = 7;
 const SPAWN: u16 = 8;
 const SPAWN_ACCEPTED: u16 = 9;
 const SPAWN_EXITED: u16 = 10;
+const SPAWN_STARTED: u16 = 12;
 const SPAWN_TERMINATE: u16 = 11;
 const MAX_TARGET_FD: i32 = 65_535;
 const SPAWN_WATCH_BUS: u32 = 1 << 4;
+const SPAWN_EXPOSE_PIDS: u32 = 1 << 5;
+const SPAWN_NOTIFY_START: u32 = 1 << 6;
+const SPAWN_SUPPORTED_FLAGS: u32 = 0x1f | SPAWN_EXPOSE_PIDS | SPAWN_NOTIFY_START;
+const NESTED_MOUNT_STAGING: &str = ".freebsd-flatpak-mount-sources";
+static NEXT_NESTED_ROOT: AtomicU64 = AtomicU64::new(1);
 
 struct SpawnRequest {
     cwd: Option<Vec<u8>>,
@@ -599,11 +608,268 @@ fn merge_environment(
     Some(environment)
 }
 
+struct SpawnedProcess {
+    child: std::process::Child,
+    started: Option<OwnedFd>,
+    _nested_root: Option<NestedSandboxRoot>,
+}
+
+struct NestedSandboxRoot {
+    root: PathBuf,
+    run_record: PathBuf,
+    mounts: Vec<OwnedMount>,
+}
+
+impl NestedSandboxRoot {
+    fn create(context: &SandboxExecutionContext) -> Result<Self> {
+        let app_root = context
+            .root
+            .parent()
+            .context("sandbox root has no application directory")?;
+        let parent = context
+            .root
+            .file_name()
+            .context("sandbox root has no instance name")?
+            .to_string_lossy();
+        let sequence = NEXT_NESTED_ROOT.fetch_add(1, Ordering::Relaxed);
+        let instance_id = format!("{parent}-nested-{}-{sequence}", std::process::id());
+        let root = app_root.join(&instance_id);
+        let run_record = state::write_nested_run_record(
+            &context.paths,
+            &context.app_id,
+            &instance_id,
+            &root,
+            &context.root,
+            std::process::id(),
+        )
+        .context("publish nested sandbox ownership")?;
+        if let Err(error) = fs::create_dir(&root) {
+            let _ = state::remove_run_record(&run_record);
+            return Err(error)
+                .with_context(|| format!("create nested sandbox root {}", root.display()));
+        }
+
+        let mut nested = Self {
+            root,
+            run_record,
+            mounts: Vec::new(),
+        };
+        if let Err(error) = nested.populate(context) {
+            nested.cleanup();
+            return Err(error);
+        }
+        Ok(nested)
+    }
+
+    fn populate(&mut self, context: &SandboxExecutionContext) -> Result<()> {
+        copy_unmounted_tree(&context.root, &self.root, &context.mounts)?;
+        let info = fs::read_to_string(context.root.join(".flatpak-info"))
+            .context("read parent Flatpak instance metadata")?;
+        fs::write(
+            self.root.join(".flatpak-info"),
+            restricted_flatpak_info(&info),
+        )
+        .context("write nested Flatpak instance metadata")?;
+
+        let staging = self.root.join(NESTED_MOUNT_STAGING);
+        fs::create_dir_all(&staging)
+            .with_context(|| format!("create nested mount staging {}", staging.display()))?;
+        let root_identity = identity(&self.root)?;
+        run_command(
+            secure_mount::tmpfs_command(
+                &self.root,
+                root_identity,
+                Path::new(NESTED_MOUNT_STAGING),
+                "mode=0700",
+            )?,
+            "mount nested Spawn staging tmpfs",
+        )?;
+        self.mounts.push(OwnedMount {
+            path: staging,
+            read_only: false,
+        });
+
+        let mut mounts = context.nested_mounts.clone();
+        mounts.sort_by_key(|mount| mount.path.components().count());
+        for (index, mount) in mounts.into_iter().enumerate() {
+            let target = mount.path.strip_prefix(&context.root).with_context(|| {
+                format!(
+                    "parent mount is outside sandbox root: {}",
+                    mount.path.display()
+                )
+            })?;
+            if target.as_os_str().is_empty() {
+                bail!("nested Spawn cannot clone a mount over the sandbox root");
+            }
+            if is_internal_mount_staging(target) {
+                continue;
+            }
+            let source_identity = identity(&mount.path)?;
+            let stage_relative = Path::new(NESTED_MOUNT_STAGING).join(index.to_string());
+            run_command(
+                secure_mount::nullfs_command(
+                    &self.root,
+                    root_identity,
+                    &mount.path,
+                    Some(source_identity),
+                    &stage_relative,
+                    mount.read_only,
+                )?,
+                "stage nested Spawn mount",
+            )?;
+            self.mounts.push(OwnedMount {
+                path: self.root.join(&stage_relative),
+                read_only: mount.read_only,
+            });
+            run_command(
+                secure_mount::nullfs_command(
+                    &self.root,
+                    root_identity,
+                    &self.root.join(&stage_relative),
+                    None,
+                    target,
+                    mount.read_only,
+                )?,
+                "clone nested Spawn mount",
+            )?;
+            self.mounts.push(OwnedMount {
+                path: self.root.join(target),
+                read_only: mount.read_only,
+            });
+        }
+        Ok(())
+    }
+
+    fn cleanup(&mut self) {
+        let mut failed = false;
+        for mount in self.mounts.drain(..).rev() {
+            if let Err(error) =
+                unmount_mountpoint(&mount.path, mount.read_only, "umount nested Spawn mount")
+            {
+                failed = true;
+                eprintln!(
+                    "warning: nested Spawn mount cleanup failed for {}: {error:#}",
+                    mount.path.display()
+                );
+            }
+        }
+        if failed {
+            return;
+        }
+        match fs::remove_dir_all(&self.root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                eprintln!(
+                    "warning: nested Spawn root cleanup failed for {}: {error}",
+                    self.root.display()
+                );
+                return;
+            }
+        }
+        if let Err(error) = state::remove_run_record(&self.run_record) {
+            eprintln!(
+                "warning: nested Spawn ownership cleanup failed for {}: {error:#}",
+                self.run_record.display()
+            );
+        }
+    }
+}
+
+impl Drop for NestedSandboxRoot {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+fn identity(path: &Path) -> Result<(u64, u64)> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("read filesystem identity for {}", path.display()))?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+fn is_internal_mount_staging(target: &Path) -> bool {
+    target.starts_with(Path::new(NESTED_MOUNT_STAGING))
+}
+
+fn copy_unmounted_tree(source: &Path, target: &Path, mounts: &[OwnedMount]) -> Result<()> {
+    for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if entry.file_name() == ".flatpak-info" {
+            continue;
+        }
+        let is_mountpoint = mounts.iter().any(|mount| mount.path == source_path);
+        let metadata = fs::symlink_metadata(&source_path)
+            .with_context(|| format!("inspect {}", source_path.display()))?;
+        if metadata.file_type().is_symlink() {
+            symlink(fs::read_link(&source_path)?, &target_path)
+                .with_context(|| format!("copy symlink {}", source_path.display()))?;
+        } else if metadata.is_dir() {
+            fs::create_dir(&target_path)
+                .with_context(|| format!("create {}", target_path.display()))?;
+            fs::set_permissions(&target_path, fs::Permissions::from_mode(metadata.mode()))?;
+            if !is_mountpoint {
+                copy_unmounted_tree(&source_path, &target_path, mounts)?;
+            }
+        } else if metadata.is_file() {
+            if is_mountpoint {
+                fs::File::create(&target_path)
+                    .with_context(|| format!("create {}", target_path.display()))?;
+            } else {
+                fs::copy(&source_path, &target_path)
+                    .with_context(|| format!("copy {}", source_path.display()))?;
+            }
+            fs::set_permissions(&target_path, fs::Permissions::from_mode(metadata.mode()))?;
+        }
+    }
+    Ok(())
+}
+
+fn restricted_flatpak_info(info: &str) -> String {
+    if info.lines().any(|line| line.trim() == "sandbox=true") {
+        return info.to_string();
+    }
+    let mut output = String::with_capacity(info.len() + 13);
+    let mut inserted = false;
+    for line in info.lines() {
+        output.push_str(line);
+        output.push('\n');
+        if !inserted && line.trim() == "[Instance]" {
+            output.push_str("sandbox=true\n");
+            inserted = true;
+        }
+    }
+    if !inserted {
+        output.push_str("[Instance]\nsandbox=true\n");
+    }
+    output
+}
+
+fn spawn_flags_supported(flags: u32) -> bool {
+    flags & !SPAWN_SUPPORTED_FLAGS == 0
+}
+
+fn readiness_pipe(minimum_fd: i32) -> Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [-1; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("create Spawn readiness pipe");
+    }
+    let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let write = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+    let duplicate = unsafe { libc::fcntl(write.as_raw_fd(), libc::F_DUPFD_CLOEXEC, minimum_fd) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error()).context("duplicate Spawn readiness pipe");
+    }
+    Ok((read, unsafe { OwnedFd::from_raw_fd(duplicate) }))
+}
+
 fn spawn_in_existing_sandbox(
     context: &SandboxExecutionContext,
     request: SpawnRequest,
-) -> Result<std::process::Child> {
-    if request.flags & !0x1f != 0 {
+) -> Result<SpawnedProcess> {
+    if !spawn_flags_supported(request.flags) {
         bail!("unsupported nested Spawn flags");
     }
     if request
@@ -615,6 +881,13 @@ fn spawn_in_existing_sandbox(
     }
     let nested_sandbox = request.flags & 0x04 != 0;
     let no_network = request.flags & 0x08 != 0;
+    let notify_start = request.flags & SPAWN_NOTIFY_START != 0;
+    let nested_root = nested_sandbox
+        .then(|| NestedSandboxRoot::create(context))
+        .transpose()?;
+    let launch_root = nested_root
+        .as_ref()
+        .map_or(context.root.as_path(), |nested| nested.root.as_path());
     let argv = request
         .argv
         .into_iter()
@@ -636,6 +909,10 @@ fn spawn_in_existing_sandbox(
         .and_then(|target| target.checked_add(1))
         .unwrap_or(3)
         .max(3);
+    let readiness = notify_start
+        .then(|| readiness_pipe(minimum_source))
+        .transpose()?;
+    let started_fd = readiness.as_ref().map(|(_, write)| write.as_raw_fd());
     let mut mappings = Vec::with_capacity(request.mappings.len());
     for (target, source) in request.mappings {
         let duplicate =
@@ -650,7 +927,7 @@ fn spawn_in_existing_sandbox(
         .map(|(target, _)| *target)
         .collect::<Vec<_>>();
     let mut command = secure_launch::command(secure_launch::LaunchRequest {
-        root: &context.root,
+        root: launch_root,
         runtime_root: &context.runtime_root,
         uid: context.uid,
         gid: context.gid,
@@ -659,6 +936,7 @@ fn spawn_in_existing_sandbox(
         cwd: cwd.as_deref(),
         nested_sandbox,
         no_network,
+        started_fd,
         environment: &environment,
         argv: &argv,
     })?;
@@ -668,9 +946,14 @@ fn spawn_in_existing_sandbox(
         .stderr(Stdio::null())
         .process_group(0);
     unsafe { command.pre_exec(move || map_fds_in_child(&mappings)) };
-    command
+    let child = command
         .spawn()
-        .context("spawn command through existing chroot")
+        .context("spawn command through existing chroot")?;
+    Ok(SpawnedProcess {
+        child,
+        started: readiness.map(|(read, _)| read),
+        _nested_root: nested_root,
+    })
 }
 
 unsafe fn map_fds_in_child(mappings: &[(i32, OwnedFd)]) -> std::io::Result<()> {
@@ -681,6 +964,72 @@ unsafe fn map_fds_in_child(mappings: &[(i32, OwnedFd)]) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn spawn_started_payload(pid: u32, relative_pid: u32) -> [u8; 8] {
+    let mut payload = [0; 8];
+    payload[..4].copy_from_slice(&pid.to_be_bytes());
+    payload[4..].copy_from_slice(&relative_pid.to_be_bytes());
+    payload
+}
+
+fn spawn_started_relative_pid(expose_pids: bool, started_pid: u32) -> u32 {
+    if expose_pids {
+        started_pid
+    } else {
+        0
+    }
+}
+
+unsafe fn send_spawn_started(fd: RawFd, request: u32, pid: u32, relative_pid: u32) -> bool {
+    let payload = spawn_started_payload(pid, relative_pid);
+    send_frame(fd, &frame(SPAWN_STARTED, request, &payload, 0), &payload)
+}
+
+fn wait_for_spawn_started(fd: RawFd) -> Result<u32> {
+    let mut bytes = [0; 4];
+    let mut read = 0;
+    while read < bytes.len() {
+        let count =
+            unsafe { libc::read(fd, bytes[read..].as_mut_ptr().cast(), bytes.len() - read) };
+        if count > 0 {
+            read += count as usize;
+            continue;
+        }
+        if count == 0 {
+            bail!("secure launch closed before Spawn readiness");
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error).context("wait for Spawn readiness");
+        }
+    }
+    let pid = u32::from_be_bytes(bytes);
+    if pid == 0 {
+        bail!("invalid Spawn readiness notification");
+    }
+    Ok(pid)
+}
+
+unsafe fn complete_spawn_start_notification(
+    fd: RawFd,
+    request: u32,
+    portal_pid: u32,
+    started: Option<&OwnedFd>,
+    expose_pids: bool,
+) -> bool {
+    let Some(started) = started else {
+        return true;
+    };
+    let started_pid = match wait_for_spawn_started(started.as_raw_fd()) {
+        Ok(relative_pid) => relative_pid,
+        Err(error) => {
+            eprintln!("spawn broker request {request}: readiness failed: {error:#}");
+            0
+        }
+    };
+    let relative_pid = spawn_started_relative_pid(expose_pids, started_pid);
+    send_spawn_started(fd, request, portal_pid, relative_pid)
 }
 
 fn raw_wait_status(status: ExitStatus) -> u32 {
@@ -781,6 +1130,7 @@ unsafe fn handle_connection(
                     let cwd_bytes = spawn_request.cwd.as_ref().map_or(0, Vec::len);
                     eprintln!("spawn broker request {request}: flags={} caller_pid={} cwd_bytes={cwd_bytes} argv_count={} environment_count={} fd_mappings={} payload_bytes={}", spawn_request.flags, spawn_request.caller_pid, spawn_request.argv.len(), spawn_request.environment.len(), spawn_request.mappings.len(), payload.len());
                     let watch_bus = spawn_request.flags & SPAWN_WATCH_BUS != 0;
+                    let expose_pids = spawn_request.flags & SPAWN_EXPOSE_PIDS != 0;
                     let caller_pid = spawn_request.caller_pid;
                     let watch_owner_subtree = match resolve_watch_bus_owner(
                         watch_bus,
@@ -794,14 +1144,19 @@ unsafe fn handle_connection(
                             return;
                         }
                     };
-                    let mut child = match spawn_in_existing_sandbox(&context, spawn_request) {
-                        Ok(child) => child,
+                    let spawned = match spawn_in_existing_sandbox(&context, spawn_request) {
+                        Ok(spawned) => spawned,
                         Err(error) => {
                             eprintln!("spawn broker rejected request {request}: stage=launch error={error:#}");
                             connections.release(fd);
                             return;
                         }
                     };
+                    let SpawnedProcess {
+                        mut child,
+                        started,
+                        _nested_root,
+                    } = spawned;
                     let portal_pid = child.id();
                     let tree = match supervisor.track(portal_pid) {
                         Ok(tree) => tree,
@@ -815,6 +1170,17 @@ unsafe fn handle_connection(
                     };
                     let accepted = portal_pid.to_be_bytes();
                     if !send_frame(fd, &frame(SPAWN_ACCEPTED, request, &accepted, 0), &accepted) {
+                        let _ = tree.wait_for_exit(&mut child, || true);
+                        connections.release(fd);
+                        return;
+                    }
+                    if !complete_spawn_start_notification(
+                        fd,
+                        request,
+                        portal_pid,
+                        started.as_ref(),
+                        expose_pids,
+                    ) {
                         let _ = tree.wait_for_exit(&mut child, || true);
                         connections.release(fd);
                         return;
@@ -1043,12 +1409,16 @@ mod tests {
             handle_connection(
                 server,
                 Arc::new(SandboxExecutionContext {
+                    paths: Installation::for_test(&tempfile_dir()),
+                    app_id: "app.id".into(),
                     root: PathBuf::from("/"),
                     runtime_root: PathBuf::from("/"),
                     uid: 0,
                     gid: 0,
                     supplementary_gids: Vec::new(),
                     environment: Vec::new(),
+                    mounts: Vec::new(),
+                    nested_mounts: Vec::new(),
                 }),
                 Arc::new(ProcessReaper::test_inert()),
                 worker_connections,
@@ -1101,12 +1471,16 @@ mod tests {
         let root = paths.chroots().join("app.id/instance");
         fs::create_dir_all(&root).unwrap();
         let context = Arc::new(SandboxExecutionContext {
+            paths: paths.clone(),
+            app_id: "app.id".into(),
             root,
             runtime_root: paths.runtime_root().to_path_buf(),
             uid: unsafe { libc::getuid() },
+            nested_mounts: Vec::new(),
             gid: unsafe { libc::getgid() },
             supplementary_gids: vec![1],
             environment: vec![("A".into(), "B".into())],
+            mounts: Vec::new(),
         });
         let broker = SpawnBroker::bind(
             &paths,
@@ -1124,20 +1498,28 @@ mod tests {
         let dir = tempfile_dir();
         let paths = Installation::for_test(&dir);
         let first = Arc::new(SandboxExecutionContext {
+            paths: paths.clone(),
+            app_id: "app.id".into(),
             root: paths.chroots().join("app.id/one"),
             runtime_root: paths.runtime_root().to_path_buf(),
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
             supplementary_gids: vec![1],
             environment: vec![("A".into(), "one".into())],
+            nested_mounts: Vec::new(),
+            mounts: Vec::new(),
         });
         let second = Arc::new(SandboxExecutionContext {
+            paths: paths.clone(),
+            app_id: "app.id".into(),
             root: paths.chroots().join("app.id/two"),
             runtime_root: paths.runtime_root().to_path_buf(),
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
             supplementary_gids: vec![2],
             environment: vec![("A".into(), "two".into())],
+            mounts: Vec::new(),
+            nested_mounts: Vec::new(),
         });
         fs::create_dir_all(&first.root).unwrap();
         fs::create_dir_all(&second.root).unwrap();
@@ -1175,6 +1557,10 @@ mod tests {
         p
     }
 }
+
+#[cfg(test)]
+#[path = "tests/spawn_portal.rs"]
+mod spawn_portal_tests;
 
 #[cfg(test)]
 #[path = "tests/spawn_broker_watch_bus.rs"]

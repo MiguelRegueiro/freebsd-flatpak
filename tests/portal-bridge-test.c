@@ -112,6 +112,19 @@ static void test_flatpak_spawn_contract(void) {
   g_assert_cmpstr(g_dbus_interface_info_lookup_method(iface, "SpawnSignal")->in_args[1]->signature, ==, "u");
   g_assert_cmpstr(g_dbus_interface_info_lookup_signal(iface, "SpawnStarted")->args[1]->signature, ==, "u");
   g_assert_cmpstr(g_dbus_interface_info_lookup_signal(iface, "SpawnExited")->args[1]->signature, ==, "u");
+
+  GVariant *version = FLATPAK_SPAWN_VTABLE.get_property(
+      NULL, NULL, NULL, NULL, "version", &error, NULL);
+  g_assert_no_error(error);
+  g_assert_cmpuint(g_variant_get_uint32(version), ==, 4);
+  g_variant_unref(version);
+  GVariant *supports = FLATPAK_SPAWN_VTABLE.get_property(
+      NULL, NULL, NULL, NULL, "supports", &error, NULL);
+  g_assert_no_error(error);
+  g_assert_cmpuint(g_variant_get_uint32(supports), ==, 1);
+  g_variant_unref(supports);
+  g_assert_true(flatpak_spawn_flags_supported(4 | 32 | 64));
+  g_assert_false(flatpak_spawn_flags_supported(128));
   g_dbus_node_info_unref(node);
 }
 
@@ -800,6 +813,11 @@ static void test_flatpak_lifecycle_source_is_async(void) {
   unsigned char accepted[24] = {0}; guint32 magic = htonl(0x46534250), request = htonl(55), length = htonl(4); guint16 version = htons(1), type = htons(6);
   memcpy(accepted, &magic, 4); memcpy(accepted + 4, &version, 2); memcpy(accepted + 6, &type, 2); memcpy(accepted + 8, &request, 4); memcpy(accepted + 12, &length, 4); memcpy(accepted + 20, &request, 4);
   g_assert_cmpint(send(pair[0], accepted, sizeof(accepted), 0), ==, sizeof(accepted));
+  g_main_context_iteration(NULL, TRUE);
+  g_assert_cmpuint(state.spawn_lifecycles->len, ==, 1);
+  unsigned char started[28] = {0}; guint32 pid = htonl(55); type = htons(12); length = htonl(8);
+  memcpy(started, &magic, 4); memcpy(started + 4, &version, 2); memcpy(started + 6, &type, 2); memcpy(started + 8, &request, 4); memcpy(started + 12, &length, 4); memcpy(started + 20, &pid, 4); memcpy(started + 24, &pid, 4);
+  g_assert_cmpint(send(pair[0], started, sizeof(started), 0), ==, sizeof(started));
   g_main_context_iteration(NULL, TRUE);
   g_assert_cmpuint(state.spawn_lifecycles->len, ==, 1);
   unsigned char exited[28] = {0}; type = htons(7); length = htonl(8);
