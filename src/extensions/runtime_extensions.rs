@@ -1,9 +1,69 @@
-use super::{RuntimeGlExtension, RuntimeGtkThemeExtension, RuntimeVaapiExtension};
-use crate::flatpak_metadata::{has_section, value};
+use super::{
+    RuntimeCodecExtension, RuntimeGlExtension, RuntimeGtkThemeExtension, RuntimeVaapiExtension,
+};
+use crate::flatpak_metadata::{has_section, sections_with_prefix, value};
 use crate::installation::installation_paths::Installation;
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+const SUPPORTED_RUNTIME_CODEC_EXTENSIONS: &[&str] = &["org.freedesktop.Platform.codecs-extra"];
+
+pub(super) fn is_supported_runtime_codec_extension(name: &str) -> bool {
+    SUPPORTED_RUNTIME_CODEC_EXTENSIONS.contains(&name)
+}
+
+pub fn activate_runtime_codec_extensions(
+    paths: &Installation,
+    runtime_ref: &str,
+    runtime_dir: &Path,
+) -> Result<Vec<RuntimeCodecExtension>> {
+    let metadata_path = runtime_dir.join("metadata");
+    let metadata = fs::read_to_string(&metadata_path)
+        .with_context(|| format!("read runtime metadata {}", metadata_path.display()))?;
+    let runtime_parts = split_runtime_ref(runtime_ref)?;
+    let mut extensions = Vec::new();
+
+    for section in sections_with_prefix(&metadata, "Extension ") {
+        let name = section.trim_start_matches("Extension ");
+        if !is_supported_runtime_codec_extension(name) {
+            continue;
+        }
+        let Some(directory) = value(&metadata, &section, "directory") else {
+            continue;
+        };
+        if !valid_relative_extension_path(&directory) {
+            bail!("invalid runtime extension directory for {name}: {directory:?}");
+        }
+        let extension_branch = extension_branch(&metadata, &section, &runtime_parts.branch);
+        let runtime_mount_relative = PathBuf::from(directory);
+        let runtime_mountpoint = runtime_dir.join("files").join(&runtime_mount_relative);
+        validate_mountpoint("runtime codec", &runtime_mountpoint)?;
+        let ref_name = format!(
+            "runtime/{}/{}/{}",
+            name, runtime_parts.arch, extension_branch
+        );
+        let checkout_dir = paths.extensions().join(format!(
+            "{}-{}",
+            safe_dir_fragment(name),
+            safe_dir_fragment(&extension_branch)
+        ));
+        validate_extension_checkout(&ref_name, &checkout_dir)?;
+        let ld_library_relative = value(&metadata, &section, "add-ld-path")
+            .filter(|path| valid_relative_extension_path(path))
+            .map(PathBuf::from);
+
+        extensions.push(RuntimeCodecExtension {
+            name: name.to_string(),
+            ref_name,
+            checkout_dir,
+            runtime_mount_relative,
+            ld_library_relative,
+        });
+    }
+
+    Ok(extensions)
+}
 
 pub fn activate_default_gl_extension(
     paths: &Installation,
@@ -262,7 +322,16 @@ pub(super) fn first_extension_version(versions: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn valid_relative_extension_path(value: &str) -> bool {
+pub(super) fn extension_branch(metadata: &str, section: &str, fallback: &str) -> String {
+    value(metadata, section, "version")
+        .or_else(|| {
+            value(metadata, section, "versions")
+                .and_then(|versions| first_extension_version(&versions))
+        })
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+pub(super) fn valid_relative_extension_path(value: &str) -> bool {
     let path = Path::new(value);
     !value.is_empty()
         && path

@@ -177,6 +177,44 @@ fn unavailable_or_corrupt_gtk_theme_extension_is_skipped() {
 }
 
 #[test]
+fn runtime_codec_activates_at_declared_directory_with_declared_version() {
+    let (paths, runtime_dir, root) = fixture();
+    let mount_relative = Path::new("lib/x86_64-linux-gnu/codecs-extra");
+    fs::create_dir_all(runtime_dir.join("files").join(mount_relative)).unwrap();
+    fs::write(
+        runtime_dir.join("metadata"),
+        "[Runtime]\nname=org.example.Platform\n\
+         [Extension org.freedesktop.Platform.codecs-extra]\ndirectory=lib/x86_64-linux-gnu/codecs-extra\nversion=25.08-extra\nadd-ld-path=lib\n",
+    )
+    .unwrap();
+    let checkout = install_extension(
+        &paths,
+        "org.freedesktop.Platform.codecs-extra",
+        "25.08-extra",
+        "runtime-origin",
+    );
+
+    let extensions =
+        activate_runtime_codec_extensions(&paths, "org.example.Platform/x86_64/50", &runtime_dir)
+            .unwrap();
+
+    assert_eq!(extensions.len(), 1);
+    let extension = &extensions[0];
+    assert_eq!(
+        extension.ref_name,
+        "runtime/org.freedesktop.Platform.codecs-extra/x86_64/25.08-extra"
+    );
+    assert_eq!(extension.checkout_dir, checkout);
+    assert_eq!(extension.runtime_mount_relative, mount_relative);
+    assert_eq!(
+        extension.ld_library_relative.as_deref(),
+        Some(Path::new("lib"))
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn missing_or_corrupt_local_extension_has_actionable_error() {
     let (paths, runtime_dir, root) = fixture();
     let missing =

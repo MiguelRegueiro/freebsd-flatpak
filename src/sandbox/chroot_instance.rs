@@ -2,8 +2,9 @@ use super::application_entrypoint::{host_user, launch_args, EntryLaunch};
 use super::filesystem_grants::HostFilesystem;
 use super::launch_application::FlatpakApp;
 use super::launch_environment::{
-    app_extension_ld_paths, apply_graphics_preloads, apply_unset_environment,
+    app_extension_ld_paths, append_env_paths, apply_graphics_preloads, apply_unset_environment,
     ensure_metadata_runtime_dirs, launch_env, merge_env, metadata_env, prepend_env_paths,
+    runtime_extension_ld_paths, runtime_library_paths,
 };
 use super::mount_operations::owned_mount_teardown_order;
 use super::process_signals::{
@@ -71,6 +72,7 @@ pub(super) struct ChrootInstance {
     pub(super) host_system_bus: HostSystemBus,
     pub(super) host_video: HostVideo,
     pub(super) gtk_theme_extension: Option<runtime::RuntimeGtkThemeExtension>,
+    pub(super) runtime_codec_extensions: Vec<runtime::RuntimeCodecExtension>,
     pub(super) app_extensions: Vec<runtime::AppExtension>,
     pub(super) owned_mounts: Vec<OwnedMount>,
     run_record: PathBuf,
@@ -117,6 +119,7 @@ impl ChrootInstance {
         host_system_bus: HostSystemBus,
         host_video: HostVideo,
         gtk_theme_extension: Option<runtime::RuntimeGtkThemeExtension>,
+        runtime_codec_extensions: Vec<runtime::RuntimeCodecExtension>,
         app_extensions: Vec<runtime::AppExtension>,
         run_record: PathBuf,
         deployment: state::AppRecord,
@@ -142,6 +145,7 @@ impl ChrootInstance {
             host_system_bus,
             host_video,
             gtk_theme_extension,
+            runtime_codec_extensions,
             app_extensions,
             owned_mounts: Vec::new(),
             run_record,
@@ -189,6 +193,11 @@ impl ChrootInstance {
         merge_env(&mut env, metadata_env);
         apply_unset_environment(&mut env, &self.effective_metadata);
         merge_env(&mut env, self.host_graphics.env());
+        prepend_env_paths(
+            &mut env,
+            "LD_LIBRARY_PATH",
+            self.host_graphics.ld_library_paths(),
+        );
         apply_graphics_preloads(
             &mut env,
             self.host_graphics.ld_preload_paths(),
@@ -215,11 +224,17 @@ impl ChrootInstance {
             "LD_LIBRARY_PATH",
             self.host_video.ld_library_paths(),
         );
+        append_env_paths(
+            &mut env,
+            "LD_LIBRARY_PATH",
+            runtime_extension_ld_paths(&self.runtime_codec_extensions),
+        );
         prepend_env_paths(
             &mut env,
             "LD_LIBRARY_PATH",
             app_extension_ld_paths(&self.app_extensions),
         );
+        append_env_paths(&mut env, "LD_LIBRARY_PATH", runtime_library_paths());
         merge_env(&mut env, self.host_video.env());
         ensure_metadata_runtime_dirs(&env, &desktop.xdg_runtime_dir, self.uid, &app.app_id)?;
         let execution = Arc::new(SandboxExecutionContext {
@@ -305,6 +320,14 @@ impl ChrootInstance {
             if let Some(extension) = &self.gtk_theme_extension {
                 eprintln!(
                     "  GTK3 theme extension: {} -> /usr/{}",
+                    extension.ref_name,
+                    extension.runtime_mount_relative.display()
+                );
+            }
+            for extension in &self.runtime_codec_extensions {
+                eprintln!(
+                    "  runtime extension: {} ({}) -> /usr/{}",
+                    extension.name,
                     extension.ref_name,
                     extension.runtime_mount_relative.display()
                 );

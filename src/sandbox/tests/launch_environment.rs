@@ -266,3 +266,41 @@ fn metadata_runtime_dirs_are_created_inside_app_runtime_scope() {
         .is_dir());
     assert!(!host_runtime.join("other/cache").exists());
 }
+
+#[test]
+fn runtime_extension_ld_path_is_relative_to_declared_runtime_mount() {
+    let extension = runtime::RuntimeCodecExtension {
+        name: "org.example.Codecs".to_string(),
+        ref_name: "runtime/org.example.Codecs/x86_64/branch".to_string(),
+        checkout_dir: PathBuf::from("/extensions/codecs"),
+        runtime_mount_relative: PathBuf::from("lib/platform/codecs"),
+        ld_library_relative: Some(PathBuf::from("lib")),
+    };
+
+    assert_eq!(
+        runtime_extension_ld_paths(&[extension]),
+        vec!["/usr/lib/platform/codecs/lib"]
+    );
+}
+
+#[test]
+fn runtime_extension_ld_path_is_appended_to_existing_app_library_path() {
+    let mut env = vec![(
+        "LD_LIBRARY_PATH".to_string(),
+        "/app/extensions/lib:/app/lib".to_string(),
+    )];
+
+    append_env_paths(
+        &mut env,
+        "LD_LIBRARY_PATH",
+        vec!["/usr/lib/x86_64-linux-gnu/codecs-extra/lib".to_string()],
+    );
+
+    assert_eq!(
+        env,
+        vec![(
+            "LD_LIBRARY_PATH".to_string(),
+            "/app/extensions/lib:/app/lib:/usr/lib/x86_64-linux-gnu/codecs-extra/lib".to_string(),
+        )]
+    );
+}

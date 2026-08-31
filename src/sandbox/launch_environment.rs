@@ -52,7 +52,7 @@ pub(super) fn launch_env(
         ),
         (
             "LD_LIBRARY_PATH".to_string(),
-            "/app/lib:/app/lib64:/usr/lib/x86_64-linux-gnu:/usr/lib:/usr/lib64".to_string(),
+            "/app/lib:/app/lib64".to_string(),
         ),
         ("PATH".to_string(), "/app/bin:/usr/bin:/bin".to_string()),
     ];
@@ -210,6 +210,24 @@ pub(super) fn prepend_env_paths(env: &mut Vec<(String, String)>, key: &str, path
     }
 }
 
+pub(super) fn append_env_paths(env: &mut Vec<(String, String)>, key: &str, paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+
+    let suffix = paths.join(":");
+    if let Some((_, existing)) = env.iter_mut().find(|(existing_key, _)| existing_key == key) {
+        if existing.is_empty() {
+            *existing = suffix;
+        } else {
+            existing.push(':');
+            existing.push_str(&suffix);
+        }
+    } else {
+        env.push((key.to_string(), suffix));
+    }
+}
+
 pub(super) fn apply_graphics_preloads(
     env: &mut Vec<(String, String)>,
     ld_preload_paths: Vec<String>,
@@ -219,6 +237,14 @@ pub(super) fn apply_graphics_preloads(
     prepend_env_paths(env, "ZYPAK_LD_PRELOAD", zypak_ld_preload_paths);
 }
 
+pub(super) fn runtime_library_paths() -> Vec<String> {
+    vec![
+        "/usr/lib/x86_64-linux-gnu".to_string(),
+        "/usr/lib".to_string(),
+        "/usr/lib64".to_string(),
+    ]
+}
+
 pub(super) fn app_extension_ld_paths(extensions: &[runtime::AppExtension]) -> Vec<String> {
     extensions
         .iter()
@@ -226,6 +252,23 @@ pub(super) fn app_extension_ld_paths(extensions: &[runtime::AppExtension]) -> Ve
             extension.ld_library_relative.as_ref().map(|relative| {
                 PathBuf::from("/app")
                     .join(&extension.app_mount_relative)
+                    .join(relative)
+                    .display()
+                    .to_string()
+            })
+        })
+        .collect()
+}
+
+pub(super) fn runtime_extension_ld_paths(
+    extensions: &[runtime::RuntimeCodecExtension],
+) -> Vec<String> {
+    extensions
+        .iter()
+        .filter_map(|extension| {
+            extension.ld_library_relative.as_ref().map(|relative| {
+                PathBuf::from("/usr")
+                    .join(&extension.runtime_mount_relative)
                     .join(relative)
                     .display()
                     .to_string()

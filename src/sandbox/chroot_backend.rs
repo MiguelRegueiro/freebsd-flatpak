@@ -204,6 +204,11 @@ impl ChrootNullfsBackend {
             &app.runtime_dir,
             host_cursor.gtk_theme(),
         )?;
+        let runtime_codec_extensions = runtime::activate_runtime_codec_extensions(
+            &self.paths,
+            &app.runtime_ref,
+            &app.runtime_dir,
+        )?;
         let app_extensions = runtime::activate_app_codec_extensions(&self.paths, app)?;
         let mut extension_refs = host_graphics
             .extension_refs()
@@ -214,6 +219,11 @@ impl ChrootNullfsBackend {
                     .map(|extension| extension.ref_name()),
             )
             .map(ToOwned::to_owned)
+            .chain(
+                runtime_codec_extensions
+                    .iter()
+                    .map(|extension| extension.ref_name().to_string()),
+            )
             .chain(
                 app_extensions
                     .iter()
@@ -258,6 +268,7 @@ impl ChrootNullfsBackend {
             host_system_bus,
             host_video,
             gtk_theme_extension,
+            runtime_codec_extensions,
             app_extensions,
             run_record,
             deployment,
@@ -290,6 +301,13 @@ impl ChrootNullfsBackend {
             instance.mount_nullfs(
                 &extension.checkout_dir.join("files"),
                 PathBuf::from("app").join(&extension.app_mount_relative),
+                true,
+            )?;
+        }
+        for extension in instance.runtime_codec_extensions.clone() {
+            instance.mount_nullfs(
+                &extension.checkout_dir.join("files"),
+                PathBuf::from("usr").join(&extension.runtime_mount_relative),
                 true,
             )?;
         }

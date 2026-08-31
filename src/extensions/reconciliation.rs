@@ -1,6 +1,7 @@
 use super::application_extensions::is_supported_app_extension;
 use super::runtime_extensions::{
-    first_extension_version, safe_dir_fragment, split_runtime_ref, valid_extension_suffix,
+    extension_branch, first_extension_version, is_supported_runtime_codec_extension,
+    safe_dir_fragment, split_runtime_ref, valid_extension_suffix, valid_relative_extension_path,
 };
 use crate::flatpak_metadata::{has_section, sections_with_prefix, value};
 use crate::installation::installation_paths::Installation;
@@ -256,6 +257,25 @@ fn required_for_app(
         }
     }
 
+    for section in sections_with_prefix(&runtime_metadata, "Extension ") {
+        let name = section.trim_start_matches("Extension ");
+        if !is_supported_runtime_codec_extension(name) {
+            continue;
+        }
+        let Some(directory) = value(&runtime_metadata, &section, "directory") else {
+            continue;
+        };
+        let branch = extension_branch(&runtime_metadata, &section, &runtime.branch);
+        ensure_mountpoint(&runtime_dir, &directory, None)?;
+        requirements.push(requirement(
+            paths,
+            name,
+            &runtime.arch,
+            &branch,
+            &app.runtime_origin,
+        ));
+    }
+
     let app_metadata_path = app_dir.join("metadata");
     let app_metadata = fs::read_to_string(&app_metadata_path)
         .with_context(|| format!("read app metadata {}", app_metadata_path.display()))?;
@@ -279,15 +299,6 @@ fn required_for_app(
     }
 
     Ok(requirements)
-}
-
-fn extension_branch(metadata: &str, section: &str, fallback: &str) -> String {
-    value(metadata, section, "version")
-        .or_else(|| {
-            value(metadata, section, "versions")
-                .and_then(|versions| first_extension_version(&versions))
-        })
-        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn requirement(
@@ -321,6 +332,9 @@ fn deployment_origin(checkout_dir: &Path, expected_ref: &str) -> Option<String> 
 }
 
 fn ensure_mountpoint(root: &Path, directory: &str, suffix: Option<&str>) -> Result<()> {
+    if !valid_relative_extension_path(directory) {
+        anyhow::bail!("invalid extension directory: {directory:?}");
+    }
     let mut mountpoint = root.join("files").join(directory);
     if let Some(suffix) = suffix {
         mountpoint.push(suffix);

@@ -13,9 +13,10 @@ mod runtime_records;
 
 pub(crate) use crate::extensions::{
     activate_app_codec_extensions, activate_default_gl_extension, activate_gtk_theme_extension,
-    activate_intel_vaapi_extension, reconcile_extensions, reconcile_extensions_with_metadata,
-    required_extension_refs, runtime_checkout_dir, AppExtension, RuntimeGlExtension,
-    RuntimeGtkThemeExtension, RuntimeVaapiExtension,
+    activate_intel_vaapi_extension, activate_runtime_codec_extensions, reconcile_extensions,
+    reconcile_extensions_with_metadata, required_extension_refs, runtime_checkout_dir,
+    AppExtension, RuntimeCodecExtension, RuntimeGlExtension, RuntimeGtkThemeExtension,
+    RuntimeVaapiExtension,
 };
 pub(crate) use crate::flatpak_metadata::value as metadata_value;
 pub(crate) use crate::ostree::{prune_repo, recover_storage, remove_repo_refs, repair_repo};

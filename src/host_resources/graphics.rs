@@ -174,6 +174,14 @@ impl HostGraphics {
             .unwrap_or_default()
     }
 
+    pub fn ld_library_paths(&self) -> Vec<String> {
+        self.gl
+            .as_ref()
+            .map(|_| "/usr/lib/x86_64-linux-gnu/GL/default/lib".to_string())
+            .into_iter()
+            .collect()
+    }
+
     pub fn env(&self) -> Vec<(String, String)> {
         if self.gl.is_none() {
             return Vec::new();
@@ -181,12 +189,6 @@ impl HostGraphics {
 
         let gl_root = "/usr/lib/x86_64-linux-gnu/GL/default";
         let mut env = vec![
-            (
-                "LD_LIBRARY_PATH".to_string(),
-                format!(
-                    "{gl_root}/lib:/app/lib:/app/lib64:/usr/lib/x86_64-linux-gnu:/usr/lib:/usr/lib64"
-                ),
-            ),
             (
                 "LIBGL_DRIVERS_PATH".to_string(),
                 format!("{gl_root}/lib/dri"),

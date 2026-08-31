@@ -80,6 +80,41 @@ fn discovers_gl_and_supported_app_extensions_without_vaapi_on_non_intel_hosts() 
 }
 
 #[test]
+fn discovers_runtime_codec_extension_with_its_declared_branch_and_mountpoint() {
+    let (paths, app, root) = fixture();
+    let runtime_dir = crate::installation::absolute(&paths, &app.runtime_dir);
+    fs::write(
+        runtime_dir.join("metadata"),
+        "[Runtime]\nname=org.example.Platform\n\
+         [Extension org.freedesktop.Platform.codecs-extra]\ndirectory=lib/x86_64-linux-gnu/codecs-extra\nversion=25.08-extra\nadd-ld-path=lib\n",
+    )
+    .unwrap();
+
+    let required = required_for_app(&paths, &app, false, None).unwrap();
+    let codec = required
+        .iter()
+        .find(|extension| extension.ref_name.contains("codecs-extra"))
+        .unwrap();
+
+    assert_eq!(
+        codec.ref_name,
+        "runtime/org.freedesktop.Platform.codecs-extra/x86_64/25.08-extra"
+    );
+    assert_eq!(codec.preferred_origin, "runtime-remote");
+    assert_eq!(
+        codec.checkout_dir,
+        paths
+            .extensions()
+            .join("org.freedesktop.Platform.codecs-extra-25.08-extra")
+    );
+    assert!(runtime_dir
+        .join("files/lib/x86_64-linux-gnu/codecs-extra")
+        .is_dir());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn active_gtk_theme_adds_optional_runtime_extension() {
     let (paths, app, root) = fixture();
 
