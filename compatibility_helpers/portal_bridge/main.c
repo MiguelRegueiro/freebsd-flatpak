@@ -152,12 +152,19 @@ int main(int argc, char **argv) {
       portal_bridge_process_on_bus_acquired,
       portal_bridge_process_on_name_acquired,
       portal_bridge_process_on_name_lost, &state, NULL);
-  guint flatpak_owner_id = 0;
-  flatpak_owner_id = g_bus_own_name(
+  guint flatpak_portal_owner_id = g_bus_own_name(
       G_BUS_TYPE_SESSION, "org.freedesktop.portal.Flatpak",
+      G_BUS_NAME_OWNER_FLAGS_NONE, portal_bridge_process_on_bus_acquired,
+      portal_bridge_process_on_name_acquired,
+      portal_bridge_process_on_name_lost, &state, NULL);
+  guint flatpak_development_owner_id = 0;
+  if (enable_host_command) {
+    flatpak_development_owner_id = g_bus_own_name(
+        G_BUS_TYPE_SESSION, "org.freedesktop.Flatpak",
         G_BUS_NAME_OWNER_FLAGS_NONE, portal_bridge_process_on_bus_acquired,
         portal_bridge_process_on_name_acquired,
         portal_bridge_process_on_name_lost, &state, NULL);
+  }
   diagnostic_line("serving private portal for %s at %s", state.app_id,
                   state.documents.doc_dir);
   g_main_loop_run(state.loop);
@@ -193,9 +200,10 @@ int main(int argc, char **argv) {
   state.screencast.sessions = NULL;
   g_ptr_array_free(state.request_store.requests, TRUE);
   state.request_store.requests = NULL;
-  if (flatpak_owner_id != 0) {
-    g_bus_unown_name(flatpak_owner_id);
+  if (flatpak_development_owner_id != 0) {
+    g_bus_unown_name(flatpak_development_owner_id);
   }
+  g_bus_unown_name(flatpak_portal_owner_id);
   g_bus_unown_name(documents_owner_id);
   g_bus_unown_name(desktop_owner_id);
   host_command_service_clear(&state.host_command);
