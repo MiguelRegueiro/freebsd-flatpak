@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 const SIGNALFD_SHIM_LIB: &str = "libsignalfd-shim.so";
 const SOCKET_OPTION_ERRNO_SHIM_LIB: &str = "libsocket-option-errno-shim.so";
+const UNIX_SEQPACKET_SHIM_LIB: &str = "libunix-seqpacket-shim.so";
 const FLATPAK_SPAWN_WRAPPER: &str = "linux-bin/flatpak-spawn";
 const HELPER_SANDBOX_DIR: &str = "/run/host/freebsd-flatpak";
 const RUNTIME_BIN: &str = "bin";
@@ -33,6 +34,7 @@ impl HostLinuxCompat {
     pub fn prepare(paths: &Installation) -> Result<Self> {
         let helper = paths.libexec_root().join(SIGNALFD_SHIM_LIB);
         let socket_option_helper = paths.libexec_root().join(SOCKET_OPTION_ERRNO_SHIM_LIB);
+        let unix_seqpacket_helper = paths.libexec_root().join(UNIX_SEQPACKET_SHIM_LIB);
         let spawn_wrapper = paths.libexec_root().join(FLATPAK_SPAWN_WRAPPER);
         if !spawn_wrapper.is_file() {
             bail!(
@@ -50,6 +52,12 @@ impl HostLinuxCompat {
             bail!(
                 "installed Linux socket-option compatibility helper is missing: {}",
                 socket_option_helper.display()
+            );
+        }
+        if !unix_seqpacket_helper.is_file() {
+            bail!(
+                "installed Unix SOCK_SEQPACKET compatibility helper is missing: {}",
+                unix_seqpacket_helper.display()
             );
         }
         let helper_dir = helper
@@ -70,9 +78,10 @@ impl HostLinuxCompat {
     }
 
     pub fn preload_paths(&self) -> Vec<String> {
-        vec![format!(
-            "{HELPER_SANDBOX_DIR}/{SOCKET_OPTION_ERRNO_SHIM_LIB}"
-        )]
+        vec![
+            format!("{HELPER_SANDBOX_DIR}/{UNIX_SEQPACKET_SHIM_LIB}"),
+            format!("{HELPER_SANDBOX_DIR}/{SOCKET_OPTION_ERRNO_SHIM_LIB}"),
+        ]
     }
 
     pub fn prepare_runtime_binary_mounts(

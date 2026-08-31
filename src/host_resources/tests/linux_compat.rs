@@ -13,6 +13,7 @@ fn linux_compat_helpers_are_mounted_and_required() {
     fs::create_dir_all(libexec.join("linux-bin")).unwrap();
     fs::write(libexec.join(SIGNALFD_SHIM_LIB), []).unwrap();
     fs::write(libexec.join(SOCKET_OPTION_ERRNO_SHIM_LIB), []).unwrap();
+    fs::write(libexec.join(UNIX_SEQPACKET_SHIM_LIB), []).unwrap();
     fs::write(libexec.join(FLATPAK_SPAWN_WRAPPER), []).unwrap();
     let paths = Installation::for_test(&root);
 
@@ -22,7 +23,10 @@ fn linux_compat_helpers_are_mounted_and_required() {
     assert_eq!(target, PathBuf::from("run/host/freebsd-flatpak"));
     assert_eq!(
         compatibility.preload_paths(),
-        vec!["/run/host/freebsd-flatpak/libsocket-option-errno-shim.so"]
+        vec![
+            "/run/host/freebsd-flatpak/libunix-seqpacket-shim.so",
+            "/run/host/freebsd-flatpak/libsocket-option-errno-shim.so",
+        ]
     );
 
     fs::remove_dir_all(root).unwrap();
@@ -42,6 +46,7 @@ fn runtime_flatpak_spawn_is_preserved_before_the_wrapper_is_projected() {
     fs::create_dir_all(&runtime_bin).unwrap();
     fs::write(libexec.join(SIGNALFD_SHIM_LIB), []).unwrap();
     fs::write(libexec.join(SOCKET_OPTION_ERRNO_SHIM_LIB), []).unwrap();
+    fs::write(libexec.join(UNIX_SEQPACKET_SHIM_LIB), []).unwrap();
     fs::write(libexec.join(FLATPAK_SPAWN_WRAPPER), []).unwrap();
     fs::write(runtime_bin.join(RUNTIME_FLATPAK_SPAWN), []).unwrap();
     fs::write(runtime_bin.join("marker"), []).unwrap();
@@ -120,6 +125,42 @@ fn signalfd_shim_emulates_create_read_update_and_close() {
     let run = Command::new(&output)
         .status()
         .expect("run signalfd shim test");
+    assert!(run.success());
+}
+
+#[test]
+fn unix_seqpacket_shim_preserves_record_boundaries() {
+    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let output_dir = project_root.join("target/unix-seqpacket-tests");
+    fs::create_dir_all(&output_dir).unwrap();
+    let shim = output_dir.join("libunix-seqpacket-shim.so");
+    let test = output_dir.join("unix-seqpacket-shim-test");
+    let linux_path = "/compat/linux/usr/bin:/compat/linux/bin:/usr/bin:/bin";
+
+    let compile_shim = Command::new("/compat/linux/usr/bin/gcc")
+        .args(["-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-Werror"])
+        .arg(project_root.join("compatibility_helpers/unix-seqpacket-shim.c"))
+        .arg("-o")
+        .arg(&shim)
+        .env("PATH", linux_path)
+        .status()
+        .expect("compile Unix SOCK_SEQPACKET shim");
+    assert!(compile_shim.success());
+
+    let compile_test = Command::new("/compat/linux/usr/bin/gcc")
+        .args(["-O2", "-Wall", "-Wextra", "-Werror"])
+        .arg(project_root.join("tests/unix-seqpacket-shim-test.c"))
+        .arg("-o")
+        .arg(&test)
+        .env("PATH", linux_path)
+        .status()
+        .expect("compile Unix SOCK_SEQPACKET shim test");
+    assert!(compile_test.success());
+
+    let run = Command::new(&test)
+        .env("LD_PRELOAD", &shim)
+        .status()
+        .expect("run Unix SOCK_SEQPACKET shim test");
     assert!(run.success());
 }
 
