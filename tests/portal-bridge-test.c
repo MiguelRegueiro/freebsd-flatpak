@@ -680,6 +680,105 @@ static void test_ungrantable_filechooser_uri_is_not_leaked(void) {
   g_free(root);
 }
 
+static void test_directly_accessible_filechooser_uri_is_not_exported(void) {
+  GError *error = NULL;
+  char *root =
+      g_dir_make_tmp("freebsd-flatpak-direct-uri-test-XXXXXX", &error);
+  g_assert_no_error(error);
+  char *store = g_build_filename(root, "grants.ini", NULL);
+  BridgeState state;
+  init_document_test_state(&state, root, store);
+
+  char *host_path = g_build_filename(root, "selected.md", NULL);
+  g_assert_true(g_file_set_contents(host_path, "selected", -1, &error));
+  g_assert_no_error(error);
+  char *sandbox_root = g_build_filename(root, "sandbox", NULL);
+  char *sandbox_path = g_strconcat(sandbox_root, host_path, NULL);
+  char *sandbox_parent = g_path_get_dirname(sandbox_path);
+  g_assert_cmpint(g_mkdir_with_parents(sandbox_parent, 0700), ==, 0);
+  g_assert_cmpint(link(host_path, sandbox_path), ==, 0);
+  char *sandbox_doc_dir =
+      g_build_filename(sandbox_root, "run/user/1001/doc", NULL);
+  g_ptr_array_add(state.documents.sandbox_doc_dirs,
+                  g_strdup(sandbox_doc_dir));
+
+  char *host_uri = g_filename_to_uri(host_path, NULL, &error);
+  g_assert_no_error(error);
+  char *rewritten = rewrite_file_uri(&state, host_uri, false);
+  g_assert_cmpstr(rewritten, ==, host_uri);
+  g_assert_cmpuint(state.documents.grants->len, ==, 0);
+
+  g_free(rewritten);
+  g_free(host_uri);
+  g_assert_cmpint(g_remove(sandbox_path), ==, 0);
+  g_assert_cmpint(g_remove(host_path), ==, 0);
+  g_assert_cmpint(g_rmdir(sandbox_parent), ==, 0);
+  char *sandbox_tmp = g_build_filename(sandbox_root, "tmp", NULL);
+  g_assert_cmpint(g_rmdir(sandbox_tmp), ==, 0);
+  g_assert_cmpint(g_rmdir(sandbox_root), ==, 0);
+  cleanup_document_test_state(&state);
+  g_free(state.documents.doc_dir);
+  char *doc_dir = g_build_filename(root, "doc", NULL);
+  g_assert_cmpint(g_rmdir(doc_dir), ==, 0);
+  g_assert_cmpint(g_rmdir(root), ==, 0);
+  g_free(doc_dir);
+  g_free(sandbox_tmp);
+  g_free(sandbox_doc_dir);
+  g_free(sandbox_parent);
+  g_free(sandbox_path);
+  g_free(sandbox_root);
+  g_free(host_path);
+  g_free(store);
+  g_free(root);
+}
+
+static void test_inaccessible_filechooser_uri_is_exported(void) {
+  GError *error = NULL;
+  char *root =
+      g_dir_make_tmp("freebsd-flatpak-export-uri-test-XXXXXX", &error);
+  g_assert_no_error(error);
+  char *store = g_build_filename(root, "grants.ini", NULL);
+  test_mount_calls =
+      g_ptr_array_new_with_free_func((GDestroyNotify)free_test_mount_call);
+  BridgeState state;
+  init_document_test_state(&state, root, store);
+
+  char *host_path = g_build_filename(root, "outside.md", NULL);
+  g_assert_true(g_file_set_contents(host_path, "outside", -1, &error));
+  g_assert_no_error(error);
+  char *sandbox_doc_dir =
+      g_build_filename(root, "sandbox/run/user/1001/doc", NULL);
+  g_ptr_array_add(state.documents.sandbox_doc_dirs,
+                  g_strdup(sandbox_doc_dir));
+
+  char *host_uri = g_filename_to_uri(host_path, NULL, &error);
+  g_assert_no_error(error);
+  char *rewritten = rewrite_file_uri(&state, host_uri, false);
+  g_assert_nonnull(rewritten);
+  g_assert_cmpstr(rewritten, !=, host_uri);
+  g_assert_true(g_str_has_prefix(rewritten, "file:///run/user/1001/doc/"));
+  g_assert_cmpuint(state.documents.grants->len, ==, 1);
+  DocumentGrant *grant = g_ptr_array_index(state.documents.grants, 0);
+  g_assert_true(grant->persistent);
+
+  g_free(rewritten);
+  g_free(host_uri);
+  cleanup_document_test_state(&state);
+  g_free(state.documents.doc_dir);
+  g_assert_cmpint(g_remove(store), ==, 0);
+  g_ptr_array_free(test_mount_calls, TRUE);
+  test_mount_calls = NULL;
+  g_assert_cmpint(g_remove(host_path), ==, 0);
+  char *doc_dir = g_build_filename(root, "doc", NULL);
+  g_assert_cmpint(g_rmdir(doc_dir), ==, 0);
+  g_assert_cmpint(g_rmdir(root), ==, 0);
+  g_free(doc_dir);
+  g_free(sandbox_doc_dir);
+  g_free(host_path);
+  g_free(store);
+  g_free(root);
+}
+
 static void test_screencast_source_tracking(void) {
   BridgeState state = {0};
   SessionRecord session = {
@@ -952,6 +1051,8 @@ int main(void) {
   test_grant_mount_order_is_direct_and_equivalent();
   test_directory_grant_persists_and_translates();
   test_ungrantable_filechooser_uri_is_not_leaked();
+  test_directly_accessible_filechooser_uri_is_not_exported();
+  test_inaccessible_filechooser_uri_is_exported();
   test_missing_persistent_grant_is_pruned();
   test_screencast_source_tracking();
   test_pipewire_client_session_ownership();

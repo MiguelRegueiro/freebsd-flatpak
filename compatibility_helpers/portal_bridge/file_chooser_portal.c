@@ -1,7 +1,105 @@
+#include <sys/mount.h>
+
 #include "file_chooser_portal.h"
 #include "document_grant_store.h"
 #include "portal_bridge_process.h"
 #include "portal_request.h"
+
+static bool path_is_at_or_below(const char *path, const char *root) {
+  gsize root_length = strlen(root);
+  return g_str_has_prefix(path, root) &&
+         (root_length == 1 || path[root_length] == 0 ||
+          path[root_length] == G_DIR_SEPARATOR);
+}
+
+static bool sandbox_mount_maps_to_host(int sandbox_fd,
+                                       const char *sandbox_path,
+                                       const struct stat *host_stat) {
+  struct statfs sandbox_fs;
+  if (fstatfs(sandbox_fd, &sandbox_fs) != 0 ||
+      !path_is_at_or_below(sandbox_path, sandbox_fs.f_mntonname)) {
+    return false;
+  }
+
+  const char *suffix = g_str_equal(sandbox_fs.f_mntonname, G_DIR_SEPARATOR_S)
+                           ? sandbox_path
+                           : sandbox_path + strlen(sandbox_fs.f_mntonname);
+  char *mapped_path = g_strconcat(sandbox_fs.f_mntfromname, suffix, NULL);
+  int mapped_fd = open(mapped_path, O_RDONLY | O_CLOEXEC);
+  g_free(mapped_path);
+  struct stat mapped_stat;
+  bool matches = mapped_fd >= 0 && fstat(mapped_fd, &mapped_stat) == 0 &&
+                 mapped_stat.st_dev == host_stat->st_dev &&
+                 mapped_stat.st_ino == host_stat->st_ino;
+  if (mapped_fd >= 0) {
+    close(mapped_fd);
+  }
+  return matches;
+}
+
+static bool sandbox_path_matches_host(const char *sandbox_doc_dir,
+                                      const char *mountpoint,
+                                      const char *host_path) {
+  gsize doc_dir_length = strlen(sandbox_doc_dir);
+  gsize mountpoint_length = strlen(mountpoint);
+  if (doc_dir_length <= mountpoint_length ||
+      !g_str_has_suffix(sandbox_doc_dir, mountpoint)) {
+    return false;
+  }
+
+  char *sandbox_root = g_strndup(sandbox_doc_dir,
+                                 doc_dir_length - mountpoint_length);
+  int root_fd = open(sandbox_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  char *sandbox_path = g_strconcat(sandbox_root, host_path, NULL);
+  g_free(sandbox_root);
+  if (root_fd < 0) {
+    g_free(sandbox_path);
+    return false;
+  }
+
+  const char *relative_path = host_path;
+  while (*relative_path == G_DIR_SEPARATOR) {
+    relative_path++;
+  }
+  int sandbox_fd = openat(root_fd, relative_path,
+                          O_RDONLY | O_CLOEXEC | O_RESOLVE_BENEATH);
+  int host_fd = open(host_path, O_RDONLY | O_CLOEXEC);
+  struct stat sandbox_stat;
+  struct stat host_stat;
+  /* nullfs preserves the source inode but presents a different st_dev. */
+  bool stats_valid = sandbox_fd >= 0 && host_fd >= 0 &&
+                     fstat(sandbox_fd, &sandbox_stat) == 0 &&
+                     fstat(host_fd, &host_stat) == 0;
+  bool matches = stats_valid && sandbox_stat.st_dev == host_stat.st_dev &&
+                 sandbox_stat.st_ino == host_stat.st_ino;
+  if (!matches && stats_valid) {
+    matches = sandbox_mount_maps_to_host(sandbox_fd, sandbox_path, &host_stat);
+  }
+  if (sandbox_fd >= 0) {
+    close(sandbox_fd);
+  }
+  if (host_fd >= 0) {
+    close(host_fd);
+  }
+  close(root_fd);
+  g_free(sandbox_path);
+  return matches;
+}
+
+static bool app_has_direct_access(BridgeState *state, const char *host_path) {
+  if (state->documents.sandbox_doc_dirs->len == 0) {
+    return false;
+  }
+  for (guint i = 0; i < state->documents.sandbox_doc_dirs->len; i++) {
+    const char *sandbox_doc_dir =
+        g_ptr_array_index(state->documents.sandbox_doc_dirs, i);
+    if (!sandbox_path_matches_host(sandbox_doc_dir,
+                                   state->documents.mountpoint, host_path)) {
+      return false;
+    }
+  }
+  return true;
+}
 char *rewrite_file_uri(BridgeState *state, const char *uri, bool directory) {
   GError *error = NULL;
   char *host_path = g_filename_from_uri(uri, NULL, &error);
@@ -9,6 +107,12 @@ char *rewrite_file_uri(BridgeState *state, const char *uri, bool directory) {
     log_line("could not decode FileChooser URI %s: %s", uri, error->message);
     g_error_free(error);
     return NULL;
+  }
+
+  if (app_has_direct_access(state, host_path)) {
+    diagnostic_line("kept directly accessible FileChooser URI %s", uri);
+    g_free(host_path);
+    return g_strdup(uri);
   }
 
   char **permissions = directory ? read_write_permissions()
