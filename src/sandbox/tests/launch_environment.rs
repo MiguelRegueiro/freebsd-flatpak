@@ -44,7 +44,7 @@ fn app_metadata_environment_expands_existing_sandbox_values() {
     ];
 
     assert_eq!(
-        app_metadata_env(&metadata_for(&app), &base_env),
+        metadata_env("", &metadata_for(&app), &base_env),
         vec![
             (
                 "MESA_SHADER_CACHE_DIR".to_string(),
@@ -96,11 +96,40 @@ fn app_metadata_environment_supports_braced_variables() {
     ];
 
     assert_eq!(
-        app_metadata_env(&metadata_for(&app), &base_env),
+        metadata_env("", &metadata_for(&app), &base_env),
         vec![(
             "EXAMPLE".to_string(),
             "/run/user/1001/app/org.example.App".to_string()
         )]
+    );
+}
+
+#[test]
+fn runtime_metadata_environment_is_propagated() {
+    let runtime_metadata =
+        "[Environment]\nRUNTIME_ONLY=from-runtime\nSECOND_RUNTIME_VALUE=second\n";
+
+    assert_eq!(
+        metadata_env(runtime_metadata, "", &[]),
+        vec![
+            ("RUNTIME_ONLY".to_string(), "from-runtime".to_string()),
+            ("SECOND_RUNTIME_VALUE".to_string(), "second".to_string())
+        ]
+    );
+}
+
+#[test]
+fn app_metadata_environment_overrides_runtime_environment() {
+    let runtime_metadata = "[Environment]\nSHARED=runtime\nRUNTIME_ONLY=from-runtime\n";
+    let app_metadata = "[Environment]\nSHARED=app\nAPP_ONLY=from-app\n";
+
+    assert_eq!(
+        metadata_env(runtime_metadata, app_metadata, &[]),
+        vec![
+            ("SHARED".to_string(), "app".to_string()),
+            ("RUNTIME_ONLY".to_string(), "from-runtime".to_string()),
+            ("APP_ONLY".to_string(), "from-app".to_string())
+        ]
     );
 }
 

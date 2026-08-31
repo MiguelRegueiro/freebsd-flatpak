@@ -44,6 +44,19 @@ fn missing_overrides_leave_metadata_semantically_unchanged() {
 }
 
 #[test]
+fn user_environment_override_wins_over_application_environment() {
+    let application = "[Environment]\nREPLACE=user\nUSER_ONLY=yes\n";
+    let effective = effective_metadata_from_sources(METADATA, None, Some(application)).unwrap();
+
+    assert_eq!(value(&effective, "Environment", "KEEP").unwrap(), "base");
+    assert_eq!(value(&effective, "Environment", "REPLACE").unwrap(), "user");
+    assert_eq!(
+        value(&effective, "Environment", "USER_ONLY").unwrap(),
+        "yes"
+    );
+}
+
+#[test]
 fn permission_checks_understand_modes_and_negation() {
     let metadata =
         "[Context]\nfilesystems=xdg-data/flatpak/app:ro;xdg-data/flatpak/overrides:create;!home;\n";

@@ -73,23 +73,19 @@ fn push_host_env(env: &mut Vec<(String, String)>, key: &str) {
     }
 }
 
-pub(super) fn app_metadata_env(
-    metadata: &str,
+pub(super) fn metadata_env(
+    runtime_metadata: &str,
+    effective_app_metadata: &str,
     base_env: &[(String, String)],
 ) -> Vec<(String, String)> {
     let mut env = base_env.to_vec();
     let mut updates = Vec::new();
-    for (key, raw_value) in section_entries(metadata, "Environment") {
-        let value = expand_env_value(&raw_value, &env);
-        if let Some((_, existing)) = env
-            .iter_mut()
-            .find(|(existing_key, _)| existing_key == &key)
-        {
-            *existing = value.clone();
-        } else {
-            env.push((key.clone(), value.clone()));
+    for metadata in [runtime_metadata, effective_app_metadata] {
+        for (key, raw_value) in section_entries(metadata, "Environment") {
+            let value = expand_env_value(&raw_value, &env);
+            merge_env(&mut env, vec![(key.clone(), value.clone())]);
+            merge_env(&mut updates, vec![(key, value)]);
         }
-        updates.push((key, value));
     }
     updates
 }

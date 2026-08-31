@@ -2,8 +2,8 @@ use super::application_entrypoint::{host_user, launch_args, EntryLaunch};
 use super::filesystem_grants::HostFilesystem;
 use super::launch_application::FlatpakApp;
 use super::launch_environment::{
-    app_extension_ld_paths, app_metadata_env, apply_graphics_preloads, apply_unset_environment,
-    ensure_metadata_runtime_dirs, launch_env, merge_env, prepend_env_paths,
+    app_extension_ld_paths, apply_graphics_preloads, apply_unset_environment,
+    ensure_metadata_runtime_dirs, launch_env, merge_env, metadata_env, prepend_env_paths,
 };
 use super::mount_operations::owned_mount_teardown_order;
 use super::process_signals::{
@@ -172,7 +172,14 @@ impl ChrootInstance {
         env.extend(self.host_cursor.env());
         prepend_env_paths(&mut env, "XDG_CONFIG_DIRS", self.host_cursor.config_dirs());
         env.extend(self.host_portal.env());
-        let metadata_env = app_metadata_env(&self.effective_metadata, &env);
+        let runtime_metadata_path = app.runtime_dir.join("metadata");
+        let runtime_metadata = fs::read_to_string(&runtime_metadata_path).with_context(|| {
+            format!(
+                "read Flatpak runtime metadata {}",
+                runtime_metadata_path.display()
+            )
+        })?;
+        let metadata_env = metadata_env(&runtime_metadata, &self.effective_metadata, &env);
         merge_env(&mut env, metadata_env);
         apply_unset_environment(&mut env, &self.effective_metadata);
         merge_env(&mut env, self.host_graphics.env());
