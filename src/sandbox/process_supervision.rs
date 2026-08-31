@@ -1,6 +1,8 @@
 use super::process_signals::FORCE_STOP_SIGNAL;
 use crate::process_identity::ProcessIdentity;
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -373,8 +375,130 @@ struct ReaperKill {
     pad: [u32; 15],
 }
 
-pub(super) fn process_rooted_in(pid: i32, root: &std::path::Path) -> Result<bool> {
-    use std::path::Path;
+#[derive(Debug, Default)]
+pub(crate) struct SandboxProcessSnapshot {
+    references: Vec<(libc::pid_t, PathBuf)>,
+}
+
+impl SandboxProcessSnapshot {
+    pub(crate) fn capture() -> Result<Self> {
+        let output = std::process::Command::new("procstat")
+            .args(["-a", "-f"])
+            .output()
+            .context("inspect sandbox process roots")?;
+        if !output.status.success() {
+            bail!("procstat -a -f failed with status {}", output.status);
+        }
+        let text = String::from_utf8(output.stdout)?;
+        Ok(Self::parse(&text))
+    }
+
+    fn parse(text: &str) -> Self {
+        let mut lines = text.lines();
+        let Some(layout) = lines.next().and_then(ProcstatLayout::from_header) else {
+            return Self::default();
+        };
+        let references = lines
+            .filter_map(|line| layout.reference(line))
+            .filter(|(_, fd, _)| matches!(*fd, "cwd" | "root" | "jail"))
+            .map(|(pid, _, path)| (pid, path))
+            .collect();
+        Self { references }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(references: Vec<(libc::pid_t, PathBuf)>) -> Self {
+        Self { references }
+    }
+
+    pub(crate) fn references_root(&self, root: &Path) -> bool {
+        self.references
+            .iter()
+            .any(|(_, path)| path.starts_with(root))
+    }
+
+    pub(crate) fn pids_referencing_root(&self, root: &Path) -> Vec<libc::pid_t> {
+        self.pids_referencing_roots(std::slice::from_ref(&root))
+    }
+
+    pub(crate) fn pids_referencing_roots(&self, roots: &[&Path]) -> Vec<libc::pid_t> {
+        self.references
+            .iter()
+            .filter(|(_, path)| roots.iter().any(|root| path.starts_with(root)))
+            .map(|(pid, _)| *pid)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+}
+
+pub(crate) fn terminate_processes_referencing_roots(roots: &[PathBuf]) -> Result<bool> {
+    let root_paths = roots.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let initial = SandboxProcessSnapshot::capture()?.pids_referencing_roots(&root_paths);
+    if initial.is_empty() {
+        return Ok(false);
+    }
+
+    for signal in [libc::SIGTERM, libc::SIGKILL] {
+        for _ in 0..20 {
+            let pids = SandboxProcessSnapshot::capture()?
+                .pids_referencing_roots(&root_paths)
+                .into_iter()
+                .filter(|pid| *pid != std::process::id() as libc::pid_t)
+                .collect::<Vec<_>>();
+            if pids.is_empty() {
+                return Ok(true);
+            }
+            for pid in pids {
+                // Every signal is preceded by a fresh kernel vnode snapshot;
+                // recorded launcher and child PIDs are never used here.
+                unsafe {
+                    libc::kill(pid, signal);
+                }
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
+
+    let remaining = SandboxProcessSnapshot::capture()?.pids_referencing_roots(&root_paths);
+    if remaining.is_empty() {
+        Ok(true)
+    } else {
+        bail!("sandbox processes survived SIGKILL: {remaining:?}")
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ProcstatLayout {
+    pid_end: usize,
+    fd_start: usize,
+    fd_end: usize,
+    name_start: usize,
+}
+
+impl ProcstatLayout {
+    fn from_header(header: &str) -> Option<Self> {
+        let pid_end = header.find(" COMM")?;
+        let fd_end = header.find(" T V FLAGS")?;
+        let fd_start = fd_end.checked_sub(4)?;
+        let name_start = header.find("NAME")?;
+        Some(Self {
+            pid_end,
+            fd_start,
+            fd_end,
+            name_start,
+        })
+    }
+
+    fn reference<'a>(&self, line: &'a str) -> Option<(libc::pid_t, &'a str, PathBuf)> {
+        let pid = line.get(..self.pid_end)?.trim().parse().ok()?;
+        let fd = line.get(self.fd_start..self.fd_end)?.trim();
+        let path = PathBuf::from(line.get(self.name_start..)?.trim_end());
+        Some((pid, fd, path))
+    }
+}
+
+pub(super) fn process_rooted_in(pid: i32, root: &Path) -> Result<bool> {
     use std::process::Command;
 
     let output = Command::new("procstat")
@@ -386,18 +510,7 @@ pub(super) fn process_rooted_in(pid: i32, root: &std::path::Path) -> Result<bool
         return Ok(false);
     }
     let text = String::from_utf8(output.stdout)?;
-    Ok(text.lines().any(|line| {
-        let mut fields = line.split_whitespace();
-        let _pid = fields.next();
-        let _comm = fields.next();
-        let Some(fd) = fields.next() else {
-            return false;
-        };
-        if fd != "root" && fd != "jail" && fd != "cwd" {
-            return false;
-        }
-        fields.last().is_some_and(|path| Path::new(path) == root)
-    }))
+    Ok(SandboxProcessSnapshot::parse(&text).references_root(root))
 }
 
 #[cfg(test)]

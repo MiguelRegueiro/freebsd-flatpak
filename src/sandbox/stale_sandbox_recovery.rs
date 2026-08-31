@@ -1,5 +1,5 @@
 use super::application_entrypoint::sandbox_name;
-use super::process_supervision::process_rooted_in;
+use super::process_supervision::{process_rooted_in, SandboxProcessSnapshot};
 use crate::installation as state;
 use crate::installation::installation_paths::Installation;
 use crate::secure_mount;
@@ -16,28 +16,23 @@ pub fn recover_stale_mounts(paths: &Installation) -> Result<()> {
     state::ensure_layout(paths)?;
     recover_orphaned_document_mounts(paths)?;
 
-    for record in order_run_records_for_recovery(state::read_sandbox_ownership_records(paths)?) {
+    let records = order_run_records_for_recovery(state::read_sandbox_ownership_records(paths)?);
+    let process_snapshot = SandboxProcessSnapshot::capture()?;
+    let active_roots = active_roots_from_records(&records, &process_snapshot)?;
+
+    for record in records {
         let Some(record_path) = record.get("_path").map(PathBuf::from) else {
             continue;
         };
-        let launcher_pid = record
-            .get("launcher_pid")
-            .and_then(|value| value.parse::<i32>().ok())
-            .unwrap_or(0);
-        let child_pid = record
-            .get("child_pid")
-            .and_then(|value| value.parse::<i32>().ok())
-            .unwrap_or(0);
         let root = record.get("root").map(PathBuf::from);
 
-        if launcher_pid > 0 && state::run_record_launcher_active(&record)? {
+        if root
+            .as_ref()
+            .is_some_and(|root| active_roots.contains(root))
+        {
             continue;
         }
 
-        if child_pid > 0 && process_alive(child_pid) {
-            eprintln!("recovering stale sandbox child pid {child_pid}");
-            terminate_process(child_pid);
-        }
         if let Some(root) = root {
             terminate_chroot_processes(&root)?;
             unmount_under(&root)?;
@@ -130,15 +125,47 @@ fn mount_identity(path: &Path) -> Result<(u64, u64)> {
 }
 
 fn active_run_roots(paths: &Installation) -> Result<Vec<PathBuf>> {
-    let mut roots = Vec::new();
-    for record in state::read_sandbox_ownership_records(paths)? {
-        if state::run_record_launcher_active(&record)? {
-            if let Some(root) = record.get("root") {
-                roots.push(PathBuf::from(root));
-            }
+    let records = state::read_sandbox_ownership_records(paths)?;
+    let processes = SandboxProcessSnapshot::capture()?;
+    Ok(active_roots_from_records(&records, &processes)?
+        .into_iter()
+        .collect())
+}
+
+fn active_roots_from_records(
+    records: &[BTreeMap<String, String>],
+    processes: &SandboxProcessSnapshot,
+) -> Result<BTreeSet<PathBuf>> {
+    let mut active = BTreeSet::new();
+    for record in records {
+        let Some(root) = record.get("root").map(PathBuf::from) else {
+            continue;
+        };
+        if processes.references_root(&root) || state::run_record_launcher_active(record)? {
+            active.insert(root);
         }
     }
-    Ok(roots)
+
+    // Nested Spawn roots are siblings of their parent root. Preserve the
+    // ownership chain when a nested process survives so parent mounts used as
+    // its nullfs sources cannot be recovered from underneath it.
+    loop {
+        let mut changed = false;
+        for record in records {
+            let Some(root) = record.get("root").map(PathBuf::from) else {
+                continue;
+            };
+            if active.contains(&root) {
+                if let Some(parent) = record.get("parent_root").map(PathBuf::from) {
+                    changed |= active.insert(parent);
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    Ok(active)
 }
 
 fn order_run_records_for_recovery(
@@ -205,6 +232,11 @@ fn mount_points_under(root: &Path) -> Result<Vec<PathBuf>> {
         .into_iter()
         .filter(|mountpoint| mountpoint.starts_with(root))
         .collect();
+    sort_mountpoints_deepest_first(&mut mounts);
+    Ok(mounts)
+}
+
+fn sort_mountpoints_deepest_first(mounts: &mut [PathBuf]) {
     mounts.sort_by(|left, right| {
         right
             .components()
@@ -212,7 +244,6 @@ fn mount_points_under(root: &Path) -> Result<Vec<PathBuf>> {
             .cmp(&left.components().count())
             .then_with(|| right.cmp(left))
     });
-    Ok(mounts)
 }
 
 fn mount_points() -> Result<Vec<PathBuf>> {
@@ -295,27 +326,11 @@ pub(super) fn terminate_chroot_processes(root: &Path) -> Result<()> {
 }
 
 fn chroot_processes(root: &Path) -> Result<Vec<i32>> {
-    let output = Command::new("ps")
-        .args(["-axo", "pid"])
-        .output()
-        .context("list processes for sandbox cleanup")?;
-    if !output.status.success() {
-        bail!("ps -axo pid failed with status {}", output.status);
-    }
-    let text = String::from_utf8(output.stdout)?;
-    let mut pids = BTreeSet::new();
-    for line in text.lines().skip(1) {
-        let Ok(pid) = line.trim().parse::<i32>() else {
-            continue;
-        };
-        if pid == std::process::id() as i32 {
-            continue;
-        }
-        if process_rooted_in(pid, root)? {
-            pids.insert(pid);
-        }
-    }
-    Ok(pids.into_iter().collect())
+    Ok(SandboxProcessSnapshot::capture()?
+        .pids_referencing_root(root)
+        .into_iter()
+        .filter(|pid| *pid != std::process::id() as i32)
+        .collect())
 }
 
 fn terminate_processes_with(

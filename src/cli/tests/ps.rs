@@ -127,3 +127,35 @@ fn columns_accept_unique_prefixes_and_reject_unknown_names() {
     );
     assert!(parse_columns(vec!["--columns=nope".to_string()]).is_err());
 }
+
+#[test]
+fn ps_reports_live_sandbox_descendants_without_recovering_their_root() {
+    let paths = test_paths("live-descendant");
+    write_app(&paths);
+    let root = paths.chroots().join("zen/dead-launcher");
+    fs::create_dir_all(&root).unwrap();
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .current_dir(&root)
+        .spawn()
+        .unwrap();
+    let record = state::write_run_record(
+        &paths,
+        "app.zen_browser.zen",
+        "dead-launcher",
+        &root,
+        i32::MAX as u32,
+        child.id(),
+    )
+    .unwrap();
+
+    let result = output(&paths, Vec::new()).unwrap();
+    assert!(result.contains("dead-launcher"));
+    assert!(root.exists());
+    assert!(record.exists());
+    assert!(child.try_wait().unwrap().is_none());
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    fs::remove_dir_all(paths.data_root()).unwrap();
+}

@@ -165,3 +165,28 @@ fn orphan_cleanup_waits_for_the_tracked_root_to_exit() {
     let _ = fs::remove_file(pid_file);
     drop(reaper);
 }
+
+#[test]
+fn procstat_snapshot_tracks_only_sandbox_binding_vnodes() {
+    let header = "  PID COMM                FD T V FLAGS    REF  OFFSET PRO NAME        ";
+    let row = |pid, command: &str, fd, path| {
+        format!("{pid:>5} {command:<18}{fd:>4} v d r-------   -       - -   {path}")
+    };
+    let text = [
+        header.to_string(),
+        row(101, ".NET TP Worker", "cwd", "/sandbox/root/work dir"),
+        row(101, ".NET TP Worker", "root", "/sandbox/root"),
+        row(202, "app", "jail", "/sandbox/nested"),
+        row(303, "app", "7", "/sandbox/root/open"),
+    ]
+    .join("\n");
+    let snapshot = SandboxProcessSnapshot::parse(&text);
+
+    assert!(snapshot.references_root(Path::new("/sandbox/root")));
+    assert!(snapshot.references_root(Path::new("/sandbox/nested")));
+    assert!(!snapshot.references_root(Path::new("/sandbox/rooted")));
+    assert_eq!(
+        snapshot.pids_referencing_root(Path::new("/sandbox/root")),
+        vec![101]
+    );
+}

@@ -221,3 +221,88 @@ fn process_cleanup_reports_processes_that_survive_sigkill() {
 
     assert_eq!(survivors, vec![303]);
 }
+
+#[test]
+fn dead_launcher_with_live_child_is_preserved_until_the_child_exits() {
+    let base = std::env::temp_dir().join(format!(
+        "freebsd-flatpak-live-child-recovery-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&base);
+    let paths = Installation::for_test(&base);
+    let root = paths.chroots().join("org.example.App/dead-launcher");
+    fs::create_dir_all(&root).unwrap();
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .current_dir(&root)
+        .spawn()
+        .unwrap();
+    let record = state::write_run_record(
+        &paths,
+        "org.example.App",
+        "dead-launcher",
+        &root,
+        i32::MAX as u32,
+        child.id(),
+    )
+    .unwrap();
+
+    recover_stale_mounts(&paths).unwrap();
+    assert!(root.exists());
+    assert!(record.exists());
+    assert!(child.try_wait().unwrap().is_none());
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    recover_stale_mounts(&paths).unwrap();
+    assert!(!root.exists());
+    assert!(!record.exists());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn live_nested_process_preserves_nested_and_parent_ownership() {
+    let parent = PathBuf::from("/chroots/org.example.App/parent");
+    let nested = PathBuf::from("/chroots/org.example.App/parent-nested-1");
+    let records = vec![
+        BTreeMap::from([
+            ("root".to_string(), parent.display().to_string()),
+            ("launcher_pid".to_string(), i32::MAX.to_string()),
+        ]),
+        BTreeMap::from([
+            ("root".to_string(), nested.display().to_string()),
+            ("parent_root".to_string(), parent.display().to_string()),
+            ("launcher_pid".to_string(), i32::MAX.to_string()),
+        ]),
+    ];
+    let processes = SandboxProcessSnapshot::for_test(vec![(42, nested.join("work"))]);
+
+    let active = active_roots_from_records(&records, &processes).unwrap();
+    assert!(active.contains(&nested));
+    assert!(active.contains(&parent));
+}
+
+#[test]
+fn stale_mounts_are_sorted_deepest_first() {
+    let mut mounts = vec![
+        PathBuf::from("/sandbox/usr"),
+        PathBuf::from("/sandbox/run/user/1000/doc"),
+        PathBuf::from("/sandbox/run"),
+        PathBuf::from("/sandbox/usr/lib/extensions"),
+    ];
+    sort_mountpoints_deepest_first(&mut mounts);
+
+    let positions = mounts
+        .iter()
+        .enumerate()
+        .map(|(index, path)| (path.clone(), index))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert!(
+        positions[&PathBuf::from("/sandbox/run/user/1000/doc")]
+            < positions[&PathBuf::from("/sandbox/run")]
+    );
+    assert!(
+        positions[&PathBuf::from("/sandbox/usr/lib/extensions")]
+            < positions[&PathBuf::from("/sandbox/usr")]
+    );
+}

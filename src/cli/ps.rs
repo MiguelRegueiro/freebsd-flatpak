@@ -1,5 +1,6 @@
 use crate::installation as state;
 use crate::installation::installation_paths::Installation;
+use crate::sandbox::SandboxProcessSnapshot;
 use anyhow::{bail, Context, Result};
 
 const DEFAULT_COLUMNS: &[Column] = &[
@@ -93,12 +94,18 @@ struct Instance {
 pub fn output(paths: &Installation, args: Vec<String>) -> Result<String> {
     let columns = parse_columns(args)?;
     let mut instances = Vec::new();
+    let processes = SandboxProcessSnapshot::capture()?;
     for record in state::read_run_records(paths)? {
         let launcher_pid = record
             .get("launcher_pid")
             .and_then(|value| value.parse::<i32>().ok())
             .unwrap_or(0);
-        if launcher_pid <= 0 || !state::run_record_launcher_active(&record)? {
+        let sandbox_active = record
+            .get("root")
+            .is_some_and(|root| processes.references_root(std::path::Path::new(root)));
+        let launcher_active =
+            !sandbox_active && launcher_pid > 0 && state::run_record_launcher_active(&record)?;
+        if !sandbox_active && !launcher_active {
             continue;
         }
         instances.push(Instance {

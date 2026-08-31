@@ -94,7 +94,7 @@ pub(crate) fn run() -> Result<()> {
     }
 
     let paths = match command.as_deref() {
-        Some("kill") => startup::initialize_for_lifecycle(&diagnostics),
+        Some("kill" | "ps") => startup::initialize_for_lifecycle(&diagnostics),
         Some("run") => diagnostics.measure(Detail::Summary, "run", "installation startup", || {
             startup::initialize_for_run(&diagnostics)
         }),

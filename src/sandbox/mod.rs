@@ -20,5 +20,8 @@ pub(crate) mod static_overrides;
 
 pub(crate) use chroot_backend::*;
 pub(crate) use launch_application::*;
-pub(crate) use process_supervision::{force_stop_launcher, ForceStopResult};
+pub(crate) use process_supervision::{
+    force_stop_launcher, terminate_processes_referencing_roots, ForceStopResult,
+    SandboxProcessSnapshot,
+};
 pub(crate) use stale_sandbox_recovery::{app_has_mounts, recover_stale_mounts, unmount_mountpoint};
