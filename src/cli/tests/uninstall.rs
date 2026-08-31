@@ -202,6 +202,75 @@ fn uninstall_unused_preserves_installed_and_pinned_dependencies() {
 }
 
 #[test]
+fn active_run_record_pins_previous_gtk_theme_after_theme_switch() {
+    let root = test_dir("gtk-run-pin");
+    let paths = Installation::for_test(&root);
+    state::ensure_layout(&paths).unwrap();
+    let runtime_ref = "org.example.Platform/x86_64/50";
+    let app_dir = paths.app("org.example.App").join("app-current");
+    let runtime_dir = paths.runtimes().join("platform-50").join("runtime-current");
+    create_marked_checkout(
+        &app_dir,
+        "app/org.example.App/x86_64/stable",
+        "app-current",
+        &format!("[Application]\nname=org.example.App\nruntime={runtime_ref}\ncommand=example\n"),
+    );
+    create_marked_checkout(
+        &runtime_dir,
+        &format!("runtime/{runtime_ref}"),
+        "runtime-current",
+        "[Runtime]\nname=org.example.Platform\n\n[Extension org.gtk.Gtk3theme]\ndirectory=share/runtime/share/themes\nversion=3.22\nsubdirectories=true\nsubdirectory-suffix=gtk-3.0\ndownload-if=active-gtk-theme\nenable-if=active-gtk-theme\n",
+    );
+    let installed = runtime::InstalledApp {
+        origin: "flathub".to_string(),
+        runtime_origin: "flathub".to_string(),
+        app_id: "org.example.App".to_string(),
+        app_ref: "app/org.example.App/x86_64/stable".to_string(),
+        app_commit: "app-current".to_string(),
+        installed_size: 0,
+        app_dir,
+        arch: "x86_64".to_string(),
+        branch: "stable".to_string(),
+        runtime_ref: runtime_ref.to_string(),
+        runtime_commit: "runtime-current".to_string(),
+        runtime_installed_size: 0,
+        runtime_dir,
+        command: "example".to_string(),
+        timings: Default::default(),
+    };
+    let app = state::record_install(&paths, &installed).unwrap();
+    let previous_ref = "runtime/org.gtk.Gtk3theme.Adwaita/x86_64/3.22";
+    let current_ref = "runtime/org.gtk.Gtk3theme.Breeze/x86_64/3.22";
+    for (directory, ref_name) in [("adwaita", previous_ref), ("breeze", current_ref)] {
+        create_marked_checkout(
+            &paths.extensions().join(directory),
+            ref_name,
+            directory,
+            "[Runtime]\nname=org.gtk.Gtk3theme.Theme\n",
+        );
+    }
+    state::write_pinned_run_record_with_extensions(
+        &paths,
+        "running-before-switch",
+        &paths.chroots().join("running-before-switch"),
+        std::process::id(),
+        0,
+        &app,
+        &[previous_ref.to_string()],
+    )
+    .unwrap();
+
+    let plan = plan_unused_deployment_checkouts_with_gtk_theme(&paths, Some("Breeze")).unwrap();
+    let planned_refs = plan
+        .iter()
+        .map(|item| item.ref_name.as_str())
+        .collect::<BTreeSet<_>>();
+
+    assert!(!planned_refs.contains(previous_ref));
+    assert!(!planned_refs.contains(current_ref));
+}
+
+#[test]
 fn normal_app_uninstall_leaves_runtime_for_unused_cleanup() {
     let root = test_dir("uninstall-then-unused");
     let paths = Installation::for_test(&root);

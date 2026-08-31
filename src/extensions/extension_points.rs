@@ -10,6 +10,7 @@ pub fn required_extension_refs(
     runtime_ref: &str,
     runtime_dir: &Path,
     installed_extension_refs: &BTreeSet<String>,
+    active_gtk_theme: Option<&str>,
 ) -> Result<BTreeSet<String>> {
     let parts = split_runtime_ref(runtime_ref)?;
     let mut refs = BTreeSet::new();
@@ -22,7 +23,7 @@ pub fn required_extension_refs(
             refs.extend(
                 installed_extension_refs
                     .iter()
-                    .filter(|ref_name| point.keeps_installed_ref(ref_name))
+                    .filter(|ref_name| point.keeps_installed_ref(ref_name, active_gtk_theme))
                     .cloned(),
             );
         }
@@ -87,10 +88,18 @@ impl ExtensionPoint {
         }
     }
 
-    fn keeps_installed_ref(&self, ref_name: &str) -> bool {
+    fn keeps_installed_ref(&self, ref_name: &str, active_gtk_theme: Option<&str>) -> bool {
         let Some(candidate) = parse_runtime_ref(ref_name) else {
             return false;
         };
+        if self.name == "org.gtk.Gtk3theme" {
+            let Some(theme) = active_gtk_theme.filter(|theme| !theme.is_empty()) else {
+                return false;
+            };
+            if candidate.name != format!("{}.{theme}", self.name) {
+                return false;
+            }
+        }
         let name_matches = candidate.name == self.name
             || ((self.subdirectories || self.active_gl_driver_condition)
                 && candidate

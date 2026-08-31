@@ -149,6 +149,14 @@ pub(super) struct UnusedRemoval {
 }
 
 pub(super) fn plan_unused_deployment_checkouts(paths: &Installation) -> Result<Vec<UnusedRemoval>> {
+    let active_gtk_theme = crate::host_resources::cursor_themes::active_gtk_theme();
+    plan_unused_deployment_checkouts_with_gtk_theme(paths, active_gtk_theme.as_deref())
+}
+
+fn plan_unused_deployment_checkouts_with_gtk_theme(
+    paths: &Installation,
+    active_gtk_theme: Option<&str>,
+) -> Result<Vec<UnusedRemoval>> {
     let apps = state::list_apps(paths)?;
     let runs = state::read_run_records(paths)?;
     let mut runtime_roots = apps
@@ -190,6 +198,7 @@ pub(super) fn plan_unused_deployment_checkouts(paths: &Installation) -> Result<V
             &app.runtime_ref,
             &runtime_dir,
             &installed_extension_refs,
+            active_gtk_theme,
         )?);
     }
     for run in &runs {
