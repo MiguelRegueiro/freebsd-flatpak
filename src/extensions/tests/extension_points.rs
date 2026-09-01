@@ -145,3 +145,37 @@ fn architecture_isolation_and_duplicate_metadata_are_deterministic() {
         refs(&["runtime/org.example.Extension/x86_64/42"])
     );
 }
+
+#[test]
+fn debug_and_locale_related_refs_get_flatpak_lifecycle_defaults() {
+    let points = parse_extension_points(
+        "[Extension org.example.App.Debug]\ndirectory=lib/debug\n\
+         [Extension org.example.App.Locale]\ndirectory=share/runtime/locale\n",
+    );
+    assert!(points[0].no_autodownload);
+    assert!(points[0].autodelete);
+    assert!(!points[1].no_autodownload);
+    assert!(points[1].autodelete);
+}
+
+#[test]
+fn autoprune_unless_uses_the_same_or_condition_engine() {
+    let point = &parse_extension_points(
+        "[Extension org.example.Driver]\nsubdirectories=true\n\
+         autoprune-unless=have-intel-gpu;on-xdg-desktop-GNOME\n",
+    )[0];
+    let facts = ExtensionFacts {
+        xdg_desktops: BTreeSet::from(["gnome".to_string()]),
+        ..ExtensionFacts::default()
+    };
+    assert!(keeps_installed_ref(
+        point,
+        "runtime/org.example.Driver.synthetic/x86_64/1",
+        &facts
+    ));
+    assert!(!keeps_installed_ref(
+        point,
+        "runtime/org.example.Driver.synthetic/x86_64/1",
+        &ExtensionFacts::default()
+    ));
+}

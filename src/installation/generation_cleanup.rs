@@ -29,6 +29,15 @@ pub fn cleanup_retired_deployments(paths: &Installation) -> Result<Vec<PathBuf>>
                 protected.insert(absolute(paths, Path::new(path)));
             }
         }
+        if let Some(extension_dirs) = run.get("extension_dirs") {
+            protected.extend(
+                extension_dirs
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(|path| absolute(paths, Path::new(path))),
+            );
+        }
     }
 
     let mut removed = Vec::new();
@@ -104,7 +113,7 @@ fn remove_managed_path(paths: &Installation, path: &Path) -> Result<()> {
     }
 }
 
-pub(super) fn deployment_marker(path: &Path) -> Result<Option<(String, String)>> {
+pub(crate) fn deployment_marker(path: &Path) -> Result<Option<(String, String)>> {
     let marker_path = path.join(".ostree-commit");
     if !marker_path.is_file() {
         return Ok(None);

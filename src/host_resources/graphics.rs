@@ -6,7 +6,7 @@ use super::linux_drm_sysfs::{linux_drm_dev_t, DrmSysfsBridge};
 use crate::architecture::FlatpakArchitecture;
 use crate::diagnostics::{Detail, Diagnostics};
 use crate::installation::installation_paths::Installation;
-use crate::installation::{self as runtime, FlatpakApp, RuntimeGlExtension};
+use crate::installation::{ExtensionMount, FlatpakApp};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ pub(super) const WAYLAND_DRM_DEVT_SHIM_LIB: &str = "libwayland-drm-devt-shim.so"
 #[derive(Debug, Clone)]
 pub struct HostGraphics {
     architecture: FlatpakArchitecture,
-    gl: Option<RuntimeGlExtension>,
+    gl: Option<ExtensionMount>,
     drm: Option<DrmSysfsBridge>,
     drm_syncobj_errno_shim: Option<DrmSyncobjErrnoShim>,
     gtk3_wayland_geometry_shim: Option<Gtk3WaylandGeometryShim>,
@@ -40,14 +40,12 @@ impl HostGraphics {
     pub fn prepare(
         paths: &Installation,
         app: &FlatpakApp,
+        gl: Option<ExtensionMount>,
         instance_id: &str,
         diagnostics: &Diagnostics,
     ) -> Result<Self> {
         let architecture = FlatpakArchitecture::from_runtime_ref(&app.runtime_ref)?;
         let mut warnings = Vec::new();
-        let gl_extension = diagnostics.timer(Detail::Detailed);
-        let gl = runtime::activate_default_gl_extension(paths, &app.runtime_ref, &app.runtime_dir)?;
-        gl_extension.finish("graphics", "activate local GL extension");
         let drm_setup = diagnostics.timer(Detail::Detailed);
         let drm = if gl.is_some() {
             match DrmDevice::detect() {
@@ -135,19 +133,8 @@ impl HostGraphics {
         })
     }
 
-    pub fn extension_refs(&self) -> impl Iterator<Item = &str> {
-        self.gl.iter().map(|gl| gl.ref_name())
-    }
-
     pub fn runtime_mounts(&self) -> Vec<GraphicsMount> {
-        let mut mounts: Vec<GraphicsMount> = self
-            .gl
-            .iter()
-            .map(|gl| GraphicsMount {
-                host_path: gl.checkout_dir.join("files"),
-                sandbox_path: PathBuf::from("/usr").join(&gl.runtime_mount_relative),
-            })
-            .collect();
+        let mut mounts = Vec::new();
         let shim_dir = self
             .gtk3_wayland_geometry_shim
             .as_ref()
@@ -182,8 +169,8 @@ impl HostGraphics {
         self.gl
             .as_ref()
             .map(|gl| {
-                PathBuf::from("/usr")
-                    .join(&gl.runtime_mount_relative)
+                PathBuf::from("/")
+                    .join(&gl.target)
                     .join("lib")
                     .display()
                     .to_string()
@@ -197,14 +184,8 @@ impl HostGraphics {
             return Vec::new();
         }
 
-        let gl_root = PathBuf::from("/usr")
-            .join(
-                &self
-                    .gl
-                    .as_ref()
-                    .expect("checked GL extension")
-                    .runtime_mount_relative,
-            )
+        let gl_root = PathBuf::from("/")
+            .join(&self.gl.as_ref().expect("checked GL extension").target)
             .display()
             .to_string();
         let mut env = vec![
@@ -298,7 +279,10 @@ impl HostGraphics {
             lines.push(format!(
                 "GL extension: {} -> /usr/{}",
                 gl.checkout_dir.display(),
-                gl.runtime_mount_relative.display()
+                gl.target
+                    .strip_prefix("usr")
+                    .unwrap_or(&gl.target)
+                    .display()
             ));
             lines.push(format!("GL ref: {}", gl.ref_name));
         }

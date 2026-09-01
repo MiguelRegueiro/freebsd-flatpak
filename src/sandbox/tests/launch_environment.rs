@@ -304,22 +304,6 @@ fn metadata_runtime_dirs_are_created_inside_app_runtime_scope() {
 }
 
 #[test]
-fn runtime_extension_ld_path_is_relative_to_declared_runtime_mount() {
-    let extension = runtime::RuntimeCodecExtension {
-        name: "org.example.Codecs".to_string(),
-        ref_name: "runtime/org.example.Codecs/x86_64/branch".to_string(),
-        checkout_dir: PathBuf::from("/extensions/codecs"),
-        runtime_mount_relative: PathBuf::from("lib/platform/codecs"),
-        ld_library_relative: Some(PathBuf::from("lib")),
-    };
-
-    assert_eq!(
-        runtime_extension_ld_paths(&[extension]),
-        vec!["/usr/lib/platform/codecs/lib"]
-    );
-}
-
-#[test]
 fn runtime_extension_ld_path_is_appended_to_existing_app_library_path() {
     let mut env = vec![(
         "LD_LIBRARY_PATH".to_string(),
@@ -337,6 +321,55 @@ fn runtime_extension_ld_path_is_appended_to_existing_app_library_path() {
         vec![(
             "LD_LIBRARY_PATH".to_string(),
             "/app/extensions/lib:/app/lib:/usr/lib/x86_64-linux-gnu/codecs-extra/lib".to_string(),
+        )]
+    );
+}
+
+#[test]
+fn app_metadata_path_reaches_the_final_launch_environment() {
+    let mut env = vec![("PATH".to_string(), "/app/bin:/usr/bin:/bin".to_string())];
+    apply_metadata_env(
+        &mut env,
+        "",
+        "[Environment]\nPATH=/app/extensions/bin:/app/bin:/usr/bin\n",
+    );
+
+    assert_eq!(
+        env,
+        vec![(
+            "PATH".to_string(),
+            "/app/extensions/bin:/app/bin:/usr/bin".to_string(),
+        )]
+    );
+}
+
+#[test]
+fn metadata_and_extension_library_paths_are_composed_by_scope() {
+    let mut env = vec![(
+        "LD_LIBRARY_PATH".to_string(),
+        "/app/lib:/app/lib64".to_string(),
+    )];
+    apply_metadata_env(
+        &mut env,
+        "",
+        "[Environment]\nLD_LIBRARY_PATH=/app/extensions/lib:/app/lib\n",
+    );
+    prepend_env_paths(
+        &mut env,
+        "LD_LIBRARY_PATH",
+        vec!["/app/plugin/lib".to_string()],
+    );
+    append_env_paths(
+        &mut env,
+        "LD_LIBRARY_PATH",
+        vec!["/usr/lib/codecs-extra/lib".to_string()],
+    );
+
+    assert_eq!(
+        env,
+        vec![(
+            "LD_LIBRARY_PATH".to_string(),
+            "/app/plugin/lib:/app/extensions/lib:/app/lib:/usr/lib/codecs-extra/lib".to_string(),
         )]
     );
 }

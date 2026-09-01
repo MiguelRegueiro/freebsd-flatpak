@@ -2,9 +2,8 @@ use super::application_entrypoint::{host_user, launch_args, EntryLaunch};
 use super::filesystem_grants::HostFilesystem;
 use super::launch_application::FlatpakApp;
 use super::launch_environment::{
-    app_extension_ld_paths, append_env_paths, apply_graphics_preloads, apply_unset_environment,
-    ensure_metadata_runtime_dirs, launch_env, merge_env, metadata_env, prepend_env_paths,
-    runtime_extension_ld_paths, runtime_library_paths,
+    append_env_paths, apply_graphics_preloads, apply_metadata_env, apply_unset_environment,
+    ensure_metadata_runtime_dirs, launch_env, merge_env, prepend_env_paths, runtime_library_paths,
 };
 use super::mount_operations::owned_mount_teardown_order;
 use super::process_signals::{
@@ -71,14 +70,13 @@ pub(super) struct ChrootInstance {
     pub(super) host_network: HostNetwork,
     pub(super) host_system_bus: HostSystemBus,
     pub(super) host_video: HostVideo,
-    pub(super) gtk_theme_extension: Option<runtime::RuntimeGtkThemeExtension>,
-    pub(super) runtime_codec_extensions: Vec<runtime::RuntimeCodecExtension>,
-    pub(super) app_extensions: Vec<runtime::AppExtension>,
+    pub(super) extension_plan: runtime::ExtensionMountPlan,
     pub(super) owned_mounts: Vec<OwnedMount>,
     run_record: PathBuf,
     pub(super) nested_excluded_mounts: Vec<PathBuf>,
     deployment: state::AppRecord,
     extension_refs: Vec<String>,
+    extension_dirs: Vec<PathBuf>,
     cleaned: bool,
     pub(super) nullfs_mounts: Vec<NullfsMapping>,
     pub(super) mount_staging_ready: bool,
@@ -118,12 +116,11 @@ impl ChrootInstance {
         host_network: HostNetwork,
         host_system_bus: HostSystemBus,
         host_video: HostVideo,
-        gtk_theme_extension: Option<runtime::RuntimeGtkThemeExtension>,
-        runtime_codec_extensions: Vec<runtime::RuntimeCodecExtension>,
-        app_extensions: Vec<runtime::AppExtension>,
+        extension_plan: runtime::ExtensionMountPlan,
         run_record: PathBuf,
         deployment: state::AppRecord,
         extension_refs: Vec<String>,
+        extension_dirs: Vec<PathBuf>,
         supervisor: Arc<ProcessReaper>,
     ) -> Self {
         Self {
@@ -144,14 +141,13 @@ impl ChrootInstance {
             host_network,
             host_system_bus,
             host_video,
-            gtk_theme_extension,
-            runtime_codec_extensions,
-            app_extensions,
+            extension_plan,
             owned_mounts: Vec::new(),
             run_record,
             nested_excluded_mounts: Vec::new(),
             deployment,
             extension_refs,
+            extension_dirs,
             cleaned: false,
             nullfs_mounts: Vec::new(),
             mount_staging_ready: false,
@@ -189,8 +185,7 @@ impl ChrootInstance {
                 runtime_metadata_path.display()
             )
         })?;
-        let metadata_env = metadata_env(&runtime_metadata, &self.effective_metadata, &env);
-        merge_env(&mut env, metadata_env);
+        apply_metadata_env(&mut env, &runtime_metadata, &self.effective_metadata);
         apply_unset_environment(&mut env, &self.effective_metadata);
         merge_env(&mut env, self.host_graphics.env());
         prepend_env_paths(
@@ -224,15 +219,15 @@ impl ChrootInstance {
             "LD_LIBRARY_PATH",
             self.host_video.ld_library_paths(),
         );
-        append_env_paths(
-            &mut env,
-            "LD_LIBRARY_PATH",
-            runtime_extension_ld_paths(&self.runtime_codec_extensions),
-        );
         prepend_env_paths(
             &mut env,
             "LD_LIBRARY_PATH",
-            app_extension_ld_paths(&self.app_extensions),
+            self.extension_plan.app_ld_library_paths(),
+        );
+        append_env_paths(
+            &mut env,
+            "LD_LIBRARY_PATH",
+            self.extension_plan.runtime_ld_library_paths(),
         );
         append_env_paths(
             &mut env,
@@ -321,27 +316,12 @@ impl ChrootInstance {
             for warning in self.host_video.warnings() {
                 eprintln!("  video warning: {warning}");
             }
-            if let Some(extension) = &self.gtk_theme_extension {
+            for extension in &self.extension_plan.mounts {
                 eprintln!(
-                    "  GTK3 theme extension: {} -> /usr/{}",
-                    extension.ref_name,
-                    extension.runtime_mount_relative.display()
-                );
-            }
-            for extension in &self.runtime_codec_extensions {
-                eprintln!(
-                    "  runtime extension: {} ({}) -> /usr/{}",
+                    "  extension: {} ({}) -> /{}",
                     extension.name,
                     extension.ref_name,
-                    extension.runtime_mount_relative.display()
-                );
-            }
-            for extension in &self.app_extensions {
-                eprintln!(
-                    "  app extension: {} ({}) -> /app/{}",
-                    extension.name,
-                    extension.ref_name,
-                    extension.app_mount_relative.display()
+                    extension.target.display()
                 );
             }
             eprintln!("  entry: {}", entry.display(&app_args));
@@ -380,7 +360,7 @@ impl ChrootInstance {
         let process_group = child.id() as i32;
         ACTIVE_PROCESS_GROUP.store(process_group, Ordering::SeqCst);
         let launch_result: Result<ExitStatus> = (|| {
-            state::write_pinned_run_record_with_extensions(
+            state::write_pinned_run_record_with_extension_deployments(
                 &self.paths,
                 &self.instance_id,
                 &self.root,
@@ -388,6 +368,7 @@ impl ChrootInstance {
                 child.id(),
                 &self.deployment,
                 &self.extension_refs,
+                &self.extension_dirs,
             )?;
             let status =
                 process_tree.wait_for_exit_with_signal(&mut child, || {

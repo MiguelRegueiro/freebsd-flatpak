@@ -37,6 +37,7 @@ pub fn write_run_record(
         None,
         None,
         &[],
+        &[],
     )
 }
 
@@ -59,6 +60,7 @@ pub fn write_nested_run_record(
         None,
         None,
         &[],
+        &[],
     )
 }
 
@@ -80,6 +82,7 @@ pub fn write_checkout_pin(
         None,
         None,
         Some((app_dir, runtime_dir)),
+        &[],
         &[],
     )
 }
@@ -112,6 +115,29 @@ pub fn write_pinned_run_record_with_extensions(
     app: &AppRecord,
     extension_refs: &[String],
 ) -> Result<PathBuf> {
+    write_pinned_run_record_with_extension_deployments(
+        paths,
+        instance_id,
+        root,
+        launcher_pid,
+        child_pid,
+        app,
+        extension_refs,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn write_pinned_run_record_with_extension_deployments(
+    paths: &Installation,
+    instance_id: &str,
+    root: &Path,
+    launcher_pid: u32,
+    child_pid: u32,
+    app: &AppRecord,
+    extension_refs: &[String],
+    extension_dirs: &[PathBuf],
+) -> Result<PathBuf> {
     write_run_record_inner(
         paths,
         &app.app_id,
@@ -123,6 +149,7 @@ pub fn write_pinned_run_record_with_extensions(
         Some(app),
         None,
         extension_refs,
+        extension_dirs,
     )
 }
 
@@ -138,6 +165,7 @@ fn write_run_record_inner(
     deployment: Option<&AppRecord>,
     checkout_paths: Option<(&Path, &Path)>,
     extension_refs: &[String],
+    extension_dirs: &[PathBuf],
 ) -> Result<PathBuf> {
     ensure_layout(paths)?;
     let path = run_record_path(paths, app_id, instance_id)?;
@@ -173,6 +201,18 @@ fn write_run_record_inner(
     if !extension_refs.is_empty() {
         use std::fmt::Write as _;
         writeln!(data, "extension_refs={}", extension_refs.join(";"))?;
+    }
+    if !extension_dirs.is_empty() {
+        use std::fmt::Write as _;
+        writeln!(
+            data,
+            "extension_dirs={}",
+            extension_dirs
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(";")
+        )?;
     }
     write_atomic(&path, data.as_bytes())?;
     Ok(path)

@@ -17,9 +17,9 @@ fn fixture() -> (Installation, AppRecord, PathBuf) {
     fs::write(
         runtime_dir.join("metadata"),
         "[Runtime]\nname=org.example.Platform\n\
-         [Extension org.gtk.Gtk3theme]\nversion=3.22\ndirectory=share/runtime/share/themes\nsubdirectories=true\nsubdirectory-suffix=gtk-3.0\n\
+         [Extension org.gtk.Gtk3theme]\nversion=3.22\ndirectory=share/runtime/share/themes\nsubdirectories=true\nsubdirectory-suffix=gtk-3.0\ndownload-if=active-gtk-theme\n\
          [Extension org.freedesktop.Platform.GL]\nversions=24.08;23.08;\nversion=1.4\ndirectory=lib/GL\nsubdirectories=true\ndownload-if=active-gl-driver\n\
-         [Extension org.freedesktop.Platform.VAAPI.Intel]\nversion=24.08\ndirectory=lib/dri/intel\n\
+         [Extension org.freedesktop.Platform.VAAPI.Intel]\nversion=24.08\ndirectory=lib/dri/intel\ndownload-if=have-intel-gpu\n\
          [Extension org.freedesktop.Platform.codecs-extra]\ndirectory=lib/codecs\nversion=24.08-extra\nadd-ld-path=lib\n",
     )
     .unwrap();
@@ -66,8 +66,13 @@ fn available() -> BTreeSet<String> {
 #[test]
 fn generic_discovery_preserves_gl_vaapi_theme_codec_and_app_extensions() {
     let (paths, app, root) = fixture();
-    let required =
-        required_for_app(&paths, &app, &available(), true, Some("Example-Dark")).unwrap();
+    let facts = ExtensionFacts {
+        active_gl_drivers: BTreeSet::from(["default".to_string()]),
+        active_gtk_theme: Some("Example-Dark".to_string()),
+        intel_gpu: true,
+        ..ExtensionFacts::default()
+    };
+    let required = required_for_app(&paths, &app, &available(), &facts, &BTreeSet::new()).unwrap();
     let refs = required
         .iter()
         .map(|extension| extension.ref_name.as_str())
@@ -83,22 +88,29 @@ fn generic_discovery_preserves_gl_vaapi_theme_codec_and_app_extensions() {
             "runtime/org.gtk.Gtk3theme.Example-Dark/x86_64/3.22",
         ])
     );
-    assert!(crate::installation::absolute(&paths, &app.runtime_dir)
-        .join("files/lib/GL/default")
-        .is_dir());
-    assert!(crate::installation::absolute(&paths, &app.runtime_dir)
-        .join("files/share/runtime/share/themes/Example-Dark/gtk-3.0")
-        .is_dir());
-    assert!(crate::installation::absolute(&paths, &app.app_dir)
-        .join("files/lib/plugins")
-        .is_dir());
+    assert!(
+        fs::read_dir(crate::installation::absolute(&paths, &app.runtime_dir).join("files"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    assert!(
+        fs::read_dir(crate::installation::absolute(&paths, &app.app_dir).join("files"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn host_specific_selection_does_not_regress_gl_or_vaapi_policy() {
     let (paths, app, root) = fixture();
-    let required = required_for_app(&paths, &app, &available(), false, None).unwrap();
+    let facts = ExtensionFacts {
+        active_gl_drivers: BTreeSet::from(["default".to_string()]),
+        ..ExtensionFacts::default()
+    };
+    let required = required_for_app(&paths, &app, &available(), &facts, &BTreeSet::new()).unwrap();
     let refs = required
         .iter()
         .map(|extension| extension.ref_name.as_str())
@@ -163,4 +175,40 @@ fn directly_installed_runtime_deployment_is_reused_without_duplication() {
     assert_eq!(installed.len(), 1);
     assert_eq!(installed[0].runtime_ref, record.runtime_ref);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn debug_is_not_automatically_acquired_but_locale_is_related() {
+    let points = parse_extension_points(
+        "[Extension org.example.App.Debug]\ndirectory=lib/debug\n\
+         [Extension org.example.App.Locale]\ndirectory=share/locale\n",
+    );
+    let facts = ExtensionFacts::default();
+    assert!(!autodownload_enabled(
+        &points[0],
+        "runtime/org.example.App.Debug/x86_64/stable",
+        &facts
+    ));
+    assert!(autodownload_enabled(
+        &points[1],
+        "runtime/org.example.App.Locale/x86_64/stable",
+        &facts
+    ));
+}
+
+#[test]
+fn an_installed_conditional_extension_remains_an_update_requirement() {
+    let metadata = "[Extension org.example.Optional]\ndirectory=lib/optional\nversion=1\n\
+                    download-if=have-intel-gpu\n";
+    let reference = "runtime/org.example.Optional/x86_64/1".to_string();
+    let requirements = required_from_metadata(
+        metadata,
+        &ExtensionParent::from_ref("runtime/org.example.Platform/x86_64/1").unwrap(),
+        "flathub",
+        &BTreeSet::from([reference.clone()]),
+        &ExtensionFacts::default(),
+        &BTreeSet::from([reference.clone()]),
+    )
+    .unwrap();
+    assert_eq!(requirements[0].ref_name, reference);
 }

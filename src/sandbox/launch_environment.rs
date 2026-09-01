@@ -2,7 +2,6 @@ use super::launch_application::FlatpakApp;
 use crate::architecture::FlatpakArchitecture;
 use crate::desktop_integration::DesktopSession;
 use crate::flatpak_metadata::{section_entries, value};
-use crate::installation as runtime;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -87,21 +86,28 @@ fn push_host_env(env: &mut Vec<(String, String)>, key: &str) {
     }
 }
 
-pub(super) fn metadata_env(
+pub(super) fn apply_metadata_env(
+    env: &mut Vec<(String, String)>,
+    runtime_metadata: &str,
+    effective_app_metadata: &str,
+) {
+    for metadata in [runtime_metadata, effective_app_metadata] {
+        for (key, raw_value) in section_entries(metadata, "Environment") {
+            let value = expand_env_value(&raw_value, env);
+            merge_env(env, vec![(key, value)]);
+        }
+    }
+}
+
+#[cfg(test)]
+fn metadata_env(
     runtime_metadata: &str,
     effective_app_metadata: &str,
     base_env: &[(String, String)],
 ) -> Vec<(String, String)> {
     let mut env = base_env.to_vec();
-    let mut updates = Vec::new();
-    for metadata in [runtime_metadata, effective_app_metadata] {
-        for (key, raw_value) in section_entries(metadata, "Environment") {
-            let value = expand_env_value(&raw_value, &env);
-            merge_env(&mut env, vec![(key.clone(), value.clone())]);
-            merge_env(&mut updates, vec![(key, value)]);
-        }
-    }
-    updates
+    apply_metadata_env(&mut env, runtime_metadata, effective_app_metadata);
+    env.into_iter().skip(base_env.len()).collect()
 }
 
 fn expand_env_value(value: &str, env: &[(String, String)]) -> String {
@@ -252,38 +258,6 @@ pub(super) fn runtime_library_paths(runtime_ref: &str) -> Result<Vec<String>> {
         "/usr/lib".to_string(),
         "/usr/lib64".to_string(),
     ])
-}
-
-pub(super) fn app_extension_ld_paths(extensions: &[runtime::AppExtension]) -> Vec<String> {
-    extensions
-        .iter()
-        .filter_map(|extension| {
-            extension.ld_library_relative.as_ref().map(|relative| {
-                PathBuf::from("/app")
-                    .join(&extension.app_mount_relative)
-                    .join(relative)
-                    .display()
-                    .to_string()
-            })
-        })
-        .collect()
-}
-
-pub(super) fn runtime_extension_ld_paths(
-    extensions: &[runtime::RuntimeCodecExtension],
-) -> Vec<String> {
-    extensions
-        .iter()
-        .filter_map(|extension| {
-            extension.ld_library_relative.as_ref().map(|relative| {
-                PathBuf::from("/usr")
-                    .join(&extension.runtime_mount_relative)
-                    .join(relative)
-                    .display()
-                    .to_string()
-            })
-        })
-        .collect()
 }
 
 #[cfg(test)]

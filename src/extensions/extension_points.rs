@@ -1,3 +1,4 @@
+use super::activation::ExtensionFacts;
 use crate::flatpak_metadata::{sections_with_prefix, value};
 use anyhow::{Context, Result};
 use std::collections::BTreeSet;
@@ -62,6 +63,8 @@ impl ExtensionPoint {
             .map_or((qualified_name, None), |(name, tag)| {
                 (name, (!tag.is_empty()).then(|| tag.to_string()))
             });
+        let related_debug = name.ends_with(".Debug");
+        let related_locale = name.ends_with(".Locale");
         Self {
             name: name.to_string(),
             tag,
@@ -73,10 +76,12 @@ impl ExtensionPoint {
                 .filter(|item| !item.is_empty()),
             add_ld_path: value(metadata, section, "add-ld-path").filter(|item| !item.is_empty()),
             merge_dirs: list_value(metadata, section, "merge-dirs"),
-            no_autodownload: bool_value(metadata, section, "no-autodownload"),
+            no_autodownload: related_debug || bool_value(metadata, section, "no-autodownload"),
             download_if: list_value(metadata, section, "download-if"),
             enable_if: list_value(metadata, section, "enable-if"),
-            autodelete: bool_value(metadata, section, "autodelete"),
+            autodelete: related_debug
+                || related_locale
+                || bool_value(metadata, section, "autodelete"),
             autoprune_unless: list_value(metadata, section, "autoprune-unless"),
             locale_subset: bool_value(metadata, section, "locale-subset"),
         }
@@ -90,11 +95,6 @@ impl ExtensionPoint {
             return vec![version.clone()];
         }
         vec![parent.branch.clone()]
-    }
-
-    pub(crate) fn has_condition(&self, condition: &str) -> bool {
-        self.download_if.iter().any(|item| item == condition)
-            || self.enable_if.iter().any(|item| item == condition)
     }
 }
 
@@ -164,6 +164,7 @@ pub(crate) fn required_extension_refs(
     installed_runtime_refs: &BTreeSet<String>,
     active_gtk_theme: Option<&str>,
 ) -> Result<BTreeSet<String>> {
+    let facts = ExtensionFacts::detect(active_gtk_theme);
     let sources = [
         (
             app_dir.join("metadata"),
@@ -183,7 +184,7 @@ pub(crate) fn required_extension_refs(
         for ref_name in resolve_extension_refs(&points, &parent, installed_runtime_refs) {
             let point = point_for_ref(&points, &parent, &ref_name)
                 .expect("resolved extension has a declaring point");
-            if keeps_installed_ref(point, &ref_name, active_gtk_theme) {
+            if keeps_installed_ref(point, &ref_name, &facts) {
                 refs.insert(ref_name);
             }
         }
@@ -191,27 +192,58 @@ pub(crate) fn required_extension_refs(
     Ok(refs)
 }
 
-fn keeps_installed_ref(
-    point: &ExtensionPoint,
-    ref_name: &str,
-    active_gtk_theme: Option<&str>,
-) -> bool {
+pub(crate) fn autodelete_extension_refs(
+    app_dir: &Path,
+    app_ref: &str,
+    runtime_ref: &str,
+    runtime_dir: &Path,
+    installed_runtime_refs: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let sources = [
+        (
+            app_dir.join("metadata"),
+            ExtensionParent::from_ref(app_ref)?,
+        ),
+        (
+            runtime_dir.join("metadata"),
+            ExtensionParent::from_ref(runtime_ref)?,
+        ),
+    ];
+    let mut refs = BTreeSet::new();
+    for (metadata_path, parent) in sources {
+        let Ok(metadata) = fs::read_to_string(metadata_path) else {
+            continue;
+        };
+        for point in parse_extension_points(&metadata)
+            .into_iter()
+            .filter(|point| point.autodelete)
+        {
+            refs.extend(resolve_extension_refs(
+                std::slice::from_ref(&point),
+                &parent,
+                installed_runtime_refs,
+            ));
+        }
+    }
+    Ok(refs)
+}
+
+fn keeps_installed_ref(point: &ExtensionPoint, ref_name: &str, facts: &ExtensionFacts) -> bool {
     let Some(candidate) = runtime_ref_parts(ref_name) else {
         return false;
     };
-    if point.name == "org.gtk.Gtk3theme" {
-        let Some(theme) = active_gtk_theme.filter(|theme| !theme.is_empty()) else {
-            return false;
-        };
-        return candidate.name == format!("{}.{theme}", point.name);
+    if !point.autoprune_unless.is_empty() {
+        return facts.matches_any(&point.autoprune_unless, candidate.name);
     }
-    if point.has_condition("active-gl-driver")
-        || point
-            .autoprune_unless
-            .iter()
-            .any(|item| item == "active-gl-driver")
-    {
-        return candidate.name == format!("{}.default", point.name);
+    let dynamic_conditions = point
+        .download_if
+        .iter()
+        .chain(&point.enable_if)
+        .filter(|condition| matches!(condition.as_str(), "active-gl-driver" | "active-gtk-theme"))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !dynamic_conditions.is_empty() {
+        return facts.matches_any(&dynamic_conditions, candidate.name);
     }
     true
 }

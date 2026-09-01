@@ -59,6 +59,7 @@ struct PendingRunRecord {
     instance_id: String,
     root: PathBuf,
     extension_refs: Vec<String>,
+    extension_dirs: Vec<PathBuf>,
     committed: bool,
 }
 
@@ -80,12 +81,18 @@ impl PendingRunRecord {
             instance_id: instance_id.to_string(),
             root: root.to_path_buf(),
             extension_refs: Vec::new(),
+            extension_dirs: Vec::new(),
             committed: false,
         })
     }
 
-    fn set_extensions(&mut self, paths: &Installation, extension_refs: Vec<String>) -> Result<()> {
-        state::write_pinned_run_record_with_extensions(
+    fn set_extensions(
+        &mut self,
+        paths: &Installation,
+        extension_refs: Vec<String>,
+        extension_dirs: Vec<PathBuf>,
+    ) -> Result<()> {
+        state::write_pinned_run_record_with_extension_deployments(
             paths,
             &self.instance_id,
             &self.root,
@@ -93,17 +100,20 @@ impl PendingRunRecord {
             0,
             &self.deployment,
             &extension_refs,
+            &extension_dirs,
         )?;
         self.extension_refs = extension_refs;
+        self.extension_dirs = extension_dirs;
         Ok(())
     }
 
-    fn commit(mut self) -> (PathBuf, state::AppRecord, Vec<String>) {
+    fn commit(mut self) -> (PathBuf, state::AppRecord, Vec<String>, Vec<PathBuf>) {
         self.committed = true;
         (
             self.path.clone(),
             self.deployment.clone(),
             self.extension_refs.clone(),
+            self.extension_dirs.clone(),
         )
     }
 }
@@ -191,48 +201,31 @@ impl ChrootNullfsBackend {
             )
         })?;
         let graphics = diagnostics.timer(Detail::Summary);
-        let host_graphics = HostGraphics::prepare(&self.paths, app, &instance_id, diagnostics)?;
+        let extension_facts = runtime::ExtensionFacts::detect(host_cursor.gtk_theme());
+        let extension_plan =
+            runtime::resolve_extension_mount_plan(&self.paths, app, &extension_facts)?;
+        let host_graphics = HostGraphics::prepare(
+            &self.paths,
+            app,
+            extension_plan
+                .conditioned_mount("active-gl-driver")
+                .cloned(),
+            &instance_id,
+            diagnostics,
+        )?;
         let host_video = diagnostics.measure(
             Detail::Detailed,
-            "graphics",
-            "activate local VAAPI extension",
-            || HostVideo::prepare(&self.paths, app),
+            "extensions",
+            "prepare video compatibility",
+            || HostVideo::prepare(extension_plan.conditioned_mount("have-intel-gpu").cloned()),
         )?;
-        let gtk_theme_extension = runtime::activate_gtk_theme_extension(
-            &self.paths,
-            &app.runtime_ref,
-            &app.runtime_dir,
-            host_cursor.gtk_theme(),
-        )?;
-        let runtime_codec_extensions = runtime::activate_runtime_codec_extensions(
-            &self.paths,
-            &app.runtime_ref,
-            &app.runtime_dir,
-        )?;
-        let app_extensions = runtime::activate_app_codec_extensions(&self.paths, app)?;
-        let mut extension_refs = host_graphics
-            .extension_refs()
-            .chain(host_video.extension_refs())
-            .chain(
-                gtk_theme_extension
-                    .iter()
-                    .map(|extension| extension.ref_name()),
-            )
-            .map(ToOwned::to_owned)
-            .chain(
-                runtime_codec_extensions
-                    .iter()
-                    .map(|extension| extension.ref_name().to_string()),
-            )
-            .chain(
-                app_extensions
-                    .iter()
-                    .map(|extension| extension.ref_name.clone()),
-            )
-            .collect::<Vec<_>>();
+        let mut extension_refs = extension_plan.refs();
         extension_refs.sort();
         extension_refs.dedup();
-        pending_run.set_extensions(&self.paths, extension_refs)?;
+        let mut extension_dirs = extension_plan.checkout_dirs();
+        extension_dirs.sort();
+        extension_dirs.dedup();
+        pending_run.set_extensions(&self.paths, extension_refs, extension_dirs)?;
 
         graphics.finish("run", "graphics and extensions");
 
@@ -244,11 +237,11 @@ impl ChrootNullfsBackend {
             &app.runtime_dir.join("files").join("etc"),
             network_enabled,
         )?;
-        write_flatpak_info(&root, app, &instance_id)?;
+        write_flatpak_info(&root, app, &instance_id, &extension_plan)?;
         host_audio.prepare(&root)?;
         host_cursor.prepare(&root)?;
         host_fonts.prepare(&root)?;
-        let (run_record, deployment, extension_refs) = pending_run.commit();
+        let (run_record, deployment, extension_refs, extension_dirs) = pending_run.commit();
         let mut instance = ChrootInstance::new(
             self.paths.clone(),
             instance_id,
@@ -267,12 +260,11 @@ impl ChrootNullfsBackend {
             host_network,
             host_system_bus,
             host_video,
-            gtk_theme_extension,
-            runtime_codec_extensions,
-            app_extensions,
+            extension_plan,
             run_record,
             deployment,
             extension_refs,
+            extension_dirs,
             supervisor,
         );
 
@@ -297,26 +289,25 @@ impl ChrootNullfsBackend {
                 false,
             )?;
         }
-        for extension in instance.app_extensions.clone() {
+        let extension_mounts = instance.extension_plan.mounts.clone();
+        let extension_merges = instance
+            .extension_plan
+            .merge_directories(&app.app_dir, &app.runtime_dir)?;
+        for extension in &extension_mounts {
+            instance.prepare_extension_target(extension, &app.app_dir, &app.runtime_dir)?;
+        }
+        for merge in &extension_merges {
+            instance.prepare_extension_merge_target(merge, &app.app_dir, &app.runtime_dir)?;
+        }
+        for extension in extension_mounts {
             instance.mount_nullfs(
                 &extension.checkout_dir.join("files"),
-                PathBuf::from("app").join(&extension.app_mount_relative),
+                &extension.target,
                 true,
             )?;
         }
-        for extension in instance.runtime_codec_extensions.clone() {
-            instance.mount_nullfs(
-                &extension.checkout_dir.join("files"),
-                PathBuf::from("usr").join(&extension.runtime_mount_relative),
-                true,
-            )?;
-        }
-        if let Some(extension) = instance.gtk_theme_extension.clone() {
-            instance.mount_nullfs(
-                &extension.checkout_dir.join("files"),
-                PathBuf::from("usr").join(&extension.runtime_mount_relative),
-                true,
-            )?;
+        for merge in extension_merges {
+            instance.mount_extension_merge(&merge)?;
         }
         let graphics_mounts = instance.host_graphics.runtime_mounts();
         let (linux_compat_source, linux_compat_target) = instance.host_linux_compat.runtime_mount();
@@ -351,9 +342,6 @@ impl ChrootNullfsBackend {
         }
         if let Some((source, target)) = instance.host_system_bus.runtime_mount() {
             instance.mount_nullfs(&source, target, true)?;
-        }
-        for mount in instance.host_video.runtime_mounts() {
-            instance.mount_nullfs(mount.host_path(), mount.sandbox_target_relative()?, true)?;
         }
         let flatpak_data_plan = FlatpakDataMountPlan::build(
             &instance.host_filesystem,

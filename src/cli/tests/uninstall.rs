@@ -375,6 +375,98 @@ fn normal_app_uninstall_leaves_runtime_for_unused_cleanup() {
 }
 
 #[test]
+fn autodelete_extension_is_removed_with_its_parent_but_the_platform_is_kept() {
+    let root = test_dir("autodelete-extension");
+    let paths = Installation::for_test(&root);
+    state::ensure_layout(&paths).unwrap();
+    let app_id = "org.example.App";
+    let app_ref = "app/org.example.App/x86_64/stable";
+    let runtime_ref = "org.example.Platform/x86_64/stable";
+    let extension_ref = "org.example.App.Plugin/x86_64/stable";
+    let app_dir = paths.app(app_id).join("app-commit");
+    let runtime_dir = paths.runtimes().join("platform").join("runtime-commit");
+    let extension_dir = paths.runtimes().join("plugin").join("extension-commit");
+    create_marked_checkout(
+        &app_dir,
+        app_ref,
+        "app-commit",
+        &format!(
+            "[Application]\nname={app_id}\nruntime={runtime_ref}\ncommand=example\n\
+             [Extension org.example.App.Plugin]\ndirectory=extensions/plugin\nversion=stable\nautodelete=true\n"
+        ),
+    );
+    create_marked_checkout(
+        &runtime_dir,
+        &format!("runtime/{runtime_ref}"),
+        "runtime-commit",
+        "[Runtime]\nname=org.example.Platform\n",
+    );
+    create_marked_checkout(
+        &extension_dir,
+        &format!("runtime/{extension_ref}"),
+        "extension-commit",
+        "[Runtime]\nname=org.example.App.Plugin\n",
+    );
+    state::record_install(
+        &paths,
+        &runtime::InstalledApp {
+            origin: "flathub".to_string(),
+            runtime_origin: "flathub".to_string(),
+            app_id: app_id.to_string(),
+            app_ref: app_ref.to_string(),
+            app_commit: "app-commit".to_string(),
+            installed_size: 0,
+            app_dir: app_dir.clone(),
+            arch: "x86_64".to_string(),
+            branch: "stable".to_string(),
+            runtime_ref: runtime_ref.to_string(),
+            runtime_commit: "runtime-commit".to_string(),
+            runtime_installed_size: 0,
+            runtime_dir: runtime_dir.clone(),
+            command: "example".to_string(),
+            timings: Default::default(),
+        },
+    )
+    .unwrap();
+    state::write_runtime(
+        &paths,
+        &state::RuntimeRecord {
+            origin: "flathub".to_string(),
+            runtime_ref: extension_ref.to_string(),
+            runtime_commit: "extension-commit".to_string(),
+            explicitly_installed: false,
+            installed_size: 0,
+            runtime_dir: paths.relative_data_path(&extension_dir).unwrap(),
+        },
+    )
+    .unwrap();
+
+    let installed = BTreeSet::from([format!("runtime/{extension_ref}")]);
+    let autodelete = runtime::autodelete_extension_refs(
+        &app_dir,
+        app_ref,
+        runtime_ref,
+        &runtime_dir,
+        &installed,
+    )
+    .unwrap();
+    assert_eq!(autodelete, installed);
+
+    state::remove_app_record(&paths, app_id).unwrap();
+    let plan = plan_unused_deployment_checkouts(&paths)
+        .unwrap()
+        .into_iter()
+        .filter(|item| autodelete.contains(&item.ref_name))
+        .collect();
+    apply_unused_deployment_plan(&paths, plan).unwrap();
+
+    assert!(state::get_runtime(&paths, extension_ref).unwrap().is_none());
+    assert!(!extension_dir.exists());
+    assert!(state::get_runtime(&paths, runtime_ref).unwrap().is_some());
+    assert!(runtime_dir.exists());
+}
+
+#[test]
 fn unused_cleanup_discovers_orphan_runtime_without_inventory_record() {
     let root = test_dir("unused-discovered-runtime");
     let paths = Installation::for_test(&root);
@@ -398,19 +490,19 @@ fn unused_cleanup_discovers_orphan_runtime_without_inventory_record() {
 }
 
 #[test]
-fn explicitly_installed_runtime_is_not_unused_without_an_application() {
-    let root = test_dir("explicit-runtime-root");
+fn directly_installed_extension_is_not_unused_without_an_application() {
+    let root = test_dir("explicit-extension-root");
     let paths = Installation::for_test(&root);
     state::ensure_layout(&paths).unwrap();
-    let runtime_ref = "org.example.Platform/x86_64/50";
+    let runtime_ref = "org.example.App.Plugin/x86_64/stable";
     let runtime_dir = paths
         .runtimes()
-        .join("flathub/org.example.Platform-50/runtime-commit");
+        .join("flathub/org.example.App.Plugin-stable/runtime-commit");
     create_marked_checkout(
         &runtime_dir,
         &format!("runtime/{runtime_ref}"),
         "runtime-commit",
-        "[Runtime]\nname=org.example.Platform\n",
+        "[Runtime]\nname=org.example.App.Plugin\n",
     );
     state::write_runtime(
         &paths,

@@ -3,7 +3,7 @@ use crate::installation::application_records::write_app;
 use crate::installation::installation_paths::Installation;
 use crate::installation::{
     ensure_layout, get_app, reconcile_runtime_bindings, remove_run_record, write_pinned_run_record,
-    write_runtime, AppRecord, RuntimeRecord,
+    write_pinned_run_record_with_extension_deployments, write_runtime, AppRecord, RuntimeRecord,
 };
 use std::fs;
 use std::path::Path;
@@ -207,4 +207,55 @@ fn origin_transition_rebinds_apps_and_reclaims_the_stale_runtime_deployment() {
     assert!(!old_dir.exists());
     assert!(new_dir.exists());
     let _ = fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn running_app_pins_retired_extension_generation_until_exit() {
+    let temp = std::env::temp_dir().join(format!(
+        "freebsd-flatpak-extension-generation-{}",
+        std::process::id()
+    ));
+    let paths = Installation::for_test(&temp);
+    ensure_layout(&paths).unwrap();
+    let old = paths.runtimes().join("org.example.Extension-x86_64-1/old");
+    let current = old.parent().unwrap().join("current");
+    checkout(&old, "runtime/org.example.Extension/x86_64/1", "old");
+    checkout(
+        &current,
+        "runtime/org.example.Extension/x86_64/1",
+        "current",
+    );
+    write_runtime(
+        &paths,
+        &RuntimeRecord {
+            origin: "flathub".into(),
+            runtime_ref: "org.example.Extension/x86_64/1".into(),
+            runtime_commit: "current".into(),
+            installed_size: 0,
+            explicitly_installed: false,
+            runtime_dir: paths.relative_data_path(&current).unwrap(),
+        },
+    )
+    .unwrap();
+    let deployment = app(&paths, "app", "runtime");
+    let pin = write_pinned_run_record_with_extension_deployments(
+        &paths,
+        "running",
+        &paths.chroots().join("running"),
+        std::process::id(),
+        0,
+        &deployment,
+        &["runtime/org.example.Extension/x86_64/1".to_string()],
+        std::slice::from_ref(&old),
+    )
+    .unwrap();
+
+    cleanup_retired_deployments(&paths).unwrap();
+    assert!(old.exists());
+    assert!(current.exists());
+    remove_run_record(&pin).unwrap();
+    cleanup_retired_deployments(&paths).unwrap();
+    assert!(!old.exists());
+    assert!(current.exists());
+    let _ = fs::remove_dir_all(temp);
 }

@@ -1,9 +1,9 @@
 use super::HostGraphics;
 use crate::architecture::FlatpakArchitecture;
+use crate::extensions::activation::{ExtensionMount, ExtensionScope};
 use crate::host_resources::graphics_shims::{
     DrmSyncobjErrnoShim, Gtk3WaylandGeometryShim, WaylandDrmDevtShim,
 };
-use crate::installation::RuntimeGlExtension;
 use std::path::PathBuf;
 
 #[test]
@@ -56,10 +56,17 @@ fn keeps_drm_and_wayland_preloads_separate_on_one_mount() {
 fn aarch64_gl_paths_follow_the_activated_extension_mountpoint() {
     let graphics = HostGraphics {
         architecture: FlatpakArchitecture::Aarch64,
-        gl: Some(RuntimeGlExtension {
+        gl: Some(ExtensionMount {
+            name: "org.example.Graphics.default".to_string(),
             ref_name: "runtime/org.freedesktop.Platform.GL.default/aarch64/25.08".to_string(),
+            commit: "commit".to_string(),
             checkout_dir: PathBuf::from("/extensions/gl"),
-            runtime_mount_relative: PathBuf::from("lib/aarch64-linux-gnu/GL/default"),
+            target: PathBuf::from("usr/lib/aarch64-linux-gnu/GL/default"),
+            add_ld_paths: Vec::new(),
+            merge_dirs: Vec::new(),
+            priority: 0,
+            scope: ExtensionScope::Runtime,
+            conditions: vec!["active-gl-driver".to_string()],
         }),
         drm: None,
         drm_syncobj_errno_shim: None,

@@ -1,6 +1,7 @@
 use super::launch_application::FlatpakApp;
 use super::sandbox_identity::SandboxIdentity;
 use crate::flatpak_metadata::value;
+use crate::installation::ExtensionMountPlan;
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::os::unix::fs as unix_fs;
@@ -171,7 +172,19 @@ pub(super) fn app_allows_network(metadata: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub(super) fn write_flatpak_info(root: &Path, app: &FlatpakApp, instance_id: &str) -> Result<()> {
+pub(super) fn write_flatpak_info(
+    root: &Path,
+    app: &FlatpakApp,
+    instance_id: &str,
+    extensions: &ExtensionMountPlan,
+) -> Result<()> {
+    let list = |items: Vec<String>| {
+        if items.is_empty() {
+            String::new()
+        } else {
+            format!("{};", items.join(";"))
+        }
+    };
     let data = format!(
         "\
 [Application]
@@ -181,11 +194,17 @@ runtime={}
 [Instance]
 instance-id={}
 flatpak-version=1.12.0
+app-extensions={}
+runtime-extensions={}
 
 [Context]
 filesystems=
 ",
-        app.app_id, app.runtime_ref, instance_id
+        app.app_id,
+        app.runtime_ref,
+        instance_id,
+        list(extensions.app_info()),
+        list(extensions.runtime_info())
     );
     fs::write(root.join(".flatpak-info"), data)
         .with_context(|| format!("write {}", root.join(".flatpak-info").display()))

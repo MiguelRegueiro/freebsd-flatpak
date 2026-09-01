@@ -62,14 +62,6 @@ impl FlatpakArchitecture {
         format!("lib/{}", self.linux_multiarch_tuple())
     }
 
-    pub(crate) fn default_gl_extension_dir(self) -> String {
-        format!("{}/GL", self.runtime_libdir())
-    }
-
-    pub(crate) fn default_intel_vaapi_extension_dir(self) -> String {
-        format!("{}/dri/intel-vaapi-driver", self.runtime_libdir())
-    }
-
     pub(crate) fn vulkan_icd_filename(self, driver: &str) -> String {
         format!("{driver}_icd.{}.json", self.flatpak_name())
     }

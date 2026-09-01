@@ -77,6 +77,17 @@ pub(crate) fn cmd_uninstall(paths: &Installation, args: Vec<String>) -> Result<(
     if !present_and_confirm(&entries, options.transaction)? {
         return Ok(());
     }
+    let installed_runtime_refs = state::list_runtimes(paths)?
+        .into_iter()
+        .map(|runtime| format!("runtime/{}", runtime.runtime_ref))
+        .collect::<BTreeSet<_>>();
+    let autodelete_refs = runtime::autodelete_extension_refs(
+        &state::absolute(paths, &record.app_dir),
+        &record.app_ref,
+        &record.runtime_ref,
+        &state::absolute(paths, &record.runtime_dir),
+        &installed_runtime_refs,
+    )?;
     desktop_integration::remove_export(paths, app_id)?;
     if state::remove_app_record(paths, app_id)?.is_none() {
         println!("{app_id} is not installed");
@@ -88,6 +99,18 @@ pub(crate) fn cmd_uninstall(paths: &Installation, args: Vec<String>) -> Result<(
 
     runtime::remove_remote_refs(paths, &record.origin, &[&record.app_ref])?;
     state::cleanup_retired_deployments(paths)?;
+    if !autodelete_refs.is_empty() {
+        let autodelete_plan = plan_unused_deployment_checkouts(paths)?
+            .into_iter()
+            .filter(|item| autodelete_refs.contains(&item.ref_name))
+            .collect();
+        let removed = apply_unused_deployment_plan(paths, autodelete_plan)?;
+        for item in removed {
+            for origin in item.origins {
+                runtime::remove_remote_refs(paths, &origin, &[&item.ref_name])?;
+            }
+        }
+    }
     if options.delete_data {
         remove_app_data(paths, app_id)?;
     }

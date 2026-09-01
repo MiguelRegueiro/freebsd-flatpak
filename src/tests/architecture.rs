@@ -20,11 +20,6 @@ fn normalizes_supported_freebsd_and_linux_machine_names() {
 fn generates_linux_runtime_paths_for_each_supported_flatpak_architecture() {
     let amd64 = FlatpakArchitecture::X86_64;
     assert_eq!(amd64.runtime_libdir(), "lib/x86_64-linux-gnu");
-    assert_eq!(amd64.default_gl_extension_dir(), "lib/x86_64-linux-gnu/GL");
-    assert_eq!(
-        amd64.default_intel_vaapi_extension_dir(),
-        "lib/x86_64-linux-gnu/dri/intel-vaapi-driver"
-    );
     assert_eq!(
         amd64.vulkan_icd_filename("radeon"),
         "radeon_icd.x86_64.json"
@@ -32,11 +27,6 @@ fn generates_linux_runtime_paths_for_each_supported_flatpak_architecture() {
 
     let arm64 = FlatpakArchitecture::Aarch64;
     assert_eq!(arm64.runtime_libdir(), "lib/aarch64-linux-gnu");
-    assert_eq!(arm64.default_gl_extension_dir(), "lib/aarch64-linux-gnu/GL");
-    assert_eq!(
-        arm64.default_intel_vaapi_extension_dir(),
-        "lib/aarch64-linux-gnu/dri/intel-vaapi-driver"
-    );
     assert_eq!(
         arm64.vulkan_icd_filename("virtio"),
         "virtio_icd.aarch64.json"

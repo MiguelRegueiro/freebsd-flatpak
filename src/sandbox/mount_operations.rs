@@ -1,10 +1,12 @@
 use super::chroot_instance::{ChrootInstance, NullfsMapping, OwnedMount};
 use super::stale_sandbox_recovery::{ensure_mountpoint_free, run_command};
+use crate::installation::{ExtensionMergeDirectory, ExtensionMount};
 use crate::secure_mount;
 use anyhow::{bail, Context, Result};
 use std::fs;
+use std::os::unix::fs as unix_fs;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const STAGING_ROOT: &str = ".freebsd-flatpak-mount-sources";
 
@@ -15,6 +17,172 @@ fn identity(path: &Path) -> Result<(u64, u64)> {
 }
 
 impl ChrootInstance {
+    pub(super) fn prepare_extension_target(
+        &mut self,
+        extension: &ExtensionMount,
+        app_dir: &Path,
+        runtime_dir: &Path,
+    ) -> Result<()> {
+        self.prepare_extension_directory(&extension.target, app_dir, runtime_dir)
+    }
+
+    pub(super) fn prepare_extension_merge_target(
+        &mut self,
+        merge: &ExtensionMergeDirectory,
+        app_dir: &Path,
+        runtime_dir: &Path,
+    ) -> Result<()> {
+        self.prepare_extension_directory(&merge.target, app_dir, runtime_dir)
+    }
+
+    fn prepare_extension_directory(
+        &mut self,
+        target_relative: &Path,
+        app_dir: &Path,
+        runtime_dir: &Path,
+    ) -> Result<()> {
+        let target = self.root.join(target_relative);
+        if target.is_dir() {
+            return Ok(());
+        }
+        if fs::create_dir_all(&target).is_ok() {
+            return Ok(());
+        }
+        let (scope, deployment) = if target_relative.starts_with("app") {
+            (Path::new("app"), app_dir)
+        } else if target_relative.starts_with("usr") {
+            (Path::new("usr"), runtime_dir)
+        } else {
+            bail!(
+                "extension target is outside /app and /usr: {}",
+                target_relative.display()
+            );
+        };
+        let mut overlay = target_relative
+            .parent()
+            .context("extension target has no parent")?
+            .to_path_buf();
+        while !self.root.join(&overlay).is_dir() {
+            if !overlay.pop() || overlay == scope {
+                bail!(
+                    "extension target has no safe existing parent: {}",
+                    target_relative.display()
+                );
+            }
+        }
+        let relative = overlay
+            .strip_prefix(scope)
+            .expect("extension overlay remains inside scope")
+            .to_path_buf();
+        if overlay == scope {
+            bail!(
+                "refusing to overlay complete extension scope for target {}",
+                target_relative.display()
+            );
+        }
+        let placeholders = self
+            .extension_plan
+            .mounts
+            .iter()
+            .filter_map(|mount| {
+                mount
+                    .target
+                    .strip_prefix(&overlay)
+                    .ok()?
+                    .components()
+                    .next()
+                    .map(|component| PathBuf::from(component.as_os_str()))
+            })
+            .collect();
+        self.mount_extension_merge_inner(
+            &ExtensionMergeDirectory {
+                target: overlay,
+                base_source: deployment.join("files").join(relative),
+                entries: Vec::new(),
+            },
+            &placeholders,
+        )?;
+        fs::create_dir_all(&target)
+            .with_context(|| format!("create sandbox extension target {}", target.display()))
+    }
+
+    pub(super) fn mount_extension_merge(&mut self, merge: &ExtensionMergeDirectory) -> Result<()> {
+        self.mount_extension_merge_inner(merge, &std::collections::BTreeSet::new())
+    }
+
+    fn mount_extension_merge_inner(
+        &mut self,
+        merge: &ExtensionMergeDirectory,
+        placeholders: &std::collections::BTreeSet<PathBuf>,
+    ) -> Result<()> {
+        let target = self.root.join(&merge.target);
+        if !target.is_dir() {
+            bail!(
+                "extension merge target is missing from its deployment: {}",
+                target.display()
+            );
+        }
+        let selected = merge
+            .entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut sources = Vec::new();
+        if let Ok(base_entries) = fs::read_dir(&merge.base_source) {
+            for entry in base_entries {
+                let entry = entry
+                    .with_context(|| format!("read merge base {}", merge.base_source.display()))?;
+                let name = PathBuf::from(entry.file_name());
+                if !selected.contains(&name) && !placeholders.contains(&name) {
+                    sources.push((name, entry.path()));
+                }
+            }
+        }
+        sources.extend(
+            merge
+                .entries
+                .iter()
+                .map(|entry| (entry.name.clone(), entry.source.clone())),
+        );
+        sources.sort_by(|left, right| left.0.cmp(&right.0));
+
+        self.mount_tmpfs_secure(&merge.target, "mode=0755")?;
+        for name in placeholders {
+            fs::create_dir(target.join(name)).with_context(|| {
+                format!(
+                    "create extension placeholder {}",
+                    target.join(name).display()
+                )
+            })?;
+        }
+        for (name, source) in sources {
+            let destination = target.join(&name);
+            let metadata = fs::symlink_metadata(&source)
+                .with_context(|| format!("inspect merge source {}", source.display()))?;
+            if metadata.file_type().is_symlink() {
+                let link = fs::read_link(&source)
+                    .with_context(|| format!("read merge symlink {}", source.display()))?;
+                unix_fs::symlink(&link, &destination).with_context(|| {
+                    format!(
+                        "create merged symlink {} -> {}",
+                        destination.display(),
+                        link.display()
+                    )
+                })?;
+            } else {
+                if metadata.is_dir() {
+                    fs::create_dir(&destination)
+                        .with_context(|| format!("create {}", destination.display()))?;
+                } else {
+                    fs::File::create(&destination)
+                        .with_context(|| format!("create {}", destination.display()))?;
+                }
+                self.mount_nullfs(&source, merge.target.join(name), true)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn mount_nullfs(
         &mut self,
         source: &Path,

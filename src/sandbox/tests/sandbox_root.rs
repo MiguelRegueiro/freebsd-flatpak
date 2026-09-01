@@ -1,4 +1,5 @@
 use super::*;
+use crate::extensions::activation::{ExtensionMount, ExtensionScope};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -111,4 +112,46 @@ fn root_contains_flatpak_identity_files_instead_of_runtime_accounts() {
             & 0o777,
         0o644
     );
+}
+
+#[test]
+fn flatpak_info_reports_mounted_app_and_runtime_extensions_by_commit() {
+    let dir = test_dir("flatpak-info-extensions");
+    let app = FlatpakApp {
+        app_id: "org.example.App".to_string(),
+        app_dir: dir.join("app"),
+        runtime_ref: "org.example.Platform/x86_64/1".to_string(),
+        runtime_dir: dir.join("runtime"),
+        command: "example".to_string(),
+        args: Vec::new(),
+    };
+    let mount = |name: &str, commit: &str, scope| ExtensionMount {
+        name: name.to_string(),
+        ref_name: format!("runtime/{name}/x86_64/1"),
+        commit: commit.to_string(),
+        checkout_dir: dir.join(name),
+        target: PathBuf::from(match scope {
+            ExtensionScope::App => "app/ext",
+            ExtensionScope::Runtime => "usr/ext",
+        }),
+        add_ld_paths: Vec::new(),
+        merge_dirs: Vec::new(),
+        priority: 0,
+        scope,
+        conditions: Vec::new(),
+    };
+    let plan = ExtensionMountPlan {
+        mounts: vec![
+            mount("org.example.AppPlugin", "app-commit", ExtensionScope::App),
+            mount(
+                "org.example.RuntimePlugin",
+                "runtime-commit",
+                ExtensionScope::Runtime,
+            ),
+        ],
+    };
+    write_flatpak_info(&dir, &app, "instance", &plan).unwrap();
+    let info = fs::read_to_string(dir.join(".flatpak-info")).unwrap();
+    assert!(info.contains("app-extensions=org.example.AppPlugin=app-commit;"));
+    assert!(info.contains("runtime-extensions=org.example.RuntimePlugin=runtime-commit;"));
 }

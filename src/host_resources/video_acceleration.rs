@@ -1,64 +1,29 @@
-use crate::installation::installation_paths::Installation;
-use crate::installation::{self as runtime, FlatpakApp, RuntimeVaapiExtension};
-use anyhow::{Context, Result};
+use crate::installation::ExtensionMount;
+use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct HostVideo {
-    vaapi: Option<RuntimeVaapiExtension>,
+    vaapi: Option<ExtensionMount>,
     warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct VideoMount {
-    host_path: PathBuf,
-    sandbox_path: PathBuf,
-}
-
 impl HostVideo {
-    pub fn prepare(paths: &Installation, app: &FlatpakApp) -> Result<Self> {
+    pub fn prepare(vaapi: Option<ExtensionMount>) -> Result<Self> {
         let mut warnings = Vec::new();
-        let vaapi = if host_has_intel_drm_device() {
-            runtime::activate_intel_vaapi_extension(paths, &app.runtime_ref, &app.runtime_dir)?
-        } else {
+        if !host_has_intel_drm_device() {
             warnings.push(
                 "Intel VAAPI extension disabled: no Intel DRM render node detected".to_string(),
             );
-            None
-        };
+        }
 
         Ok(Self { vaapi, warnings })
     }
 
-    pub fn extension_refs(&self) -> impl Iterator<Item = &str> {
-        self.vaapi.iter().map(|vaapi| vaapi.ref_name())
-    }
-
-    pub fn runtime_mounts(&self) -> Vec<VideoMount> {
-        self.vaapi
-            .iter()
-            .map(|vaapi| VideoMount {
-                host_path: vaapi.checkout_dir.join("files"),
-                sandbox_path: PathBuf::from("/usr").join(&vaapi.runtime_mount_relative),
-            })
-            .collect()
-    }
-
     pub fn ld_library_paths(&self) -> Vec<String> {
-        self.vaapi
-            .iter()
-            .filter_map(|vaapi| {
-                vaapi.ld_library_relative.as_ref().map(|relative| {
-                    PathBuf::from("/usr")
-                        .join(&vaapi.runtime_mount_relative)
-                        .join(relative)
-                        .display()
-                        .to_string()
-                })
-            })
-            .collect()
+        Vec::new()
     }
 
     pub fn env(&self) -> Vec<(String, String)> {
@@ -66,7 +31,7 @@ impl HostVideo {
             return Vec::new();
         };
 
-        let extension_dir = PathBuf::from("/usr").join(&vaapi.runtime_mount_relative);
+        let extension_dir = PathBuf::from("/").join(&vaapi.target);
         let dri_dir = extension_dir
             .parent()
             .unwrap_or(Path::new("/usr/lib/dri"))
@@ -96,18 +61,14 @@ impl HostVideo {
             .flat_map(|vaapi| {
                 let mut lines = vec![
                     format!(
-                        "VAAPI Intel extension: {} -> /usr/{}",
+                        "VAAPI extension: {} -> /{}",
                         vaapi.checkout_dir.display(),
-                        vaapi.runtime_mount_relative.display()
+                        vaapi.target.display()
                     ),
                     format!("VAAPI Intel ref: {}", vaapi.ref_name),
                 ];
-                if let Some(path) = &vaapi.ld_library_relative {
-                    lines.push(format!(
-                        "VAAPI library path: /usr/{}/{}",
-                        vaapi.runtime_mount_relative.display(),
-                        path.display()
-                    ));
+                for path in &vaapi.add_ld_paths {
+                    lines.push(format!("VAAPI library path: {path}"));
                 }
                 lines
             })
@@ -116,24 +77,6 @@ impl HostVideo {
 
     pub fn warnings(&self) -> &[String] {
         &self.warnings
-    }
-}
-
-impl VideoMount {
-    pub fn host_path(&self) -> &Path {
-        &self.host_path
-    }
-
-    pub fn sandbox_target_relative(&self) -> Result<PathBuf> {
-        self.sandbox_path
-            .strip_prefix("/")
-            .map(Path::to_path_buf)
-            .with_context(|| {
-                format!(
-                    "video sandbox path is not absolute: {}",
-                    self.sandbox_path.display()
-                )
-            })
     }
 }
 
