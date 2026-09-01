@@ -1,3 +1,4 @@
+mod architecture;
 mod cli;
 mod desktop_integration;
 mod diagnostics;

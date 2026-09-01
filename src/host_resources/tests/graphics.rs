@@ -1,13 +1,16 @@
 use super::HostGraphics;
+use crate::architecture::FlatpakArchitecture;
 use crate::host_resources::graphics_shims::{
     DrmSyncobjErrnoShim, Gtk3WaylandGeometryShim, WaylandDrmDevtShim,
 };
+use crate::installation::RuntimeGlExtension;
 use std::path::PathBuf;
 
 #[test]
 fn keeps_drm_and_wayland_preloads_separate_on_one_mount() {
     let host_dir = PathBuf::from("/tmp/freebsd-flatpak-graphics-shims");
     let graphics = HostGraphics {
+        architecture: FlatpakArchitecture::X86_64,
         gl: None,
         drm: None,
         drm_syncobj_errno_shim: Some(DrmSyncobjErrnoShim {
@@ -46,5 +49,41 @@ fn keeps_drm_and_wayland_preloads_separate_on_one_mount() {
     assert_eq!(
         mounts[0].sandbox_target_relative().unwrap(),
         PathBuf::from("run/host/freebsd-flatpak")
+    );
+}
+
+#[test]
+fn aarch64_gl_paths_follow_the_activated_extension_mountpoint() {
+    let graphics = HostGraphics {
+        architecture: FlatpakArchitecture::Aarch64,
+        gl: Some(RuntimeGlExtension {
+            ref_name: "runtime/org.freedesktop.Platform.GL.default/aarch64/25.08".to_string(),
+            checkout_dir: PathBuf::from("/extensions/gl"),
+            runtime_mount_relative: PathBuf::from("lib/aarch64-linux-gnu/GL/default"),
+        }),
+        drm: None,
+        drm_syncobj_errno_shim: None,
+        gtk3_wayland_geometry_shim: None,
+        chromium_zygote_drm_preload: None,
+        wayland_drm_devt_shim: None,
+        warnings: Vec::new(),
+    };
+
+    assert_eq!(
+        graphics.ld_library_paths(),
+        vec!["/usr/lib/aarch64-linux-gnu/GL/default/lib"]
+    );
+    let env = graphics.env();
+    assert_eq!(
+        env.iter()
+            .find(|(key, _)| key == "LIBGL_DRIVERS_PATH")
+            .map(|(_, value)| value.as_str()),
+        Some("/usr/lib/aarch64-linux-gnu/GL/default/lib/dri")
+    );
+    assert_eq!(
+        env.iter()
+            .find(|(key, _)| key == "GBM_BACKENDS_PATH")
+            .map(|(_, value)| value.as_str()),
+        Some("/usr/lib/aarch64-linux-gnu/GL/default/lib/gbm")
     );
 }

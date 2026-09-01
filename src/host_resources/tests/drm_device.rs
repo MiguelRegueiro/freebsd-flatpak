@@ -1,4 +1,5 @@
 use super::*;
+use crate::architecture::FlatpakArchitecture;
 
 #[test]
 fn converts_linux_pci_slot_to_freebsd_locator() {
@@ -36,7 +37,14 @@ fn chooses_intel_vulkan_icd_from_pci_vendor() {
         driver: "i915".to_string(),
     };
 
-    assert_eq!(device.vulkan_icd(), Some("intel_icd.x86_64.json"));
+    assert_eq!(
+        device.vulkan_icd(FlatpakArchitecture::X86_64).as_deref(),
+        Some("intel_icd.x86_64.json")
+    );
+    assert_eq!(
+        device.vulkan_icd(FlatpakArchitecture::Aarch64).as_deref(),
+        Some("intel_icd.aarch64.json")
+    );
 }
 
 #[test]

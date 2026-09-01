@@ -154,6 +154,39 @@ fn adds_hardware_dependent_vaapi_when_intel_is_present() {
 }
 
 #[test]
+fn aarch64_reconciliation_creates_architecture_correct_fallback_mountpoints() {
+    let (paths, mut app, root) = fixture();
+    app.arch = "aarch64".to_string();
+    app.app_ref = "app/org.example.App/aarch64/stable".to_string();
+    app.runtime_ref = "org.example.Platform/aarch64/24.08".to_string();
+    let runtime_dir = crate::installation::absolute(&paths, &app.runtime_dir);
+    fs::write(
+        runtime_dir.join("metadata"),
+        "[Runtime]\nname=org.example.Platform\n\
+         [Extension org.freedesktop.Platform.GL]\nversion=24.08\n\
+         [Extension org.freedesktop.Platform.VAAPI.Intel]\nversion=24.08\n",
+    )
+    .unwrap();
+
+    let required = required_for_app(&paths, &app, true, None).unwrap();
+
+    assert!(required.iter().any(|extension| {
+        extension.ref_name == "runtime/org.freedesktop.Platform.GL.default/aarch64/24.08"
+    }));
+    assert!(required.iter().any(|extension| {
+        extension.ref_name == "runtime/org.freedesktop.Platform.VAAPI.Intel/aarch64/24.08"
+    }));
+    assert!(runtime_dir
+        .join("files/lib/aarch64-linux-gnu/GL/default")
+        .is_dir());
+    assert!(runtime_dir
+        .join("files/lib/aarch64-linux-gnu/dri/intel-vaapi-driver")
+        .is_dir());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn discovers_extensions_from_the_activated_runtime_deployment() {
     let (paths, app, root) = fixture();
     let current_runtime = paths.runtimes().join("runtime-current");

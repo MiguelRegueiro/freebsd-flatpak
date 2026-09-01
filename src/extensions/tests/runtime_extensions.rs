@@ -27,6 +27,16 @@ fn fixture() -> (Installation, PathBuf, PathBuf) {
 }
 
 fn install_extension(paths: &Installation, name: &str, branch: &str, origin: &str) -> PathBuf {
+    install_extension_for_arch(paths, name, "x86_64", branch, origin)
+}
+
+fn install_extension_for_arch(
+    paths: &Installation,
+    name: &str,
+    arch: &str,
+    branch: &str,
+    origin: &str,
+) -> PathBuf {
     let checkout = paths.extensions().join(format!("{name}-{branch}"));
     fs::create_dir_all(checkout.join("files")).unwrap();
     fs::write(
@@ -36,10 +46,60 @@ fn install_extension(paths: &Installation, name: &str, branch: &str, origin: &st
     .unwrap();
     fs::write(
         checkout.join(".ostree-commit"),
-        format!("runtime/{name}/x86_64/{branch}\ncommit-{branch}\n42\n{origin}\n"),
+        format!("runtime/{name}/{arch}/{branch}\ncommit-{branch}\n42\n{origin}\n"),
     )
     .unwrap();
     checkout
+}
+
+#[test]
+fn aarch64_uses_architecture_correct_fallback_mountpoints() {
+    let (paths, runtime_dir, root) = fixture();
+    fs::create_dir_all(runtime_dir.join("files/lib/aarch64-linux-gnu/GL/default")).unwrap();
+    fs::create_dir_all(runtime_dir.join("files/lib/aarch64-linux-gnu/dri/intel-vaapi-driver"))
+        .unwrap();
+    fs::write(
+        runtime_dir.join("metadata"),
+        "[Runtime]\nname=org.example.Platform\n\
+         [Extension org.freedesktop.Platform.GL]\nversion=25.08\n\
+         [Extension org.freedesktop.Platform.VAAPI.Intel]\nversion=25.08\n",
+    )
+    .unwrap();
+    install_extension_for_arch(
+        &paths,
+        "org.freedesktop.Platform.GL.default",
+        "aarch64",
+        "25.08",
+        "runtime-origin",
+    );
+    install_extension_for_arch(
+        &paths,
+        "org.freedesktop.Platform.VAAPI.Intel",
+        "aarch64",
+        "25.08",
+        "runtime-origin",
+    );
+
+    let gl =
+        activate_default_gl_extension(&paths, "org.example.Platform/aarch64/25.08", &runtime_dir)
+            .unwrap()
+            .unwrap();
+    let vaapi =
+        activate_intel_vaapi_extension(&paths, "org.example.Platform/aarch64/25.08", &runtime_dir)
+            .unwrap()
+            .unwrap();
+
+    assert_eq!(
+        gl.runtime_mount_relative,
+        Path::new("lib/aarch64-linux-gnu/GL/default")
+    );
+    assert_eq!(
+        vaapi.runtime_mount_relative,
+        Path::new("lib/aarch64-linux-gnu/dri/intel-vaapi-driver")
+    );
+    assert!(gl.ref_name.contains("/aarch64/"));
+    assert!(vaapi.ref_name.contains("/aarch64/"));
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

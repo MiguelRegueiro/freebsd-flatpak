@@ -71,7 +71,8 @@ fn launch_data_dirs_include_projected_host_icon_themes() {
         1001,
         "user",
         PathBuf::from("/host/data").as_path(),
-    );
+    )
+    .unwrap();
 
     assert_eq!(
         env.iter()
@@ -84,6 +85,40 @@ fn launch_data_dirs_include_projected_host_icon_themes() {
             .find(|(key, _)| key == "HOST_XDG_DATA_HOME")
             .map(|(_, value)| value.as_str()),
         Some("/host/data")
+    );
+}
+
+#[test]
+fn aarch64_launch_paths_use_the_linux_multiarch_libdir() {
+    let mut app = app_with_metadata("[Application]\nname=org.example.App\n");
+    app.runtime_ref = "org.freedesktop.Platform/aarch64/25.08".to_string();
+    let desktop = DesktopSession {
+        xdg_runtime_dir: PathBuf::from("/run/host-user"),
+        wayland_display: "wayland-0".into(),
+        display: None,
+        dbus_session_bus_address: None,
+    };
+
+    let env = launch_env(
+        &app,
+        &desktop,
+        1001,
+        "user",
+        PathBuf::from("/host/data").as_path(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        env.iter()
+            .find(|(key, _)| key == "GI_TYPELIB_PATH")
+            .map(|(_, value)| value.as_str()),
+        Some(
+            "/app/lib/girepository-1.0:/usr/lib/aarch64-linux-gnu/girepository-1.0:/usr/lib/girepository-1.0"
+        )
+    );
+    assert_eq!(
+        runtime_library_paths(&app.runtime_ref).unwrap(),
+        vec!["/usr/lib/aarch64-linux-gnu", "/usr/lib", "/usr/lib64"]
     );
 }
 
@@ -103,7 +138,8 @@ fn zypak_uses_secure_mimic_strategy() {
         1001,
         "user",
         PathBuf::from("/host/data").as_path(),
-    );
+    )
+    .unwrap();
 
     assert_eq!(
         env.iter()

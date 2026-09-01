@@ -171,7 +171,7 @@ impl ChrootInstance {
         let launch_configuration = diagnostics.timer(Detail::Detailed);
         install_signal_handlers();
         let user = host_user(self.uid);
-        let mut env = launch_env(app, desktop, self.uid, &user, self.paths.data_home());
+        let mut env = launch_env(app, desktop, self.uid, &user, self.paths.data_home())?;
         env.retain(|(key, _)| key != "HOME");
         env.push((
             "HOME".to_string(),
@@ -234,7 +234,11 @@ impl ChrootInstance {
             "LD_LIBRARY_PATH",
             app_extension_ld_paths(&self.app_extensions),
         );
-        append_env_paths(&mut env, "LD_LIBRARY_PATH", runtime_library_paths());
+        append_env_paths(
+            &mut env,
+            "LD_LIBRARY_PATH",
+            runtime_library_paths(&app.runtime_ref)?,
+        );
         merge_env(&mut env, self.host_video.env());
         ensure_metadata_runtime_dirs(&env, &desktop.xdg_runtime_dir, self.uid, &app.app_id)?;
         let execution = Arc::new(SandboxExecutionContext {

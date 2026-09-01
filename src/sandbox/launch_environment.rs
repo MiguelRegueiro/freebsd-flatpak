@@ -1,4 +1,5 @@
 use super::launch_application::FlatpakApp;
+use crate::architecture::FlatpakArchitecture;
 use crate::desktop_integration::DesktopSession;
 use crate::flatpak_metadata::{section_entries, value};
 use crate::installation as runtime;
@@ -12,7 +13,9 @@ pub(super) fn launch_env(
     uid: u32,
     user: &str,
     host_data_home: &Path,
-) -> Vec<(String, String)> {
+) -> Result<Vec<(String, String)>> {
+    let architecture = FlatpakArchitecture::from_runtime_ref(&app.runtime_ref)?;
+    let runtime_typelib_dir = format!("/usr/{}/girepository-1.0", architecture.runtime_libdir());
     let mut env = vec![
         ("HOME".to_string(), "/var/data".to_string()),
         ("USER".to_string(), user.to_string()),
@@ -27,7 +30,10 @@ pub(super) fn launch_env(
             "false".to_string(),
         ),
         ("XDG_RUNTIME_DIR".to_string(), format!("/run/user/{uid}")),
-        ("WAYLAND_DISPLAY".to_string(), desktop.wayland_display.clone()),
+        (
+            "WAYLAND_DISPLAY".to_string(),
+            desktop.wayland_display.clone(),
+        ),
         ("XDG_SESSION_TYPE".to_string(), "wayland".to_string()),
         ("LANG".to_string(), "C.UTF-8".to_string()),
         ("LC_ALL".to_string(), "C.UTF-8".to_string()),
@@ -40,15 +46,17 @@ pub(super) fn launch_env(
         ),
         ("XDG_CONFIG_HOME".to_string(), "/var/config".to_string()),
         ("XDG_CACHE_HOME".to_string(), "/var/cache".to_string()),
-        ("XDG_CONFIG_DIRS".to_string(), "/app/etc/xdg:/etc/xdg".to_string()),
+        (
+            "XDG_CONFIG_DIRS".to_string(),
+            "/app/etc/xdg:/etc/xdg".to_string(),
+        ),
         (
             "XDG_DATA_DIRS".to_string(),
             "/app/share:/usr/share:/usr/share/runtime/share:/run/host/share".to_string(),
         ),
         (
             "GI_TYPELIB_PATH".to_string(),
-            "/app/lib/girepository-1.0:/usr/lib/x86_64-linux-gnu/girepository-1.0:/usr/lib/girepository-1.0"
-                .to_string(),
+            format!("/app/lib/girepository-1.0:{runtime_typelib_dir}:/usr/lib/girepository-1.0"),
         ),
         (
             "LD_LIBRARY_PATH".to_string(),
@@ -68,7 +76,7 @@ pub(super) fn launch_env(
         env.push(("DBUS_SESSION_BUS_ADDRESS".to_string(), address));
     }
 
-    env
+    Ok(env)
 }
 
 fn push_host_env(env: &mut Vec<(String, String)>, key: &str) {
@@ -237,12 +245,13 @@ pub(super) fn apply_graphics_preloads(
     prepend_env_paths(env, "ZYPAK_LD_PRELOAD", zypak_ld_preload_paths);
 }
 
-pub(super) fn runtime_library_paths() -> Vec<String> {
-    vec![
-        "/usr/lib/x86_64-linux-gnu".to_string(),
+pub(super) fn runtime_library_paths(runtime_ref: &str) -> Result<Vec<String>> {
+    let architecture = FlatpakArchitecture::from_runtime_ref(runtime_ref)?;
+    Ok(vec![
+        format!("/usr/{}", architecture.runtime_libdir()),
         "/usr/lib".to_string(),
         "/usr/lib64".to_string(),
-    ]
+    ])
 }
 
 pub(super) fn app_extension_ld_paths(extensions: &[runtime::AppExtension]) -> Vec<String> {

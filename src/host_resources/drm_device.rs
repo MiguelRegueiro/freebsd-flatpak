@@ -1,4 +1,5 @@
 use super::linux_drm_sysfs::linux_drm_dev_t;
+use crate::architecture::FlatpakArchitecture;
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -82,13 +83,14 @@ impl DrmDevice {
         })
     }
 
-    pub(super) fn vulkan_icd(&self) -> Option<&'static str> {
-        match trim_hex(&self.vendor) {
-            "8086" => Some("intel_icd.x86_64.json"),
-            "1002" | "1022" => Some("radeon_icd.x86_64.json"),
-            "1af4" => Some("virtio_icd.x86_64.json"),
-            _ => None,
-        }
+    pub(super) fn vulkan_icd(&self, architecture: FlatpakArchitecture) -> Option<String> {
+        let driver = match trim_hex(&self.vendor) {
+            "8086" => "intel",
+            "1002" | "1022" => "radeon",
+            "1af4" => "virtio",
+            _ => return None,
+        };
+        Some(architecture.vulkan_icd_filename(driver))
     }
 
     pub(super) fn dev_t_map(&self) -> String {

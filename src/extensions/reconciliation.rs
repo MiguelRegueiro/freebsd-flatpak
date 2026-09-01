@@ -3,6 +3,7 @@ use super::runtime_extensions::{
     extension_branch, first_extension_version, is_supported_runtime_codec_extension,
     safe_dir_fragment, split_runtime_ref, valid_extension_suffix, valid_relative_extension_path,
 };
+use crate::architecture::FlatpakArchitecture;
 use crate::flatpak_metadata::{has_section, sections_with_prefix, value};
 use crate::installation::installation_paths::Installation;
 use crate::installation::AppRecord;
@@ -201,6 +202,7 @@ fn required_for_app(
     let runtime_metadata = fs::read_to_string(&runtime_metadata_path)
         .with_context(|| format!("read runtime metadata {}", runtime_metadata_path.display()))?;
     let runtime = split_runtime_ref(&app.runtime_ref)?;
+    let architecture = FlatpakArchitecture::from_flatpak_name(&runtime.arch)?;
     let mut requirements = Vec::new();
 
     let gtk_section = "Extension org.gtk.Gtk3theme";
@@ -220,13 +222,10 @@ fn required_for_app(
         let branch = value(&runtime_metadata, &gl_section, "versions")
             .and_then(|versions| first_extension_version(&versions))
             .unwrap_or_else(|| runtime.branch.clone());
-        ensure_mountpoint(
-            &runtime_dir,
-            value(&runtime_metadata, &gl_section, "directory")
-                .as_deref()
-                .unwrap_or("lib/x86_64-linux-gnu/GL"),
-            Some("default"),
-        )?;
+        let default_directory = architecture.default_gl_extension_dir();
+        let directory =
+            value(&runtime_metadata, &gl_section, "directory").unwrap_or(default_directory);
+        ensure_mountpoint(&runtime_dir, &directory, Some("default"))?;
         requirements.push(requirement(
             paths,
             &format!("{GL_EXTENSION}.default"),
@@ -240,13 +239,10 @@ fn required_for_app(
         let section = format!("Extension {INTEL_VAAPI_EXTENSION}");
         if has_section(&runtime_metadata, &section) {
             let branch = extension_branch(&runtime_metadata, &section, &runtime.branch);
-            ensure_mountpoint(
-                &runtime_dir,
-                value(&runtime_metadata, &section, "directory")
-                    .as_deref()
-                    .unwrap_or("lib/x86_64-linux-gnu/dri/intel-vaapi-driver"),
-                None,
-            )?;
+            let default_directory = architecture.default_intel_vaapi_extension_dir();
+            let directory =
+                value(&runtime_metadata, &section, "directory").unwrap_or(default_directory);
+            ensure_mountpoint(&runtime_dir, &directory, None)?;
             requirements.push(requirement(
                 paths,
                 INTEL_VAAPI_EXTENSION,

@@ -1,6 +1,7 @@
 use super::{
     RuntimeCodecExtension, RuntimeGlExtension, RuntimeGtkThemeExtension, RuntimeVaapiExtension,
 };
+use crate::architecture::FlatpakArchitecture;
 use crate::flatpak_metadata::{has_section, sections_with_prefix, value};
 use crate::installation::installation_paths::Installation;
 use anyhow::{bail, Context, Result};
@@ -82,8 +83,10 @@ pub fn activate_default_gl_extension(
     let extension_branch = value(&metadata, section, "versions")
         .and_then(|versions| first_extension_version(&versions))
         .unwrap_or_else(|| parts.branch.clone());
-    let directory = value(&metadata, section, "directory")
-        .unwrap_or_else(|| "lib/x86_64-linux-gnu/GL".to_string());
+    let directory = match value(&metadata, section, "directory") {
+        Some(directory) => directory,
+        None => FlatpakArchitecture::from_flatpak_name(&parts.arch)?.default_gl_extension_dir(),
+    };
     let runtime_mount_relative = PathBuf::from(directory).join("default");
     let runtime_mountpoint = runtime_dir.join("files").join(&runtime_mount_relative);
     validate_mountpoint("GL", &runtime_mountpoint)?;
@@ -125,8 +128,12 @@ pub fn activate_intel_vaapi_extension(
                 .and_then(|versions| first_extension_version(&versions))
         })
         .unwrap_or_else(|| parts.branch.clone());
-    let directory = value(&metadata, section, "directory")
-        .unwrap_or_else(|| "lib/x86_64-linux-gnu/dri/intel-vaapi-driver".to_string());
+    let directory = match value(&metadata, section, "directory") {
+        Some(directory) => directory,
+        None => {
+            FlatpakArchitecture::from_flatpak_name(&parts.arch)?.default_intel_vaapi_extension_dir()
+        }
+    };
     let runtime_mount_relative = PathBuf::from(directory);
     let runtime_mountpoint = runtime_dir.join("files").join(&runtime_mount_relative);
     validate_mountpoint("VAAPI", &runtime_mountpoint)?;

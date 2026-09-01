@@ -62,14 +62,25 @@ impl HostVideo {
     }
 
     pub fn env(&self) -> Vec<(String, String)> {
-        if self.vaapi.is_none() {
+        let Some(vaapi) = &self.vaapi else {
             return Vec::new();
-        }
+        };
+
+        let extension_dir = PathBuf::from("/usr").join(&vaapi.runtime_mount_relative);
+        let dri_dir = extension_dir
+            .parent()
+            .unwrap_or(Path::new("/usr/lib/dri"))
+            .to_path_buf();
+        let mut driver_paths = vec![extension_dir, dri_dir, PathBuf::from("/usr/lib/dri")];
+        driver_paths.dedup();
 
         let mut env = vec![(
             "LIBVA_DRIVERS_PATH".to_string(),
-            "/usr/lib/x86_64-linux-gnu/dri/intel-vaapi-driver:/usr/lib/x86_64-linux-gnu/dri:/usr/lib/dri"
-                .to_string(),
+            driver_paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(":"),
         )];
         if let Ok(driver) = std::env::var("LIBVA_DRIVER_NAME") {
             if !driver.is_empty() {

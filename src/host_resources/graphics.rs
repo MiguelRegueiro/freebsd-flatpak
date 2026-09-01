@@ -3,6 +3,7 @@ use super::graphics_shims::{
     ChromiumZygoteDrmPreload, DrmSyncobjErrnoShim, Gtk3WaylandGeometryShim, WaylandDrmDevtShim,
 };
 use super::linux_drm_sysfs::{linux_drm_dev_t, DrmSysfsBridge};
+use crate::architecture::FlatpakArchitecture;
 use crate::diagnostics::{Detail, Diagnostics};
 use crate::installation::installation_paths::Installation;
 use crate::installation::{self as runtime, FlatpakApp, RuntimeGlExtension};
@@ -19,6 +20,7 @@ pub(super) const WAYLAND_DRM_DEVT_SHIM_LIB: &str = "libwayland-drm-devt-shim.so"
 
 #[derive(Debug, Clone)]
 pub struct HostGraphics {
+    architecture: FlatpakArchitecture,
     gl: Option<RuntimeGlExtension>,
     drm: Option<DrmSysfsBridge>,
     drm_syncobj_errno_shim: Option<DrmSyncobjErrnoShim>,
@@ -41,6 +43,7 @@ impl HostGraphics {
         instance_id: &str,
         diagnostics: &Diagnostics,
     ) -> Result<Self> {
+        let architecture = FlatpakArchitecture::from_runtime_ref(&app.runtime_ref)?;
         let mut warnings = Vec::new();
         let gl_extension = diagnostics.timer(Detail::Detailed);
         let gl = runtime::activate_default_gl_extension(paths, &app.runtime_ref, &app.runtime_dir)?;
@@ -121,6 +124,7 @@ impl HostGraphics {
 
         chromium.finish("graphics", "prepare Chromium preload");
         Ok(Self {
+            architecture,
             gl,
             drm,
             drm_syncobj_errno_shim,
@@ -177,7 +181,13 @@ impl HostGraphics {
     pub fn ld_library_paths(&self) -> Vec<String> {
         self.gl
             .as_ref()
-            .map(|_| "/usr/lib/x86_64-linux-gnu/GL/default/lib".to_string())
+            .map(|gl| {
+                PathBuf::from("/usr")
+                    .join(&gl.runtime_mount_relative)
+                    .join("lib")
+                    .display()
+                    .to_string()
+            })
             .into_iter()
             .collect()
     }
@@ -187,7 +197,16 @@ impl HostGraphics {
             return Vec::new();
         }
 
-        let gl_root = "/usr/lib/x86_64-linux-gnu/GL/default";
+        let gl_root = PathBuf::from("/usr")
+            .join(
+                &self
+                    .gl
+                    .as_ref()
+                    .expect("checked GL extension")
+                    .runtime_mount_relative,
+            )
+            .display()
+            .to_string();
         let mut env = vec![
             (
                 "LIBGL_DRIVERS_PATH".to_string(),
@@ -209,7 +228,11 @@ impl HostGraphics {
             ),
         ];
 
-        if let Some(icd) = self.drm.as_ref().and_then(|drm| drm.device.vulkan_icd()) {
+        if let Some(icd) = self
+            .drm
+            .as_ref()
+            .and_then(|drm| drm.device.vulkan_icd(self.architecture))
+        {
             let icd_path = format!("{gl_root}/lib/vulkan/icd.d/{icd}");
             env.push(("VK_DRIVER_FILES".to_string(), icd_path.clone()));
             env.push(("VK_ICD_FILENAMES".to_string(), icd_path));
@@ -293,7 +316,7 @@ impl HostGraphics {
                 "DRM PCI: {} vendor={} device={} driver={}",
                 drm.device.pci_slot, drm.device.vendor, drm.device.device, drm.device.driver
             ));
-            if let Some(icd) = drm.device.vulkan_icd() {
+            if let Some(icd) = drm.device.vulkan_icd(self.architecture) {
                 lines.push(format!("Vulkan ICD: {icd}"));
             }
             for mount in &drm.mounts {

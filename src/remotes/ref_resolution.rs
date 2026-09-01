@@ -4,6 +4,7 @@ use super::ostree_summary::parse_summary_refs;
 use super::{
     trace_resolution, Remote, RemoteApp, RemoteMetadata, RemoteRef, RemoteRefInfo, SearchResult,
 };
+use crate::architecture::FlatpakArchitecture;
 use crate::installation::installation_paths::Installation;
 use crate::installation::metadata_value;
 use crate::ostree::{CommitInfo, Storage};
@@ -11,7 +12,6 @@ use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Instant;
 
 impl RemoteMetadata {
@@ -214,9 +214,10 @@ impl RemoteMetadata {
 
 pub fn inspect_refs(paths: &Installation, refs: &[String]) -> Result<()> {
     let refs: Vec<String> = if refs.is_empty() {
+        let arch = host_flatpak_arch()?;
         vec![
-            "app/org.gnome.Calculator/x86_64/stable".to_string(),
-            "runtime/org.gnome.Platform/x86_64/50".to_string(),
+            format!("app/org.gnome.Calculator/{arch}/stable"),
+            format!("runtime/org.gnome.Platform/{arch}/50"),
         ]
     } else {
         refs.to_vec()
@@ -644,19 +645,7 @@ fn split_flatpak_ref(ref_name: &str) -> Result<FlatpakRefParts> {
 }
 
 pub(super) fn host_flatpak_arch() -> Result<String> {
-    let output = Command::new("uname")
-        .arg("-m")
-        .output()
-        .context("determine host architecture")?;
-    if !output.status.success() {
-        bail!("uname -m failed with status {}", output.status);
-    }
-    let machine = String::from_utf8(output.stdout)?.trim().to_string();
-    match machine.as_str() {
-        "amd64" | "x86_64" => Ok("x86_64".to_string()),
-        "aarch64" | "arm64" => Ok("aarch64".to_string()),
-        _ => bail!("unsupported host architecture for Flatpak: {machine}"),
-    }
+    Ok(FlatpakArchitecture::host()?.flatpak_name().to_string())
 }
 
 pub fn checkout_ref(paths: &Installation, ref_name: &str, dest: PathBuf) -> Result<()> {
