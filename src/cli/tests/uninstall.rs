@@ -122,6 +122,7 @@ fn uninstall_unused_preserves_installed_and_pinned_dependencies() {
             origin: "flathub".to_string(),
             runtime_ref: runtime_two.to_string(),
             runtime_commit: "runtime-two".to_string(),
+            explicitly_installed: false,
             installed_size: 0,
             runtime_dir: pinned.runtime_dir.clone(),
         },
@@ -154,6 +155,7 @@ fn uninstall_unused_preserves_installed_and_pinned_dependencies() {
             origin: "flathub".to_string(),
             runtime_ref: runtime_three.to_string(),
             runtime_commit: "runtime-three".to_string(),
+            explicitly_installed: false,
             installed_size: 0,
             runtime_dir: paths.relative_data_path(&runtime_three_dir).unwrap(),
         },
@@ -189,8 +191,12 @@ fn uninstall_unused_preserves_installed_and_pinned_dependencies() {
     assert!(paths.extensions().join("unused").exists());
 
     let removed = apply_unused_deployment_plan(&paths, plan).unwrap();
-    assert!(removed.contains(&format!("runtime/{runtime_three}")));
-    assert!(removed.contains(&"runtime/org.example.Unused/x86_64/one".to_string()));
+    let removed_refs = removed
+        .iter()
+        .map(|item| item.ref_name.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(removed_refs.contains(format!("runtime/{runtime_three}").as_str()));
+    assert!(removed_refs.contains("runtime/org.example.Unused/x86_64/one"));
     assert!(runtime_one_dir.exists());
     assert!(runtime_two_dir.exists());
     assert!(!runtime_three_dir.exists());
@@ -352,4 +358,117 @@ fn unused_cleanup_discovers_orphan_runtime_without_inventory_record() {
     let removed = remove_unused_deployment_checkouts(&paths).unwrap();
     assert_eq!(removed, vec![format!("runtime/{runtime_ref}")]);
     assert!(!runtime_dir.exists());
+}
+
+#[test]
+fn explicitly_installed_runtime_is_not_unused_without_an_application() {
+    let root = test_dir("explicit-runtime-root");
+    let paths = Installation::for_test(&root);
+    state::ensure_layout(&paths).unwrap();
+    let runtime_ref = "org.example.Platform/x86_64/50";
+    let runtime_dir = paths
+        .runtimes()
+        .join("flathub/org.example.Platform-50/runtime-commit");
+    create_marked_checkout(
+        &runtime_dir,
+        &format!("runtime/{runtime_ref}"),
+        "runtime-commit",
+        "[Runtime]\nname=org.example.Platform\n",
+    );
+    state::write_runtime(
+        &paths,
+        &state::RuntimeRecord {
+            origin: "flathub".to_string(),
+            runtime_ref: runtime_ref.to_string(),
+            runtime_commit: "runtime-commit".to_string(),
+            explicitly_installed: true,
+            installed_size: 0,
+            runtime_dir: paths.relative_data_path(&runtime_dir).unwrap(),
+        },
+    )
+    .unwrap();
+
+    let plan = plan_unused_deployment_checkouts(&paths).unwrap();
+    assert!(!plan
+        .iter()
+        .any(|item| item.ref_name == format!("runtime/{runtime_ref}")));
+}
+
+#[test]
+fn required_runtime_uninstall_is_refused_for_all_confirmation_modes() {
+    let root = test_dir("required-runtime-refusal");
+    let paths = Installation::for_test(&root);
+    state::ensure_layout(&paths).unwrap();
+    let app = app_record(
+        "org.example.App",
+        "app/org.example.App/x86_64/stable",
+        "app-commit",
+    );
+    state::write_app(&paths, &app).unwrap();
+    let runtime_record = state::RuntimeRecord {
+        origin: "flathub".to_string(),
+        runtime_ref: app.runtime_ref.clone(),
+        runtime_commit: app.runtime_commit.clone(),
+        explicitly_installed: false,
+        installed_size: 42,
+        runtime_dir: app.runtime_dir.clone(),
+    };
+    state::write_runtime(&paths, &runtime_record).unwrap();
+
+    let modes = [
+        TransactionOptions::default(),
+        TransactionOptions {
+            assumeyes: true,
+            ..TransactionOptions::default()
+        },
+        TransactionOptions {
+            noninteractive: true,
+            ..TransactionOptions::default()
+        },
+    ];
+    for options in modes {
+        let error = uninstall_runtime(&paths, runtime_record.clone(), options).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("required by installed applications"));
+    }
+    assert!(state::get_runtime(&paths, &runtime_record.runtime_ref)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn installed_partial_runtime_refs_require_unambiguous_components() {
+    let root = test_dir("installed-runtime-partials");
+    let paths = Installation::for_test(&root);
+    state::ensure_layout(&paths).unwrap();
+    for branch in ["49", "50"] {
+        state::write_runtime(
+            &paths,
+            &state::RuntimeRecord {
+                origin: "flathub".to_string(),
+                runtime_ref: format!("org.example.Platform/x86_64/{branch}"),
+                runtime_commit: format!("commit-{branch}"),
+                explicitly_installed: true,
+                installed_size: 42,
+                runtime_dir: PathBuf::from(format!("runtimes/platform-{branch}")),
+            },
+        )
+        .unwrap();
+    }
+
+    let error = resolve_installed_target(&paths, "runtime/org.example.Platform", None).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("matches multiple installed refs"));
+    let selected = resolve_installed_target(
+        &paths,
+        "runtime/org.example.Platform//50",
+        Some(RefKind::Runtime),
+    )
+    .unwrap();
+    let InstalledTarget::Runtime(selected) = selected else {
+        panic!("expected a runtime");
+    };
+    assert_eq!(selected.runtime_ref, "org.example.Platform/x86_64/50");
 }

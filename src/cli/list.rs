@@ -83,6 +83,11 @@ fn installed_rows(paths: &Installation, options: &Options) -> Result<Vec<Install
         }
     }
     rows.sort_by(|left, right| left.ref_name.cmp(&right.ref_name));
+    rows.dedup_by(|left, right| {
+        left.ref_name == right.ref_name
+            && left.origin == right.origin
+            && left.active == right.active
+    });
     Ok(rows)
 }
 

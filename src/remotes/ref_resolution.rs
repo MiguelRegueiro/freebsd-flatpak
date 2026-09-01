@@ -2,9 +2,11 @@ use super::appstream_metadata::fetch_appstream_replacements;
 use super::metadata_cache::load_arch_summary;
 use super::ostree_summary::parse_summary_refs;
 use super::{
-    trace_resolution, Remote, RemoteApp, RemoteMetadata, RemoteRef, RemoteRefInfo, SearchResult,
+    trace_resolution, Remote, RemoteApp, RemoteMetadata, RemoteRef, RemoteRefInfo, RemoteRuntime,
+    ResolvedRemoteRef, SearchResult,
 };
 use crate::architecture::FlatpakArchitecture;
+use crate::flatpak_ref::{FlatpakRef, PartialRef, RefKind};
 use crate::installation::installation_paths::Installation;
 use crate::installation::metadata_value;
 use crate::ostree::{CommitInfo, Storage};
@@ -32,6 +34,49 @@ impl RemoteMetadata {
             summary_path: root.join("summary"),
             collection_id: None,
         }
+    }
+
+    pub fn resolve_runtime_commit(
+        &self,
+        paths: &Installation,
+        runtime_ref: &str,
+        requested_commit: &str,
+    ) -> Result<RemoteRuntime> {
+        let tip = self.resolve_exact_runtime(runtime_ref)?;
+        let history = self.history_for_ref(paths, runtime_ref, &tip.runtime_commit)?;
+        let commit = select_history_commit(&history, requested_commit)?;
+        remote_runtime_from_ref(
+            RemoteRef {
+                name: runtime_ref.to_string(),
+                checksum: commit.checksum.clone(),
+                metadata: commit.flatpak_metadata.clone(),
+                download_size: None,
+                installed_size: None,
+            },
+            &self.remote.name,
+        )
+    }
+
+    pub fn resolve_runtime(&self, requested: &str) -> Result<RemoteRuntime> {
+        let partial = PartialRef::parse(requested)?;
+        partial.effective_kind(Some(RefKind::Runtime))?;
+        let remote_ref = select_ref(&self.refs, &partial, RefKind::Runtime, &self.arch)?;
+        remote_runtime_from_ref(remote_ref, &self.remote.name)
+    }
+
+    pub fn resolve_exact_runtime(&self, runtime_ref: &str) -> Result<RemoteRuntime> {
+        let remote_ref = self
+            .refs
+            .iter()
+            .find(|item| item.name == runtime_ref)
+            .cloned()
+            .with_context(|| {
+                format!(
+                    "runtime ref is no longer present in {}: {runtime_ref}",
+                    self.remote.name
+                )
+            })?;
+        remote_runtime_from_ref(remote_ref, &self.remote.name)
     }
 
     pub fn resolve_exact_ref(&self, app_ref: &str) -> Result<RemoteApp> {
@@ -141,7 +186,7 @@ impl RemoteMetadata {
         requested_commit: &str,
     ) -> Result<(RemoteApp, CommitInfo)> {
         let tip = self.resolve_exact_ref(app_ref)?;
-        let history = self.history_for_remote(paths, &tip)?;
+        let history = self.history_for_ref(paths, app_ref, &tip.app_commit)?;
         let commit = select_history_commit(&history, requested_commit)?;
         let metadata = commit.flatpak_metadata.clone().with_context(|| {
             format!(
@@ -168,47 +213,40 @@ impl RemoteMetadata {
         paths: &Installation,
         remote: &RemoteApp,
     ) -> Result<Vec<CommitInfo>> {
+        self.history_for_ref(paths, &remote.app_ref, &remote.app_commit)
+    }
+
+    fn history_for_ref(
+        &self,
+        paths: &Installation,
+        ref_name: &str,
+        commit: &str,
+    ) -> Result<Vec<CommitInfo>> {
         let summary = fs::read(&self.summary_path)
             .with_context(|| format!("read {}", self.summary_path.display()))?;
         Storage::open(paths)?.commit_history(
             &self.remote.name,
             &summary,
-            &remote.app_ref,
-            &remote.app_commit,
+            ref_name,
+            commit,
             self.remote.gpg_verify,
         )
     }
 
-    fn resolve_app_ref(&self, app_id: &str, replacements: bool) -> Result<RemoteRef> {
-        if app_id.contains('/') {
-            let ref_name = if app_id.starts_with("app/") {
-                app_id.to_string()
-            } else if app_id.split('/').count() == 3 {
-                format!("app/{app_id}")
-            } else {
-                bail!("invalid application ref: {app_id}");
-            };
-            return self
-                .refs
-                .iter()
-                .find(|item| item.name == ref_name)
-                .cloned()
-                .with_context(|| {
-                    format!("ref is not present in {}: {ref_name}", self.remote.name)
-                });
-        }
-        let app_id = if replacements && !app_ref_exists(&self.refs, app_id, &self.arch) {
-            resolve_current_app_id(
+    fn resolve_app_ref(&self, requested: &str, replacements: bool) -> Result<RemoteRef> {
+        let mut partial = PartialRef::parse(requested)?;
+        partial.effective_kind(Some(RefKind::App))?;
+        let arch = partial.arch.as_deref().unwrap_or(&self.arch);
+        if replacements && !app_ref_exists(&self.refs, &partial.id, arch) {
+            partial.id = resolve_current_app_id(
                 &self.refs,
-                app_id,
-                &self.arch,
+                &partial.id,
+                arch,
                 &self.remote,
                 &self.remote_dir,
-            )?
-        } else {
-            app_id.to_string()
-        };
-        choose_app_ref(&self.refs, &app_id, &self.arch)
+            )?;
+        }
+        select_ref(&self.refs, &partial, RefKind::App, &self.arch)
     }
 }
 
@@ -244,6 +282,75 @@ pub fn inspect_refs(paths: &Installation, refs: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn resolve_remote_ref(
+    paths: &Installation,
+    remote_name: Option<&str>,
+    requested: &str,
+    kind: Option<RefKind>,
+) -> Result<ResolvedRemoteRef> {
+    let partial = PartialRef::parse(requested)?;
+    let requested_kind = partial.effective_kind(kind)?;
+
+    let candidates = candidate_remotes(paths, remote_name)?;
+    let mut failures = Vec::new();
+    for remote in candidates {
+        let metadata = match load_remote_metadata_for(paths, remote.clone()) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                failures.push(format!("{}: {error:#}", remote.name));
+                continue;
+            }
+        };
+        let resolved = match requested_kind {
+            Some(RefKind::App) => resolve_app_with_runtime_fallback(paths, &metadata, requested)
+                .map(ResolvedRemoteRef::App),
+            Some(RefKind::Runtime) => metadata
+                .resolve_runtime(requested)
+                .map(ResolvedRemoteRef::Runtime),
+            None => {
+                let app = resolve_app_with_runtime_fallback(paths, &metadata, requested);
+                let runtime = metadata.resolve_runtime(requested);
+                match (app, runtime) {
+                    (Ok(app), Err(_)) => Ok(ResolvedRemoteRef::App(app)),
+                    (Err(_), Ok(runtime)) => Ok(ResolvedRemoteRef::Runtime(runtime)),
+                    (Ok(_), Ok(_)) => bail!(
+                        "{requested} matches both an application and a runtime; use --app or --runtime"
+                    ),
+                    (Err(app_error), Err(runtime_error)) => bail!(
+                        "application: {app_error:#}; runtime: {runtime_error:#}"
+                    ),
+                }
+            }
+        };
+        match resolved {
+            Ok(resolved) => return Ok(resolved),
+            Err(error) => failures.push(format!("{}: {error:#}", remote.name)),
+        }
+    }
+    bail!(
+        "ref {requested} was not found in an enabled remote ({})",
+        failures.join("; ")
+    )
+}
+
+fn candidate_remotes(paths: &Installation, remote_name: Option<&str>) -> Result<Vec<Remote>> {
+    let candidates = if let Some(name) = remote_name {
+        let remote = super::get_remote(paths, name)?;
+        if !remote.enabled {
+            bail!("remote is disabled: {name}");
+        }
+        vec![remote]
+    } else {
+        let mut remotes = super::enabled_remotes(paths)?;
+        remotes.sort_by_key(|remote| (remote.name != super::DEFAULT_REMOTE, remote.name.clone()));
+        remotes
+    };
+    if candidates.is_empty() {
+        bail!("no enabled remotes are configured");
+    }
+    Ok(candidates)
 }
 
 pub fn resolve_remote_app(
@@ -308,6 +415,40 @@ fn resolve_ref_with_runtime_fallback(
     let runtime_ref = metadata_value(&app_metadata, "Application", "runtime")
         .context("remote app metadata has no Application/runtime")?;
     let runtime_full_ref = format!("runtime/{runtime_ref}");
+    if let Some(installed) = crate::installation::get_runtime(paths, &runtime_ref)? {
+        let runtime = if installed.origin == metadata.remote.name {
+            metadata
+                .refs
+                .iter()
+                .find(|item| item.name == runtime_full_ref)
+                .cloned()
+        } else {
+            load_remote_metadata(paths, &installed.origin)
+                .ok()
+                .and_then(|installed_metadata| {
+                    installed_metadata
+                        .refs
+                        .iter()
+                        .find(|item| item.name == runtime_full_ref)
+                        .cloned()
+                })
+        }
+        .unwrap_or(RemoteRef {
+            name: runtime_full_ref.clone(),
+            checksum: installed.runtime_commit,
+            metadata: None,
+            download_size: None,
+            installed_size: Some(installed.installed_size),
+        });
+        return remote_app_from_metadata(
+            app_ref,
+            app_metadata,
+            runtime,
+            &metadata.arch,
+            &metadata.remote.name,
+            &installed.origin,
+        );
+    }
     if let Some(runtime) = metadata
         .refs
         .iter()
@@ -585,41 +726,72 @@ fn app_ref_exists(refs: &[RemoteRef], app_id: &str, arch: &str) -> bool {
     })
 }
 
-fn choose_app_ref(refs: &[RemoteRef], app_id: &str, arch: &str) -> Result<RemoteRef> {
-    let mut candidates: Vec<(FlatpakRefParts, RemoteRef)> = refs
+fn select_ref(
+    refs: &[RemoteRef],
+    partial: &PartialRef,
+    kind: RefKind,
+    default_arch: &str,
+) -> Result<RemoteRef> {
+    let arch = partial.arch.as_deref().unwrap_or(default_arch);
+    let mut candidates = refs
         .iter()
-        .filter_map(|remote_ref| {
-            let parts = split_flatpak_ref(&remote_ref.name).ok()?;
-            if parts.kind == "app" && parts.name == app_id && parts.arch == arch {
-                Some((parts, remote_ref.clone()))
-            } else {
-                None
-            }
+        .filter_map(|candidate| {
+            let parsed = FlatpakRef::parse(&candidate.name).ok()?;
+            (parsed.kind == kind
+                && parsed.id == partial.id
+                && parsed.arch == arch
+                && partial
+                    .branch
+                    .as_deref()
+                    .is_none_or(|branch| parsed.branch == branch))
+            .then_some((parsed, candidate.clone()))
         })
-        .collect();
-    candidates.sort_by(|left, right| left.0.branch.cmp(&right.0.branch));
-
-    if let Some((_, remote_ref)) = candidates
-        .iter()
-        .find(|(parts, _)| parts.branch == "stable")
-    {
-        return Ok(remote_ref.clone());
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|candidate| candidate.0.full_ref());
+    if partial.branch.is_none() {
+        if let Some((_, candidate)) = candidates
+            .iter()
+            .find(|(parsed, _)| parsed.branch == "stable")
+        {
+            return Ok(candidate.clone());
+        }
     }
-
-    if candidates.len() == 1 {
-        return Ok(candidates[0].1.clone());
+    match candidates.len() {
+        0 => bail!(
+            "no remote {} ref matches {}/{}/{}",
+            kind.as_str(),
+            partial.id,
+            arch,
+            partial.branch.as_deref().unwrap_or("*")
+        ),
+        1 => Ok(candidates.remove(0).1),
+        _ => bail!(
+            "multiple remote refs match {}: {}",
+            partial.id,
+            candidates
+                .iter()
+                .map(|(parsed, _)| parsed.full_ref())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
+}
 
-    if candidates.is_empty() {
-        bail!("no remote ref found for app id {app_id} on architecture {arch}");
+fn remote_runtime_from_ref(remote_ref: RemoteRef, origin: &str) -> Result<RemoteRuntime> {
+    let parsed = FlatpakRef::parse(&remote_ref.name)?;
+    if parsed.kind != RefKind::Runtime {
+        bail!("{} is not a runtime ref", remote_ref.name);
     }
-
-    let branches = candidates
-        .iter()
-        .map(|(parts, _)| parts.branch.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    bail!("multiple remote branches found for {app_id} on {arch}, and none is stable: {branches}");
+    debug_assert_eq!(parsed.full_ref(), remote_ref.name);
+    let runtime_ref = parsed.partial_ref();
+    Ok(RemoteRuntime {
+        origin: origin.to_string(),
+        runtime_id: parsed.id,
+        runtime_ref,
+        runtime_commit: remote_ref.checksum,
+        arch: parsed.arch,
+        branch: parsed.branch,
+    })
 }
 
 #[derive(Debug, Clone)]

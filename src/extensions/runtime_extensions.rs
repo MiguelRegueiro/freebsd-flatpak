@@ -293,9 +293,9 @@ fn validate_mountpoint(kind: &str, mountpoint: &Path) -> Result<()> {
 pub fn runtime_checkout_dir(runtime_ref: &str) -> String {
     let mut parts = runtime_ref.split('/');
     let name = parts.next().unwrap_or(runtime_ref);
-    let _arch = parts.next();
+    let arch = parts.next().unwrap_or("unknown");
     let branch = parts.next().unwrap_or("stable");
-    format!("{name}-{}", branch.replace('/', "_"))
+    format!("{name}-{arch}-{}", branch.replace('/', "_"))
 }
 
 pub(super) fn parse_runtime_ref(ref_name: &str) -> Option<RuntimeRefParts> {

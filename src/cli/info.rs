@@ -1,4 +1,7 @@
-use crate::installation::{self as state, installation_paths::Installation};
+use crate::{
+    flatpak_ref::{FlatpakRef, PartialRef},
+    installation::{self as state, installation_paths::Installation},
+};
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 
@@ -68,9 +71,10 @@ fn resolve_installed(
     name: &str,
     branch: Option<&str>,
 ) -> Result<InstalledInfo> {
+    let partial = PartialRef::parse(name)?.with_default_branch(branch)?;
     let mut matches = Vec::new();
     for app in state::list_apps(paths)? {
-        if matches_ref(name, &app.app_id, &app.app_ref, &app.branch, branch) {
+        if partial.matches(&FlatpakRef::parse(&app.app_ref)?) {
             matches.push(InstalledInfo {
                 id: app.app_id,
                 ref_name: app.app_ref,
@@ -87,7 +91,7 @@ fn resolve_installed(
     for runtime in state::list_runtimes(paths)? {
         let (id, arch, ref_branch) = split_runtime_ref(&runtime.runtime_ref)?;
         let full_ref = format!("runtime/{}", runtime.runtime_ref);
-        if matches_ref(name, &id, &full_ref, &ref_branch, branch) {
+        if partial.matches(&FlatpakRef::parse(&full_ref)?) {
             matches.push(InstalledInfo {
                 id,
                 ref_name: full_ref,
@@ -102,12 +106,12 @@ fn resolve_installed(
         }
     }
     for extension in state::list_extensions(paths)? {
-        let partial = extension
+        let runtime_ref = extension
             .ref_name
             .strip_prefix("runtime/")
             .unwrap_or(&extension.ref_name);
-        let (id, arch, ref_branch) = split_runtime_ref(partial)?;
-        if matches_ref(name, &id, &extension.ref_name, &ref_branch, branch) {
+        let (id, arch, ref_branch) = split_runtime_ref(runtime_ref)?;
+        if partial.matches(&FlatpakRef::parse(&extension.ref_name)?) {
             matches.push(InstalledInfo {
                 id,
                 ref_name: extension.ref_name,
@@ -126,21 +130,6 @@ fn resolve_installed(
         1 => Ok(matches.remove(0)),
         _ => bail!("{name} matches multiple installed refs; specify a full ref or branch"),
     }
-}
-
-fn matches_ref(
-    name: &str,
-    id: &str,
-    full_ref: &str,
-    ref_branch: &str,
-    branch: Option<&str>,
-) -> bool {
-    let partial_ref = full_ref
-        .strip_prefix("app/")
-        .or_else(|| full_ref.strip_prefix("runtime/"))
-        .unwrap_or(full_ref);
-    (name == id || name == full_ref || name == partial_ref)
-        && branch.is_none_or(|branch| branch == ref_branch)
 }
 
 fn split_runtime_ref(value: &str) -> Result<(String, String, String)> {

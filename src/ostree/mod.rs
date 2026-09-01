@@ -3,7 +3,7 @@ mod commit_history;
 mod ostree_repository;
 
 pub(crate) use ostree_repository::{
-    prune_repo, recover_storage, remove_repo_refs, repair_repo, Storage,
+    prune_repo, recover_storage, remove_remote_refs, repair_repo, Storage,
 };
 
 use std::path::Path;

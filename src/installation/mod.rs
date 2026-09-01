@@ -19,7 +19,7 @@ pub(crate) use crate::extensions::{
     RuntimeVaapiExtension,
 };
 pub(crate) use crate::flatpak_metadata::value as metadata_value;
-pub(crate) use crate::ostree::{prune_repo, recover_storage, remove_repo_refs, repair_repo};
+pub(crate) use crate::ostree::{prune_repo, recover_storage, remove_remote_refs, repair_repo};
 pub(crate) use crate::sandbox::{resolve_app, FlatpakApp, ResolveAppOptions};
 pub(crate) use application_installation::*;
 pub(crate) use application_records::*;
@@ -57,6 +57,7 @@ pub(crate) struct RuntimeRecord {
     pub runtime_ref: String,
     pub runtime_commit: String,
     pub installed_size: u64,
+    pub explicitly_installed: bool,
     pub runtime_dir: PathBuf,
 }
 

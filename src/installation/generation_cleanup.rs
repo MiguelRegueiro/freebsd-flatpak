@@ -1,7 +1,7 @@
 use super::application_records::list_apps;
 use super::installation_paths::Installation;
 use super::run_records::read_run_records;
-use super::runtime_records::list_runtimes;
+use super::runtime_records::{list_runtime_deployments, list_runtimes};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -32,7 +32,14 @@ pub fn cleanup_retired_deployments(paths: &Installation) -> Result<Vec<PathBuf>>
     }
 
     let mut removed = Vec::new();
-    for root in [paths.apps(), paths.runtimes()] {
+    for runtime in list_runtime_deployments(paths)? {
+        let path = absolute(paths, &runtime.runtime_dir);
+        if !protected.contains(&path) {
+            safe_remove_dir(paths, &path)?;
+            removed.push(path);
+        }
+    }
+    for root in [paths.apps()] {
         if !root.is_dir() {
             continue;
         }
@@ -135,10 +142,6 @@ pub(super) fn deployment_data(path: &Path) -> Result<Option<DeploymentData>> {
         installed_size,
         origin,
     }))
-}
-
-pub fn checkout_ref(path: &Path) -> Result<Option<String>> {
-    Ok(deployment_marker(path)?.map(|(ref_name, _)| ref_name))
 }
 
 pub fn absolute(paths: &Installation, path: &Path) -> PathBuf {

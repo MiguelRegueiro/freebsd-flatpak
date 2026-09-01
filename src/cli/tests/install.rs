@@ -20,5 +20,21 @@ fn named_remote_and_full_ref_parse() {
     ])
     .unwrap();
     assert_eq!(install.remote.as_deref(), Some("flathub"));
-    assert_eq!(install.app_id, "app/org.example.App/x86_64/stable");
+    assert_eq!(install.ref_name, "app/org.example.App/x86_64/stable");
+}
+
+#[test]
+fn kind_filters_parse_and_conflict() {
+    let runtime = parse_install_args(vec![
+        "--runtime".to_string(),
+        "org.example.Platform/x86_64/50".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(runtime.kind, Some(RefKind::Runtime));
+    assert!(parse_install_args(vec![
+        "--app".to_string(),
+        "--runtime".to_string(),
+        "org.example.Ref".to_string(),
+    ])
+    .is_err());
 }

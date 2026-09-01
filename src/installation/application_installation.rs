@@ -1,7 +1,7 @@
 use super::installation_paths::Installation;
 use crate::extensions::runtime_checkout_dir;
-use crate::ostree::{Deployment, RemoteSource, Storage};
-use crate::remotes::{load_arch_summary, RemoteApp};
+use crate::ostree::{remove_remote_refs, Deployment, RemoteSource, Storage};
+use crate::remotes::{load_arch_summary, RemoteApp, RemoteRuntime};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -51,8 +51,7 @@ fn checkout_remote_app(
 ) -> Result<InstalledApp> {
     let app_dir =
         generation_checkout_dir(&paths.app(&remote.app_id), &remote.app_commit, force_app);
-    let existing_runtime =
-        super::get_runtime_from(paths, &remote.runtime_origin, &remote.runtime_ref)?;
+    let existing_runtime = super::get_runtime(paths, &remote.runtime_ref)?;
     let runtime_dir = if !force_runtime
         && existing_runtime
             .as_ref()
@@ -63,7 +62,6 @@ fn checkout_remote_app(
         generation_checkout_dir(
             &paths
                 .runtimes()
-                .join(&remote.runtime_origin)
                 .join(runtime_checkout_dir(&remote.runtime_ref)),
             &remote.runtime_commit,
             force_runtime,
@@ -175,6 +173,74 @@ fn checkout_remote_app(
             checkout: timings.checkout,
         },
     })
+}
+
+pub fn update_runtime(
+    paths: &Installation,
+    remote: &RemoteRuntime,
+    force: bool,
+    explicitly_installed: bool,
+) -> Result<super::RuntimeRecord> {
+    let existing = super::get_runtime(paths, &remote.runtime_ref)?;
+    let force = force
+        || existing
+            .as_ref()
+            .is_some_and(|record| record.origin != remote.origin);
+    let runtime_dir = if !force
+        && existing
+            .as_ref()
+            .is_some_and(|record| record.runtime_commit == remote.runtime_commit)
+    {
+        paths.absolute_data_path(&existing.as_ref().unwrap().runtime_dir)
+    } else {
+        generation_checkout_dir(
+            &paths
+                .runtimes()
+                .join(runtime_checkout_dir(&remote.runtime_ref)),
+            &remote.runtime_commit,
+            force,
+        )
+    };
+    let configured = crate::remotes::get_remote(paths, &remote.origin)?;
+    let (_, summary_path, _) = load_arch_summary(paths, &configured)?;
+    let summary =
+        fs::read(&summary_path).with_context(|| format!("read {}", summary_path.display()))?;
+    let full_ref = format!("runtime/{}", remote.runtime_ref);
+    let storage = Storage::open(paths)?;
+    storage.deploy(
+        &summary,
+        &[Deployment {
+            remote: &remote.origin,
+            kind: "runtime",
+            ref_name: &full_ref,
+            checksum: &remote.runtime_commit,
+            destination: &runtime_dir,
+            force,
+        }],
+    )?;
+    let installed_size = storage.installed_size(&remote.runtime_commit)?;
+    drop(storage);
+    let record = super::RuntimeRecord {
+        origin: remote.origin.clone(),
+        runtime_ref: remote.runtime_ref.clone(),
+        runtime_commit: remote.runtime_commit.clone(),
+        explicitly_installed: explicitly_installed
+            || existing
+                .as_ref()
+                .is_some_and(|record| record.explicitly_installed),
+        installed_size,
+        runtime_dir: paths.relative_data_path(&runtime_dir)?,
+    };
+    super::write_runtime(paths, &record)?;
+    super::reconcile_runtime_bindings(paths)?;
+    if let Some(old_origin) = existing
+        .as_ref()
+        .map(|record| record.origin.as_str())
+        .filter(|origin| *origin != remote.origin)
+    {
+        remove_remote_refs(paths, old_origin, &[&full_ref])?;
+    }
+    Ok(record)
 }
 
 fn generation_checkout_dir(base: &Path, commit: &str, force: bool) -> PathBuf {

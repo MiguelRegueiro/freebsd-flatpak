@@ -203,6 +203,7 @@ fn discovers_extensions_from_the_activated_runtime_deployment() {
             origin: app.runtime_origin.clone(),
             runtime_ref: app.runtime_ref.clone(),
             runtime_commit: "runtime-current".to_string(),
+            explicitly_installed: false,
             installed_size: 0,
             runtime_dir: paths.relative_data_path(&current_runtime).unwrap(),
         },

@@ -135,7 +135,7 @@ pub(crate) fn cmd_remote_delete(paths: &Installation, args: Vec<String>) -> Resu
     remotes::get_remote(paths, name)?;
     let apps = state::list_apps(paths)?
         .into_iter()
-        .filter(|record| record.origin == *name || record.runtime_origin == *name)
+        .filter(|record| record.origin == *name)
         .map(|record| record.app_id)
         .collect::<Vec<_>>();
     let runtimes = state::list_runtimes(paths)?
@@ -236,6 +236,18 @@ mod tests {
         )
         .unwrap();
         let error = cmd_remote_delete(&paths, vec!["example".to_string()]).unwrap_err();
+        state::write_runtime(
+            &paths,
+            &state::RuntimeRecord {
+                origin: "runtime-source".to_string(),
+                runtime_ref: "org.example.Platform/x86_64/stable".to_string(),
+                runtime_commit: "runtime".to_string(),
+                installed_size: 0,
+                explicitly_installed: false,
+                runtime_dir: PathBuf::from("runtimes/example/runtime"),
+            },
+        )
+        .unwrap();
         assert!(error.to_string().contains("still referenced"));
         let error = cmd_remote_delete(&paths, vec!["runtime-source".to_string()]).unwrap_err();
         assert!(error.to_string().contains("still referenced"));

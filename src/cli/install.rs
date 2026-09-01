@@ -3,6 +3,7 @@ use super::confirmation::{
 };
 use super::update::update_resolved;
 use crate::diagnostics::Diagnostics;
+use crate::flatpak_ref::{set_kind_filter, RefKind};
 use crate::installation as state;
 use crate::installation::{self as runtime, installation_paths::Installation};
 use crate::{desktop_integration, remotes};
@@ -13,32 +14,37 @@ use std::time::Instant;
 pub(super) struct InstallOptions {
     pub(super) transaction: TransactionOptions,
     pub(super) or_update: bool,
-    pub(super) app_id: String,
+    pub(super) kind: Option<RefKind>,
+    pub(super) ref_name: String,
     pub(super) remote: Option<String>,
 }
 
 pub(super) fn parse_install_args(args: Vec<String>) -> Result<InstallOptions> {
     let mut transaction = TransactionOptions::default();
     let mut or_update = false;
+    let mut kind = None;
     let mut operands = Vec::new();
     for arg in args {
         match arg.as_str() {
             "-y" | "--assumeyes" => transaction.assumeyes = true,
             "--noninteractive" => transaction.noninteractive = true,
             "--or-update" => or_update = true,
+            "--app" => set_kind_filter(&mut kind, RefKind::App)?,
+            "--runtime" => set_kind_filter(&mut kind, RefKind::Runtime)?,
             _ if arg.starts_with('-') => bail!("unknown install option: {arg}"),
             _ => operands.push(arg),
         }
     }
     if !(1..=2).contains(&operands.len()) {
-        bail!("usage: flatpak install [OPTION] [REMOTE] <app-id>");
+        bail!("usage: flatpak install [OPTION] [REMOTE] <ref>");
     }
-    let app_id = operands.pop().unwrap();
+    let ref_name = operands.pop().unwrap();
     let remote = operands.pop();
     Ok(InstallOptions {
         transaction,
         or_update,
-        app_id,
+        kind,
+        ref_name,
         remote,
     })
 }
@@ -51,13 +57,24 @@ pub(crate) fn cmd_install(
     let options = parse_install_args(args)?;
     let total_started = Instant::now();
     if !options.transaction.noninteractive {
-        println!("==> Resolving {}", options.app_id);
+        println!("==> Resolving {}", options.ref_name);
     }
     let resolution_started = Instant::now();
-    let remote = remotes::resolve_remote_app(paths, options.remote.as_deref(), &options.app_id)?;
+    let resolved = remotes::resolve_remote_ref(
+        paths,
+        options.remote.as_deref(),
+        &options.ref_name,
+        options.kind,
+    )?;
+    let remote = match resolved {
+        remotes::ResolvedRemoteRef::App(remote) => remote,
+        remotes::ResolvedRemoteRef::Runtime(remote) => {
+            return install_runtime(paths, &options, remote);
+        }
+    };
     let resolution = resolution_started.elapsed();
     if let Ok(record) =
-        state::get_app(paths, &options.app_id).or_else(|_| state::get_app(paths, &remote.app_id))
+        state::get_app(paths, &options.ref_name).or_else(|_| state::get_app(paths, &remote.app_id))
     {
         if !options.or_update {
             runtime::reconcile_extensions(paths, std::slice::from_ref(&record), false)?;
@@ -73,22 +90,20 @@ pub(crate) fn cmd_install(
         );
     }
 
-    let runtime_record =
-        state::get_runtime_from(paths, &remote.runtime_origin, &remote.runtime_ref)?;
+    let runtime_record = state::get_runtime(paths, &remote.runtime_ref)?;
     let runtime_dir = runtime_record
         .as_ref()
         .map(|record| state::absolute(paths, &record.runtime_dir))
         .unwrap_or_else(|| {
             paths
                 .runtimes()
-                .join(&remote.runtime_origin)
                 .join(runtime::runtime_checkout_dir(&remote.runtime_ref))
         });
-    let runtime_changed = runtime_record
-        .as_ref()
-        .map(|record| record.runtime_commit.as_str())
-        != Some(remote.runtime_commit.as_str())
-        || !super::update::checkout_present(&runtime_dir);
+    let runtime_changed = runtime_record.as_ref().is_none_or(|record| {
+        record.origin != remote.runtime_origin
+            || record.runtime_commit != remote.runtime_commit
+            || !super::update::checkout_present(&runtime_dir)
+    });
     let mut entries = vec![TransactionEntry {
         operation: TransactionOperation::Install,
         kind: "application",
@@ -179,6 +194,59 @@ pub(crate) fn cmd_install(
         );
         println!("  desktop export: {:.3}s", export_elapsed.as_secs_f64());
         println!("  total: {:.3}s", total_started.elapsed().as_secs_f64());
+    }
+    Ok(())
+}
+
+fn install_runtime(
+    paths: &Installation,
+    options: &InstallOptions,
+    mut remote: remotes::RemoteRuntime,
+) -> Result<()> {
+    let existing = state::get_runtime(paths, &remote.runtime_ref)?;
+    if options.or_update {
+        if let Some(record) = existing.as_ref() {
+            if record.origin != remote.origin {
+                remote = remotes::load_remote_metadata(paths, &record.origin)?
+                    .resolve_exact_runtime(&remote.full_ref())?;
+            }
+        }
+    }
+    let full_ref = remote.full_ref();
+    if let Some(mut record) = existing.clone() {
+        let current = record.runtime_commit == remote.runtime_commit
+            && super::update::checkout_present(&state::absolute(paths, &record.runtime_dir));
+        if !options.or_update || current {
+            if !record.explicitly_installed {
+                record.explicitly_installed = true;
+                state::write_runtime(paths, &record)?;
+            }
+            println!("{full_ref} is already installed");
+            return Ok(());
+        }
+    }
+    let changed = existing
+        .as_ref()
+        .is_none_or(|record| record.runtime_commit != remote.runtime_commit)
+        || existing.as_ref().is_some_and(|record| {
+            !super::update::checkout_present(&state::absolute(paths, &record.runtime_dir))
+        });
+    let entries = [TransactionEntry {
+        operation: if existing.is_some() {
+            TransactionOperation::Update
+        } else {
+            TransactionOperation::Install
+        },
+        kind: "runtime",
+        ref_name: full_ref.clone(),
+    }];
+    if !present_and_confirm(&entries, options.transaction)? {
+        return Ok(());
+    }
+    state::update_runtime(paths, &remote, changed, true)?;
+    state::cleanup_retired_deployments(paths)?;
+    if !options.transaction.noninteractive {
+        println!("\n==> Installed {full_ref}");
     }
     Ok(())
 }

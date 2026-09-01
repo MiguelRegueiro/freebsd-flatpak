@@ -2,8 +2,8 @@ use super::*;
 use crate::installation::application_records::write_app;
 use crate::installation::installation_paths::Installation;
 use crate::installation::{
-    ensure_layout, remove_run_record, write_pinned_run_record, write_runtime, AppRecord,
-    RuntimeRecord,
+    ensure_layout, get_app, reconcile_runtime_bindings, remove_run_record, write_pinned_run_record,
+    write_runtime, AppRecord, RuntimeRecord,
 };
 use std::fs;
 use std::path::Path;
@@ -83,6 +83,7 @@ fn multiple_pinned_generations_retire_after_their_last_run() {
             origin: "flathub".to_string(),
             runtime_ref: current.runtime_ref.clone(),
             runtime_commit: current.runtime_commit.clone(),
+            explicitly_installed: false,
             installed_size: 0,
             runtime_dir: current.runtime_dir.clone(),
         },
@@ -158,5 +159,52 @@ fn recovery_reclaims_generations_after_stale_pin_is_removed() {
     assert!(cleanup_retired_deployments(&paths).unwrap().is_empty());
     remove_run_record(&run).unwrap();
     assert_eq!(cleanup_retired_deployments(&paths).unwrap().len(), 2);
+    let _ = fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn origin_transition_rebinds_apps_and_reclaims_the_stale_runtime_deployment() {
+    let temp = std::env::temp_dir().join(format!(
+        "freebsd-flatpak-runtime-origin-cleanup-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp);
+    let paths = Installation::for_test(&temp);
+    ensure_layout(&paths).unwrap();
+    let mut installed_app = app(&paths, "app", "old-runtime");
+    installed_app.runtime_origin = "old-origin".to_string();
+    let old_dir = absolute(&paths, &installed_app.runtime_dir);
+    let new_dir = old_dir.parent().unwrap().join("new-runtime");
+    checkout(
+        &old_dir,
+        &format!("runtime/{}", installed_app.runtime_ref),
+        "old-runtime",
+    );
+    checkout(
+        &new_dir,
+        &format!("runtime/{}", installed_app.runtime_ref),
+        "new-runtime",
+    );
+    write_app(&paths, &installed_app).unwrap();
+    write_runtime(
+        &paths,
+        &RuntimeRecord {
+            origin: "new-origin".to_string(),
+            runtime_ref: installed_app.runtime_ref.clone(),
+            runtime_commit: "new-runtime".to_string(),
+            explicitly_installed: false,
+            installed_size: 0,
+            runtime_dir: paths.relative_data_path(&new_dir).unwrap(),
+        },
+    )
+    .unwrap();
+
+    reconcile_runtime_bindings(&paths).unwrap();
+    cleanup_retired_deployments(&paths).unwrap();
+    let rebound = get_app(&paths, &installed_app.app_id).unwrap();
+    assert_eq!(rebound.runtime_origin, "new-origin");
+    assert_eq!(absolute(&paths, &rebound.runtime_dir), new_dir);
+    assert!(!old_dir.exists());
+    assert!(new_dir.exists());
     let _ = fs::remove_dir_all(&temp);
 }

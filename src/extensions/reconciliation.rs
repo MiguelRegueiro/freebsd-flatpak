@@ -194,10 +194,9 @@ fn required_for_app(
     gtk_theme: Option<&str>,
 ) -> Result<Vec<RequiredExtension>> {
     let app_dir = crate::installation::absolute(paths, &app.app_dir);
-    let runtime_dir =
-        crate::installation::get_runtime_from(paths, &app.runtime_origin, &app.runtime_ref)?
-            .map(|runtime| crate::installation::absolute(paths, &runtime.runtime_dir))
-            .unwrap_or_else(|| crate::installation::absolute(paths, &app.runtime_dir));
+    let runtime_dir = crate::installation::get_runtime(paths, &app.runtime_ref)?
+        .map(|runtime| crate::installation::absolute(paths, &runtime.runtime_dir))
+        .unwrap_or_else(|| crate::installation::absolute(paths, &app.runtime_dir));
     let runtime_metadata_path = runtime_dir.join("metadata");
     let runtime_metadata = fs::read_to_string(&runtime_metadata_path)
         .with_context(|| format!("read runtime metadata {}", runtime_metadata_path.display()))?;

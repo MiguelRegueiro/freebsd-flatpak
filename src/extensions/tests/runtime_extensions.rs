@@ -301,3 +301,15 @@ fn missing_or_corrupt_local_extension_has_actionable_error() {
     assert!(message.contains("flatpak repair"));
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn runtime_checkout_directory_preserves_complete_ref_identity() {
+    assert_eq!(
+        runtime_checkout_dir("org.example.Platform/x86_64/50"),
+        "org.example.Platform-x86_64-50"
+    );
+    assert_ne!(
+        runtime_checkout_dir("org.example.Platform/x86_64/50"),
+        runtime_checkout_dir("org.example.Platform/aarch64/50")
+    );
+}

@@ -33,8 +33,8 @@ pub(crate) fn prune_repo(paths: &Installation) -> Result<(i32, i32, u64)> {
     Storage::open(paths)?.prune()
 }
 
-pub(crate) fn remove_repo_refs(paths: &Installation, refs: &[&str]) -> Result<()> {
-    Storage::open(paths)?.remove_refs(refs)
+pub(crate) fn remove_remote_refs(paths: &Installation, remote: &str, refs: &[&str]) -> Result<()> {
+    Storage::open(paths)?.remove_remote_refs(remote, refs)
 }
 
 impl Storage {
@@ -172,18 +172,11 @@ impl Storage {
         Ok(objects.len())
     }
 
-    pub fn remove_refs(&self, refs: &[&str]) -> Result<()> {
-        for remote in self.repo.remote_list() {
-            for ref_name in refs {
-                self.repo
-                    .set_ref_immediate(
-                        Some(remote.as_str()),
-                        ref_name,
-                        None,
-                        gio::Cancellable::NONE,
-                    )
-                    .with_context(|| format!("remove OSTree ref {remote}:{ref_name}"))?;
-            }
+    pub fn remove_remote_refs(&self, remote: &str, refs: &[&str]) -> Result<()> {
+        for ref_name in refs {
+            self.repo
+                .set_ref_immediate(Some(remote), ref_name, None, gio::Cancellable::NONE)
+                .with_context(|| format!("remove OSTree ref {remote}:{ref_name}"))?;
         }
         Ok(())
     }

@@ -46,8 +46,8 @@ impl Fixture {
         )
         .unwrap();
         fs::write(
-            refs.join("runtimes/flathub--org.freedesktop.Platform_x86_64_24.08.ini"),
-            "origin=flathub\nruntime_ref=org.freedesktop.Platform/x86_64/24.08\nruntime_commit=runtime-commit\ninstalled_size=659900000\nruntime_dir=runtimes/flathub/platform/runtime-commit\n",
+            refs.join("runtimes/org.freedesktop.Platform_x86_64_24.08.ini"),
+            "origin=flathub\nruntime_ref=org.freedesktop.Platform/x86_64/24.08\nruntime_commit=runtime-commit\nexplicitly_installed=false\ninstalled_size=659900000\nruntime_dir=runtimes/flathub/platform/runtime-commit\n",
         )
         .unwrap();
         let extension = data.join("extensions/org.freedesktop.Platform.GL.default-24.08");

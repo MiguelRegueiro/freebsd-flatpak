@@ -11,13 +11,36 @@ use std::path::PathBuf;
 
 pub(crate) use metadata_cache::load_arch_summary;
 pub use ref_resolution::{
-    checkout_ref, inspect_refs, load_remote_metadata, resolve_remote_app, search_apps,
+    checkout_ref, inspect_refs, load_remote_metadata, resolve_remote_app, resolve_remote_ref,
+    search_apps,
 };
 pub(crate) use remote_config::{
     add as add_remote, delete as delete_remote, from_location, initialize_detailed,
     modify as modify_remote, read_gpg_key, Remote, DEFAULT_REMOTE,
 };
 pub use remote_config::{enabled as enabled_remotes, get as get_remote, list as list_remotes};
+
+#[derive(Debug, Clone)]
+pub struct RemoteRuntime {
+    pub origin: String,
+    pub runtime_id: String,
+    pub runtime_ref: String,
+    pub runtime_commit: String,
+    pub arch: String,
+    pub branch: String,
+}
+
+impl RemoteRuntime {
+    pub fn full_ref(&self) -> String {
+        format!("runtime/{}/{}/{}", self.runtime_id, self.arch, self.branch)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ResolvedRemoteRef {
+    App(RemoteApp),
+    Runtime(RemoteRuntime),
+}
 
 #[derive(Debug, Clone)]
 pub struct SearchResult {

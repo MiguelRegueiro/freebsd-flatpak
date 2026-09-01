@@ -161,6 +161,7 @@ fn runtime_branch_change_reports_the_apps_previous_runtime_commit() {
             origin: "flathub".to_string(),
             runtime_ref: "org.example.Platform/x86_64/50".to_string(),
             runtime_commit: "runtime-50".to_string(),
+            explicitly_installed: false,
             installed_size: 0,
             runtime_dir: paths.relative_data_path(&runtime_50_dir).unwrap(),
         },
@@ -250,7 +251,8 @@ fn update_commit_requires_exactly_one_app() {
         UpdateOptions {
             transaction: TransactionOptions::default(),
             commit: Some("abc123".to_string()),
-            app_ids: vec!["org.example.App".to_string()],
+            kind: None,
+            refs: vec!["org.example.App".to_string()],
         }
     );
     assert!(parse_update_args(vec!["--commit=abc123".to_string()]).is_err());
@@ -260,4 +262,55 @@ fn update_commit_requires_exactly_one_app() {
         "org.example.Two".to_string(),
     ])
     .is_err());
+}
+
+#[test]
+fn runtime_update_filter_parses() {
+    let update = parse_update_args(vec![
+        "--runtime".to_string(),
+        "runtime/org.example.Platform/x86_64/50".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(update.kind, Some(RefKind::Runtime));
+    assert!(parse_update_args(vec![
+        "--app".to_string(),
+        "--runtime".to_string(),
+        "org.example.Ref".to_string(),
+    ])
+    .is_err());
+}
+
+#[test]
+fn targeted_runtime_update_never_selects_all_apps_after_consuming_its_operand() {
+    let root = test_dir("targeted-runtime-only");
+    let paths = Installation::for_test(&root);
+    state::ensure_layout(&paths).unwrap();
+    let app = app_record(
+        "org.example.App",
+        "app/org.example.App/x86_64/stable",
+        "app-commit",
+    );
+    state::write_app(&paths, &app).unwrap();
+    state::write_runtime(
+        &paths,
+        &state::RuntimeRecord {
+            origin: "runtime-origin".to_string(),
+            runtime_ref: app.runtime_ref.clone(),
+            runtime_commit: app.runtime_commit.clone(),
+            installed_size: 42,
+            explicitly_installed: true,
+            runtime_dir: app.runtime_dir.clone(),
+        },
+    )
+    .unwrap();
+    let mut options = parse_update_args(vec![format!("runtime/{}", app.runtime_ref)]).unwrap();
+    let had_requested_refs = !options.refs.is_empty();
+    let (runtime_targets, matched) =
+        select_runtime_targets(&paths, &options, std::slice::from_ref(&app)).unwrap();
+    assert_eq!(runtime_targets.len(), 1);
+    options
+        .refs
+        .retain(|requested| !matched.contains(requested));
+    assert!(options.refs.is_empty());
+    assert!(!should_update_apps(&options, had_requested_refs));
 }

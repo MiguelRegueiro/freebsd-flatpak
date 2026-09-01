@@ -29,17 +29,31 @@ pub fn record_install(paths: &Installation, installed: &InstalledApp) -> Result<
     // The app record is the activation point used by new launches.  Publish
     // the runtime inventory first, then atomically replace the app record so a
     // reader observes either the complete old pair or the complete new pair.
+    let existing_runtime = super::runtime_records::get_runtime(paths, &installed.runtime_ref)?;
+    let explicitly_installed = existing_runtime
+        .as_ref()
+        .is_some_and(|runtime| runtime.explicitly_installed);
     write_runtime(
         paths,
         &RuntimeRecord {
             origin: installed.runtime_origin.clone(),
             runtime_ref: app.runtime_ref.clone(),
             runtime_commit: app.runtime_commit.clone(),
+            explicitly_installed,
             installed_size: installed.runtime_installed_size,
             runtime_dir: app.runtime_dir.clone(),
         },
     )?;
     write_app(paths, &app)?;
+    super::reconcile_runtime_bindings(paths)?;
+    if let Some(old_origin) = existing_runtime
+        .as_ref()
+        .map(|runtime| runtime.origin.as_str())
+        .filter(|origin| *origin != installed.runtime_origin)
+    {
+        let full_ref = format!("runtime/{}", installed.runtime_ref);
+        crate::ostree::remove_remote_refs(paths, old_origin, &[&full_ref])?;
+    }
     Ok(app)
 }
 
