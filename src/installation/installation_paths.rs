@@ -64,7 +64,6 @@ impl Installation {
             self.runtimes(),
             self.repo(),
             self.refs(),
-            self.extensions(),
             self.exports(),
             self.remote_configs(),
             self.remote_metadata_root(),
@@ -116,9 +115,6 @@ impl Installation {
     }
     pub fn refs(&self) -> PathBuf {
         self.data_root.join("refs")
-    }
-    pub fn extensions(&self) -> PathBuf {
-        self.data_root.join("extensions")
     }
     pub fn exports(&self) -> PathBuf {
         self.data_root.join("exports")

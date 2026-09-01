@@ -1,123 +1,258 @@
-use super::runtime_extensions::{parse_runtime_ref, split_runtime_ref, RuntimeRefParts};
 use crate::flatpak_metadata::{sections_with_prefix, value};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-pub fn required_extension_refs(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExtensionPoint {
+    pub(crate) name: String,
+    pub(crate) tag: Option<String>,
+    pub(crate) directory: Option<String>,
+    pub(crate) version: Option<String>,
+    pub(crate) versions: Vec<String>,
+    pub(crate) subdirectories: bool,
+    pub(crate) subdirectory_suffix: Option<String>,
+    pub(crate) add_ld_path: Option<String>,
+    pub(crate) merge_dirs: Vec<String>,
+    pub(crate) no_autodownload: bool,
+    pub(crate) download_if: Vec<String>,
+    pub(crate) enable_if: Vec<String>,
+    pub(crate) autodelete: bool,
+    pub(crate) autoprune_unless: Vec<String>,
+    pub(crate) locale_subset: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExtensionParent {
+    pub(crate) arch: String,
+    pub(crate) branch: String,
+}
+
+impl ExtensionParent {
+    pub(crate) fn from_ref(parent_ref: &str) -> Result<Self> {
+        let partial = parent_ref
+            .strip_prefix("app/")
+            .or_else(|| parent_ref.strip_prefix("runtime/"))
+            .unwrap_or(parent_ref);
+        let mut parts = partial.splitn(3, '/');
+        let _name = parts
+            .next()
+            .context("extension parent ref is missing an ID")?;
+        let arch = parts
+            .next()
+            .filter(|part| !part.is_empty())
+            .context("extension parent ref is missing an architecture")?;
+        let branch = parts
+            .next()
+            .filter(|part| !part.is_empty())
+            .context("extension parent ref is missing a branch")?;
+        Ok(Self {
+            arch: arch.to_string(),
+            branch: branch.to_string(),
+        })
+    }
+}
+
+impl ExtensionPoint {
+    fn parse(metadata: &str, section: &str) -> Self {
+        let qualified_name = section.trim_start_matches("Extension ");
+        let (name, tag) = qualified_name
+            .split_once('@')
+            .map_or((qualified_name, None), |(name, tag)| {
+                (name, (!tag.is_empty()).then(|| tag.to_string()))
+            });
+        Self {
+            name: name.to_string(),
+            tag,
+            directory: value(metadata, section, "directory"),
+            version: value(metadata, section, "version").filter(|item| !item.is_empty()),
+            versions: list_value(metadata, section, "versions"),
+            subdirectories: bool_value(metadata, section, "subdirectories"),
+            subdirectory_suffix: value(metadata, section, "subdirectory-suffix")
+                .filter(|item| !item.is_empty()),
+            add_ld_path: value(metadata, section, "add-ld-path").filter(|item| !item.is_empty()),
+            merge_dirs: list_value(metadata, section, "merge-dirs"),
+            no_autodownload: bool_value(metadata, section, "no-autodownload"),
+            download_if: list_value(metadata, section, "download-if"),
+            enable_if: list_value(metadata, section, "enable-if"),
+            autodelete: bool_value(metadata, section, "autodelete"),
+            autoprune_unless: list_value(metadata, section, "autoprune-unless"),
+            locale_subset: bool_value(metadata, section, "locale-subset"),
+        }
+    }
+
+    pub(crate) fn branches(&self, parent: &ExtensionParent) -> Vec<String> {
+        if !self.versions.is_empty() {
+            return deduplicate_preserving_order(self.versions.clone());
+        }
+        if let Some(version) = &self.version {
+            return vec![version.clone()];
+        }
+        vec![parent.branch.clone()]
+    }
+
+    pub(crate) fn has_condition(&self, condition: &str) -> bool {
+        self.download_if.iter().any(|item| item == condition)
+            || self.enable_if.iter().any(|item| item == condition)
+    }
+}
+
+pub(crate) fn parse_extension_points(metadata: &str) -> Vec<ExtensionPoint> {
+    sections_with_prefix(metadata, "Extension ")
+        .into_iter()
+        .map(|section| ExtensionPoint::parse(metadata, &section))
+        .collect()
+}
+
+/// Resolve extension points against available runtime refs. `versions` is an
+/// ordered compatibility list: for each payload ID the first available branch
+/// wins. Tagged points retain separate configuration but resolve the same
+/// runtime ID, as in upstream Flatpak.
+pub(crate) fn resolve_extension_refs(
+    points: &[ExtensionPoint],
+    parent: &ExtensionParent,
+    available_refs: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut resolved = BTreeSet::new();
+    for point in points {
+        let mut names = BTreeSet::from([point.name.clone()]);
+        if point.subdirectories {
+            let prefix = format!("{}.", point.name);
+            for candidate in available_refs {
+                let Some(parts) = runtime_ref_parts(candidate) else {
+                    continue;
+                };
+                if parts.name.starts_with(&prefix) && parts.arch == parent.arch {
+                    names.insert(parts.name.to_string());
+                }
+            }
+        }
+        for name in names {
+            for branch in point.branches(parent) {
+                let candidate = format!("runtime/{name}/{}/{branch}", parent.arch);
+                if available_refs.contains(&candidate) {
+                    resolved.insert(candidate);
+                    break;
+                }
+            }
+        }
+    }
+    resolved
+}
+
+pub(crate) fn point_for_ref<'a>(
+    points: &'a [ExtensionPoint],
+    parent: &ExtensionParent,
+    ref_name: &str,
+) -> Option<&'a ExtensionPoint> {
+    points.iter().find(|point| {
+        resolve_extension_refs(
+            std::slice::from_ref(point),
+            parent,
+            &BTreeSet::from([ref_name.to_string()]),
+        )
+        .contains(ref_name)
+    })
+}
+
+pub(crate) fn required_extension_refs(
     app_dir: &Path,
+    app_ref: &str,
     runtime_ref: &str,
     runtime_dir: &Path,
-    installed_extension_refs: &BTreeSet<String>,
+    installed_runtime_refs: &BTreeSet<String>,
     active_gtk_theme: Option<&str>,
 ) -> Result<BTreeSet<String>> {
-    let parts = split_runtime_ref(runtime_ref)?;
+    let sources = [
+        (
+            app_dir.join("metadata"),
+            ExtensionParent::from_ref(app_ref)?,
+        ),
+        (
+            runtime_dir.join("metadata"),
+            ExtensionParent::from_ref(runtime_ref)?,
+        ),
+    ];
     let mut refs = BTreeSet::new();
-    for metadata_path in [app_dir.join("metadata"), runtime_dir.join("metadata")] {
+    for (metadata_path, parent) in sources {
         let Ok(metadata) = fs::read_to_string(&metadata_path) else {
             continue;
         };
-        for section in sections_with_prefix(&metadata, "Extension ") {
-            let point = ExtensionPoint::from_metadata(&metadata, &section, &parts);
-            refs.extend(
-                installed_extension_refs
-                    .iter()
-                    .filter(|ref_name| point.keeps_installed_ref(ref_name, active_gtk_theme))
-                    .cloned(),
-            );
+        let points = parse_extension_points(&metadata);
+        for ref_name in resolve_extension_refs(&points, &parent, installed_runtime_refs) {
+            let point = point_for_ref(&points, &parent, &ref_name)
+                .expect("resolved extension has a declaring point");
+            if keeps_installed_ref(point, &ref_name, active_gtk_theme) {
+                refs.insert(ref_name);
+            }
         }
     }
     Ok(refs)
 }
 
-struct ExtensionPoint {
-    name: String,
-    arch: String,
-    versions: BTreeSet<String>,
-    subdirectories: bool,
-    active_gl_driver_condition: bool,
-    autoprune_unless_active_gl_driver: bool,
+fn keeps_installed_ref(
+    point: &ExtensionPoint,
+    ref_name: &str,
+    active_gtk_theme: Option<&str>,
+) -> bool {
+    let Some(candidate) = runtime_ref_parts(ref_name) else {
+        return false;
+    };
+    if point.name == "org.gtk.Gtk3theme" {
+        let Some(theme) = active_gtk_theme.filter(|theme| !theme.is_empty()) else {
+            return false;
+        };
+        return candidate.name == format!("{}.{theme}", point.name);
+    }
+    if point.has_condition("active-gl-driver")
+        || point
+            .autoprune_unless
+            .iter()
+            .any(|item| item == "active-gl-driver")
+    {
+        return candidate.name == format!("{}.default", point.name);
+    }
+    true
 }
 
-impl ExtensionPoint {
-    fn from_metadata(metadata: &str, section: &str, runtime: &RuntimeRefParts) -> Self {
-        let versions = value(metadata, section, "version")
-            .into_iter()
-            .chain(
-                value(metadata, section, "versions")
-                    .into_iter()
-                    .flat_map(|versions| {
-                        versions
-                            .split(';')
-                            .map(str::trim)
-                            .filter(|version| !version.is_empty())
-                            .map(ToOwned::to_owned)
-                            .collect::<Vec<_>>()
-                    }),
-            )
-            .collect::<BTreeSet<_>>();
-        let versions = if versions.is_empty() {
-            BTreeSet::from([runtime.branch.clone()])
-        } else {
-            versions
-        };
-        let condition_is_active_gl_driver = |key| {
-            value(metadata, section, key).is_some_and(|value| {
-                value
-                    .split(';')
-                    .map(str::trim)
-                    .any(|v| v == "active-gl-driver")
-            })
-        };
-        Self {
-            name: section.trim_start_matches("Extension ").to_string(),
-            arch: runtime.arch.clone(),
-            versions,
-            subdirectories: value(metadata, section, "subdirectories")
-                .is_some_and(|value| value == "true"),
-            active_gl_driver_condition: condition_is_active_gl_driver("download-if")
-                || condition_is_active_gl_driver("enable-if"),
-            autoprune_unless_active_gl_driver: value(metadata, section, "autoprune-unless")
-                .is_some_and(|value| {
-                    value
-                        .split(';')
-                        .map(str::trim)
-                        .any(|item| item == "active-gl-driver")
-                }),
-        }
-    }
+struct RuntimeRefParts<'a> {
+    name: &'a str,
+    arch: &'a str,
+}
 
-    fn keeps_installed_ref(&self, ref_name: &str, active_gtk_theme: Option<&str>) -> bool {
-        let Some(candidate) = parse_runtime_ref(ref_name) else {
-            return false;
-        };
-        if self.name == "org.gtk.Gtk3theme" {
-            let Some(theme) = active_gtk_theme.filter(|theme| !theme.is_empty()) else {
-                return false;
-            };
-            if candidate.name != format!("{}.{theme}", self.name) {
-                return false;
-            }
-        }
-        let name_matches = candidate.name == self.name
-            || ((self.subdirectories || self.active_gl_driver_condition)
-                && candidate
-                    .name
-                    .strip_prefix(&self.name)
-                    .is_some_and(|suffix| suffix.starts_with('.') && suffix.len() > 1));
-        if !name_matches
-            || candidate.arch != self.arch
-            || !self.versions.contains(&candidate.branch)
-        {
-            return false;
-        }
+fn runtime_ref_parts(ref_name: &str) -> Option<RuntimeRefParts<'_>> {
+    let mut parts = ref_name.strip_prefix("runtime/")?.splitn(3, '/');
+    Some(RuntimeRefParts {
+        name: parts.next()?,
+        arch: parts.next()?,
+    })
+}
 
-        if self.active_gl_driver_condition || self.autoprune_unless_active_gl_driver {
-            return candidate.name == format!("{}.default", self.name);
-        }
-        true
-    }
+fn list_value(metadata: &str, section: &str, key: &str) -> Vec<String> {
+    value(metadata, section, key)
+        .into_iter()
+        .flat_map(|items| {
+            items
+                .split(';')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn bool_value(metadata: &str, section: &str, key: &str) -> bool {
+    value(metadata, section, key).is_some_and(|item| item.eq_ignore_ascii_case("true"))
+}
+
+fn deduplicate_preserving_order(items: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    items
+        .into_iter()
+        .filter(|item| seen.insert(item.clone()))
+        .collect()
 }
 
 #[cfg(test)]

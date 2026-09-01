@@ -50,7 +50,7 @@ impl Fixture {
             "origin=flathub\nruntime_ref=org.freedesktop.Platform/x86_64/24.08\nruntime_commit=runtime-commit\nexplicitly_installed=false\ninstalled_size=659900000\nruntime_dir=runtimes/flathub/platform/runtime-commit\n",
         )
         .unwrap();
-        let extension = data.join("extensions/org.freedesktop.Platform.GL.default-24.08");
+        let extension = data.join("runtimes/flathub/gl-default/extension-commit");
         fs::create_dir_all(extension.join("files")).unwrap();
         let extension_metainfo = extension.join("files/share/metainfo");
         fs::create_dir_all(&extension_metainfo).unwrap();
@@ -63,6 +63,11 @@ impl Fixture {
         fs::write(
             extension.join(".ostree-commit"),
             "runtime/org.freedesktop.Platform.GL.default/x86_64/24.08\nextension-commit\n457000000\nflathub\n",
+        )
+        .unwrap();
+        fs::write(
+            refs.join("runtimes/org.freedesktop.Platform.GL.default_x86_64_24.08.ini"),
+            "origin=flathub\nruntime_ref=org.freedesktop.Platform.GL.default/x86_64/24.08\nruntime_commit=extension-commit\nexplicitly_installed=false\ninstalled_size=457000000\nruntime_dir=runtimes/flathub/gl-default/extension-commit\n",
         )
         .unwrap();
         Self {

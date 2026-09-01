@@ -1,128 +1,147 @@
-use super::required_extension_refs;
-use std::collections::BTreeSet;
-use std::fs;
+use super::*;
+
+fn refs(items: &[&str]) -> BTreeSet<String> {
+    items.iter().map(|item| (*item).to_string()).collect()
+}
 
 #[test]
-fn active_gl_default_subextension_is_required_by_runtime_metadata() {
-    let root = std::env::temp_dir().join(format!(
-        "freebsd-flatpak-runtime-gl-reachability-{}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&root);
-    let app = root.join("app");
-    let runtime = root.join("runtime");
-    fs::create_dir_all(&app).unwrap();
-    fs::create_dir_all(&runtime).unwrap();
-    fs::write(
-        app.join("metadata"),
-        "[Application]\nname=org.example.App\n",
-    )
-    .unwrap();
-    fs::write(
-            runtime.join("metadata"),
-            "[Runtime]\nname=org.freedesktop.Platform\n\n[Extension org.freedesktop.Platform.GL]\ndirectory=lib/x86_64-linux-gnu/GL\nversions=25.08;25.08-extra;1.4\nsubdirectories=true\ndownload-if=active-gl-driver\nenable-if=active-gl-driver\nautoprune-unless=active-gl-driver\n",
-        )
-        .unwrap();
-    let gl_default = "runtime/org.freedesktop.Platform.GL.default/x86_64/25.08".to_string();
-    let installed = BTreeSet::from([
-        gl_default.clone(),
-        "runtime/org.freedesktop.Platform.GL.default/x86_64/24.08".to_string(),
-        "runtime/org.freedesktop.Platform.GL.vendor/x86_64/25.08".to_string(),
+fn parses_every_generic_field_for_application_and_runtime_metadata() {
+    for owner in ["Application", "Runtime"] {
+        let metadata = format!(
+            "[{owner}]\nname=org.example.Parent\n\
+             [Extension org.example.Extension@compat]\n\
+             directory=lib/extensions\nversion=stable\nversions=stable;beta;stable;\n\
+             subdirectories=true\nsubdirectory-suffix=payload\nadd-ld-path=lib\n\
+             merge-dirs=share/icons;share/mime;\nno-autodownload=true\n\
+             download-if=active-gl-driver;on-xdg-desktop-gnome;\n\
+             enable-if=active-gl-driver;\nautodelete=true\n\
+             autoprune-unless=active-gl-driver;\nlocale-subset=true\n"
+        );
+        let points = parse_extension_points(&metadata);
+        assert_eq!(points.len(), 1);
+        let point = &points[0];
+        assert_eq!(point.name, "org.example.Extension");
+        assert_eq!(point.tag.as_deref(), Some("compat"));
+        assert_eq!(point.directory.as_deref(), Some("lib/extensions"));
+        assert_eq!(point.version.as_deref(), Some("stable"));
+        assert_eq!(point.versions, ["stable", "beta", "stable"]);
+        assert!(point.subdirectories);
+        assert_eq!(point.subdirectory_suffix.as_deref(), Some("payload"));
+        assert_eq!(point.add_ld_path.as_deref(), Some("lib"));
+        assert_eq!(point.merge_dirs, ["share/icons", "share/mime"]);
+        assert!(point.no_autodownload);
+        assert_eq!(
+            point.download_if,
+            ["active-gl-driver", "on-xdg-desktop-gnome"]
+        );
+        assert_eq!(point.enable_if, ["active-gl-driver"]);
+        assert!(point.autodelete);
+        assert_eq!(point.autoprune_unless, ["active-gl-driver"]);
+        assert!(point.locale_subset);
+    }
+}
+
+#[test]
+fn version_selects_one_branch() {
+    let points = parse_extension_points("[Extension org.example.Extension]\nversion=42\n");
+    let parent = ExtensionParent::from_ref("runtime/org.example.Platform/x86_64/99").unwrap();
+    let available = refs(&[
+        "runtime/org.example.Extension/x86_64/42",
+        "runtime/org.example.Extension/x86_64/41",
     ]);
-
-    let required = required_extension_refs(
-        &app,
-        "org.freedesktop.Platform/x86_64/25.08",
-        &runtime,
-        &installed,
-        None,
-    )
-    .unwrap();
-    assert_eq!(required, BTreeSet::from([gl_default]));
-    let _ = fs::remove_dir_all(&root);
-}
-
-fn gtk_theme_fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-    let root = std::env::temp_dir().join(format!(
-        "freebsd-flatpak-gtk-reachability-{name}-{}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&root);
-    let app = root.join("app");
-    let runtime = root.join("runtime");
-    fs::create_dir_all(&app).unwrap();
-    fs::create_dir_all(&runtime).unwrap();
-    fs::write(
-        app.join("metadata"),
-        "[Application]\nname=org.example.App\n",
-    )
-    .unwrap();
-    fs::write(
-        runtime.join("metadata"),
-        "[Runtime]\nname=org.example.Platform\n\n[Extension org.gtk.Gtk3theme]\ndirectory=share/runtime/share/themes\nversion=3.22\nsubdirectories=true\nsubdirectory-suffix=gtk-3.0\ndownload-if=active-gtk-theme\nenable-if=active-gtk-theme\n",
-    )
-    .unwrap();
-    (app, runtime)
+    assert_eq!(
+        resolve_extension_refs(&points, &parent, &available),
+        refs(&["runtime/org.example.Extension/x86_64/42"])
+    );
 }
 
 #[test]
-fn active_gtk_theme_extension_is_required() {
-    let (app, runtime) = gtk_theme_fixture("active");
-    let active = "runtime/org.gtk.Gtk3theme.Adwaita/x86_64/3.22".to_string();
-    let installed = BTreeSet::from([active.clone()]);
-
-    let required = required_extension_refs(
-        &app,
-        "org.example.Platform/x86_64/50",
-        &runtime,
-        &installed,
-        Some("Adwaita"),
-    )
-    .unwrap();
-
-    assert_eq!(required, BTreeSet::from([active]));
-    let _ = fs::remove_dir_all(app.parent().unwrap());
+fn every_versions_entry_is_considered_in_declared_order() {
+    let points = parse_extension_points(
+        "[Extension org.example.Extension]\nversions=missing;also-missing;available;\n",
+    );
+    let parent = ExtensionParent::from_ref("runtime/org.example.Platform/x86_64/99").unwrap();
+    let available = refs(&["runtime/org.example.Extension/x86_64/available"]);
+    assert_eq!(
+        resolve_extension_refs(&points, &parent, &available),
+        available
+    );
 }
 
 #[test]
-fn previously_active_gtk_theme_becomes_unused_after_switch() {
-    let (app, runtime) = gtk_theme_fixture("switched");
-    let previous = "runtime/org.gtk.Gtk3theme.Adwaita/x86_64/3.22".to_string();
-    let current = "runtime/org.gtk.Gtk3theme.Breeze/x86_64/3.22".to_string();
-    let installed = BTreeSet::from([previous, current.clone()]);
-
-    let required = required_extension_refs(
-        &app,
-        "org.example.Platform/x86_64/50",
-        &runtime,
-        &installed,
-        Some("Breeze"),
-    )
-    .unwrap();
-
-    assert_eq!(required, BTreeSet::from([current]));
-    let _ = fs::remove_dir_all(app.parent().unwrap());
-}
-
-#[test]
-fn unrelated_gtk_theme_namespace_matches_are_not_required() {
-    let (app, runtime) = gtk_theme_fixture("unrelated");
-    let active = "runtime/org.gtk.Gtk3theme.Breeze/x86_64/3.22".to_string();
-    let installed = BTreeSet::from([
-        active.clone(),
-        "runtime/org.gtk.Gtk3theme.Adwaita/x86_64/3.22".to_string(),
-        "runtime/org.gtk.Gtk3theme.Unrelated/x86_64/3.22".to_string(),
+fn application_fallback_uses_application_branch_not_runtime_branch() {
+    let points = parse_extension_points("[Extension org.example.Extension]\ndirectory=lib/ext\n");
+    let parent = ExtensionParent::from_ref("app/org.example.App/x86_64/beta").unwrap();
+    let available = refs(&[
+        "runtime/org.example.Extension/x86_64/beta",
+        "runtime/org.example.Extension/x86_64/24.08",
     ]);
+    assert_eq!(
+        resolve_extension_refs(&points, &parent, &available),
+        refs(&["runtime/org.example.Extension/x86_64/beta"])
+    );
+}
 
-    let required = required_extension_refs(
-        &app,
-        "org.example.Platform/x86_64/50",
-        &runtime,
-        &installed,
-        Some("Breeze"),
-    )
-    .unwrap();
+#[test]
+fn runtime_fallback_uses_runtime_branch() {
+    let points = parse_extension_points("[Extension org.example.Extension]\ndirectory=lib/ext\n");
+    let parent = ExtensionParent::from_ref("org.example.Platform/x86_64/24.08").unwrap();
+    let available = refs(&["runtime/org.example.Extension/x86_64/24.08"]);
+    assert_eq!(
+        resolve_extension_refs(&points, &parent, &available),
+        available
+    );
+}
 
-    assert_eq!(required, BTreeSet::from([active]));
-    let _ = fs::remove_dir_all(app.parent().unwrap());
+#[test]
+fn tagged_points_share_payload_identity_and_deduplicate() {
+    let points = parse_extension_points(
+        "[Extension org.example.Extension@old]\nversion=42\n\
+         [Extension org.example.Extension@new]\nversions=42;41\n",
+    );
+    let parent = ExtensionParent::from_ref("runtime/org.example.Platform/x86_64/99").unwrap();
+    let available = refs(&["runtime/org.example.Extension/x86_64/42"]);
+    assert_eq!(
+        resolve_extension_refs(&points, &parent, &available),
+        available
+    );
+}
+
+#[test]
+fn subdirectories_discover_all_matching_names_for_arch_and_preferred_branch() {
+    let points = parse_extension_points(
+        "[Extension org.example.Plugin]\nversions=2;1\nsubdirectories=true\n",
+    );
+    let parent = ExtensionParent::from_ref("app/org.example.App/x86_64/stable").unwrap();
+    let available = refs(&[
+        "runtime/org.example.Plugin.Alpha/x86_64/1",
+        "runtime/org.example.Plugin.Beta/x86_64/2",
+        "runtime/org.example.Plugin.Beta/x86_64/1",
+        "runtime/org.example.Plugin.Other/aarch64/2",
+        "runtime/org.example.Pluginish/x86_64/2",
+    ]);
+    assert_eq!(
+        resolve_extension_refs(&points, &parent, &available),
+        refs(&[
+            "runtime/org.example.Plugin.Alpha/x86_64/1",
+            "runtime/org.example.Plugin.Beta/x86_64/2",
+        ])
+    );
+}
+
+#[test]
+fn architecture_isolation_and_duplicate_metadata_are_deterministic() {
+    let points = parse_extension_points(
+        "[Extension org.example.Extension]\nversion=42\n\
+         [Extension org.example.Extension@duplicate]\nversions=42;42\n",
+    );
+    let parent = ExtensionParent::from_ref("runtime/org.example.Platform/x86_64/99").unwrap();
+    let available = refs(&[
+        "runtime/org.example.Extension/aarch64/42",
+        "runtime/org.example.Extension/x86_64/42",
+    ]);
+    assert_eq!(
+        resolve_extension_refs(&points, &parent, &available),
+        refs(&["runtime/org.example.Extension/x86_64/42"])
+    );
 }

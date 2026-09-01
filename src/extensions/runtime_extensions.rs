@@ -1,3 +1,4 @@
+use super::extension_points::{parse_extension_points, resolve_extension_refs, ExtensionParent};
 use super::{
     RuntimeCodecExtension, RuntimeGlExtension, RuntimeGtkThemeExtension, RuntimeVaapiExtension,
 };
@@ -44,11 +45,8 @@ pub fn activate_runtime_codec_extensions(
             "runtime/{}/{}/{}",
             name, runtime_parts.arch, extension_branch
         );
-        let checkout_dir = paths.extensions().join(format!(
-            "{}-{}",
-            safe_dir_fragment(name),
-            safe_dir_fragment(&extension_branch)
-        ));
+        let checkout_dir = installed_runtime_checkout(paths, &ref_name)
+            .unwrap_or_else(|| missing_runtime_checkout(paths, &ref_name));
         validate_extension_checkout(&ref_name, &checkout_dir)?;
         let ld_library_relative = value(&metadata, &section, "add-ld-path")
             .filter(|path| valid_relative_extension_path(path))
@@ -95,10 +93,16 @@ pub fn activate_default_gl_extension(
         "runtime/org.freedesktop.Platform.GL.default/{}/{}",
         parts.arch, extension_branch
     );
-    let checkout_dir = paths.extensions().join(format!(
-        "org.freedesktop.Platform.GL.default-{}",
-        safe_dir_fragment(&extension_branch)
-    ));
+    let ref_name = installed_ref_for_payload(
+        paths,
+        &metadata,
+        runtime_ref,
+        section,
+        "org.freedesktop.Platform.GL.default",
+    )
+    .unwrap_or(ref_name);
+    let checkout_dir = installed_runtime_checkout(paths, &ref_name)
+        .unwrap_or_else(|| missing_runtime_checkout(paths, &ref_name));
     validate_extension_checkout(&ref_name, &checkout_dir)?;
 
     Ok(Some(RuntimeGlExtension {
@@ -142,10 +146,16 @@ pub fn activate_intel_vaapi_extension(
         "runtime/org.freedesktop.Platform.VAAPI.Intel/{}/{}",
         parts.arch, extension_branch
     );
-    let checkout_dir = paths.extensions().join(format!(
-        "org.freedesktop.Platform.VAAPI.Intel-{}",
-        safe_dir_fragment(&extension_branch)
-    ));
+    let ref_name = installed_ref_for_payload(
+        paths,
+        &metadata,
+        runtime_ref,
+        section,
+        "org.freedesktop.Platform.VAAPI.Intel",
+    )
+    .unwrap_or(ref_name);
+    let checkout_dir = installed_runtime_checkout(paths, &ref_name)
+        .unwrap_or_else(|| missing_runtime_checkout(paths, &ref_name));
     validate_extension_checkout(&ref_name, &checkout_dir)?;
 
     let ld_library_relative = value(&metadata, section, "add-ld-path")
@@ -189,14 +199,14 @@ pub fn activate_gtk_theme_extension(
         .unwrap_or_else(|| parts.branch.clone());
     let name = format!("org.gtk.Gtk3theme.{theme}");
     let ref_name = format!("runtime/{name}/{}/{}", parts.arch, branch);
-    let checkout_dir = paths.extensions().join(format!(
-        "{}-{}",
-        safe_dir_fragment(&name),
-        safe_dir_fragment(&branch)
-    ));
-    if !checkout_dir.is_dir() {
+    let Some(ref_name) = installed_ref_for_payload(paths, &metadata, runtime_ref, section, &name)
+        .or_else(|| installed_runtime_checkout(paths, &ref_name).map(|_| ref_name))
+    else {
         return Ok(None);
-    }
+    };
+    let Some(checkout_dir) = installed_runtime_checkout(paths, &ref_name) else {
+        return Ok(None);
+    };
     if validate_extension_checkout(&ref_name, &checkout_dir).is_err() {
         return Ok(None);
     }
@@ -227,6 +237,45 @@ pub fn activate_gtk_theme_extension(
         checkout_dir,
         runtime_mount_relative,
     }))
+}
+
+fn installed_ref_for_payload(
+    paths: &Installation,
+    metadata: &str,
+    parent_ref: &str,
+    section: &str,
+    payload_name: &str,
+) -> Option<String> {
+    let parent = ExtensionParent::from_ref(parent_ref).ok()?;
+    let point_name = section.trim_start_matches("Extension ");
+    let points = parse_extension_points(metadata)
+        .into_iter()
+        .filter(|point| point.name == point_name)
+        .collect::<Vec<_>>();
+    let available = crate::installation::list_runtimes(paths)
+        .ok()?
+        .into_iter()
+        .map(|runtime| format!("runtime/{}", runtime.runtime_ref))
+        .collect();
+    resolve_extension_refs(&points, &parent, &available)
+        .into_iter()
+        .find(|ref_name| {
+            ref_name
+                .strip_prefix("runtime/")
+                .and_then(|partial| partial.split('/').next())
+                == Some(payload_name)
+        })
+}
+
+fn installed_runtime_checkout(paths: &Installation, ref_name: &str) -> Option<PathBuf> {
+    let partial = ref_name.strip_prefix("runtime/")?;
+    let record = crate::installation::get_runtime(paths, partial).ok()??;
+    Some(crate::installation::absolute(paths, &record.runtime_dir))
+}
+
+fn missing_runtime_checkout(paths: &Installation, ref_name: &str) -> PathBuf {
+    let partial = ref_name.strip_prefix("runtime/").unwrap_or(ref_name);
+    paths.runtimes().join(runtime_checkout_dir(partial))
 }
 
 pub(super) fn validate_extension_checkout(ref_name: &str, checkout_dir: &Path) -> Result<()> {
@@ -298,24 +347,17 @@ pub fn runtime_checkout_dir(runtime_ref: &str) -> String {
     format!("{name}-{arch}-{}", branch.replace('/', "_"))
 }
 
-pub(super) fn parse_runtime_ref(ref_name: &str) -> Option<RuntimeRefParts> {
-    let runtime_ref = ref_name.strip_prefix("runtime/")?;
-    split_runtime_ref(runtime_ref).ok()
-}
-
 pub(super) struct RuntimeRefParts {
-    pub(super) name: String,
     pub(super) arch: String,
     pub(super) branch: String,
 }
 
 pub(super) fn split_runtime_ref(runtime_ref: &str) -> Result<RuntimeRefParts> {
     let mut parts = runtime_ref.splitn(3, '/');
-    let name = parts.next().context("missing runtime name")?;
+    let _name = parts.next().context("missing runtime name")?;
     let arch = parts.next().context("missing runtime arch")?;
     let branch = parts.next().context("missing runtime branch")?;
     Ok(RuntimeRefParts {
-        name: name.to_string(),
         arch: arch.to_string(),
         branch: branch.to_string(),
     })

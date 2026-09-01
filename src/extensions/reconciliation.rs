@@ -1,12 +1,12 @@
-use super::application_extensions::is_supported_app_extension;
+use super::extension_points::{
+    parse_extension_points, point_for_ref, resolve_extension_refs, ExtensionParent, ExtensionPoint,
+};
 use super::runtime_extensions::{
-    extension_branch, first_extension_version, is_supported_runtime_codec_extension,
-    safe_dir_fragment, split_runtime_ref, valid_extension_suffix, valid_relative_extension_path,
+    safe_dir_fragment, valid_extension_suffix, valid_relative_extension_path,
 };
 use crate::architecture::FlatpakArchitecture;
-use crate::flatpak_metadata::{has_section, sections_with_prefix, value};
 use crate::installation::installation_paths::Installation;
-use crate::installation::AppRecord;
+use crate::installation::{AppRecord, RuntimeRecord};
 use crate::ostree::{Deployment, RemoteSource, Storage, StorageTimings};
 use crate::remotes::{self, RemoteMetadata};
 use anyhow::{Context, Result};
@@ -16,11 +16,11 @@ use std::path::{Path, PathBuf};
 
 const GL_EXTENSION: &str = "org.freedesktop.Platform.GL";
 const INTEL_VAAPI_EXTENSION: &str = "org.freedesktop.Platform.VAAPI.Intel";
+const GTK_THEME_EXTENSION: &str = "org.gtk.Gtk3theme";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RequiredExtension {
     ref_name: String,
-    checkout_dir: PathBuf,
     preferred_origin: String,
     optional: bool,
 }
@@ -34,11 +34,12 @@ struct ResolvedExtension {
     requirement: RequiredExtension,
     origin: String,
     checksum: String,
+    destination: PathBuf,
+    explicitly_installed: bool,
 }
 
-/// Reconcile every extension needed by the selected installed applications in
-/// one deployment transaction. Remote summaries are loaded, parsed, and read
-/// at most once for the lifetime of this reconciliation.
+/// Reconcile extension payloads as ordinary runtime refs. Remote summaries are
+/// loaded once and shared by generic extension-point discovery and deployment.
 pub(crate) fn reconcile_extensions(
     paths: &Installation,
     apps: &[AppRecord],
@@ -58,20 +59,6 @@ pub(crate) fn reconcile_extensions_with_metadata(
         return Ok(StorageTimings::default());
     }
 
-    let intel_vaapi = crate::host_resources::video_acceleration::host_has_intel_drm_device();
-    let gtk_theme = crate::host_resources::cursor_themes::active_gtk_theme();
-    let mut requirements = BTreeMap::new();
-    for app in apps {
-        for requirement in required_for_app(paths, app, intel_vaapi, gtk_theme.as_deref())? {
-            requirements
-                .entry(requirement.ref_name.clone())
-                .or_insert(requirement);
-        }
-    }
-    if requirements.is_empty() {
-        return Ok(StorageTimings::default());
-    }
-
     let mut enabled = remotes::enabled_remotes(paths)?;
     enabled.sort_by_key(|remote| (remote.name != remotes::DEFAULT_REMOTE, remote.name.clone()));
     let enabled_names = enabled
@@ -87,60 +74,90 @@ pub(crate) fn reconcile_extensions_with_metadata(
         );
     }
     let mut unavailable = BTreeMap::<String, String>::new();
-    let mut resolved = Vec::new();
+    for origin in &enabled_names {
+        if cache.contains_key(origin) {
+            continue;
+        }
+        match remotes::load_remote_metadata(paths, origin).and_then(|metadata| {
+            let summary = metadata.summary_bytes()?;
+            Ok(CachedRemote { metadata, summary })
+        }) {
+            Ok(remote) => {
+                cache.insert(origin.clone(), remote);
+            }
+            Err(error) => {
+                unavailable.insert(origin.clone(), format!("{error:#}"));
+            }
+        }
+    }
 
+    let installed = crate::installation::list_runtimes(paths)?;
+    let mut available_refs = cache
+        .values()
+        .flat_map(|remote| remote.metadata.list_refs())
+        .map(|item| item.ref_name)
+        .filter(|ref_name| ref_name.starts_with("runtime/"))
+        .collect::<BTreeSet<_>>();
+    available_refs.extend(
+        installed
+            .iter()
+            .map(|runtime| format!("runtime/{}", runtime.runtime_ref)),
+    );
+
+    let intel_vaapi = crate::host_resources::video_acceleration::host_has_intel_drm_device();
+    let gtk_theme = crate::host_resources::cursor_themes::active_gtk_theme();
+    let mut requirements = BTreeMap::new();
+    for app in apps {
+        for requirement in required_for_app(
+            paths,
+            app,
+            &available_refs,
+            intel_vaapi,
+            gtk_theme.as_deref(),
+        )? {
+            requirements
+                .entry(requirement.ref_name.clone())
+                .or_insert(requirement);
+        }
+    }
+    if requirements.is_empty() {
+        return Ok(StorageTimings::default());
+    }
+
+    let installed_by_ref = installed
+        .into_iter()
+        .map(|record| (format!("runtime/{}", record.runtime_ref), record))
+        .collect::<BTreeMap<_, _>>();
+    let mut resolved = Vec::new();
     for requirement in requirements.into_values() {
+        let existing = installed_by_ref.get(&requirement.ref_name);
         let mut origins = Vec::new();
-        if let Some(origin) = deployment_origin(&requirement.checkout_dir, &requirement.ref_name) {
-            origins.push(origin);
+        if let Some(record) = existing {
+            origins.push(record.origin.clone());
         }
         origins.push(requirement.preferred_origin.clone());
         origins.extend(enabled_names.iter().cloned());
         let mut seen = BTreeSet::new();
         origins.retain(|origin| seen.insert(origin.clone()));
 
-        let mut selected = None;
-        for origin in origins {
-            if !enabled_names.contains(&origin) {
+        let selected = origins.into_iter().find_map(|origin| {
+            cache
+                .get(&origin)
+                .and_then(|remote| remote.metadata.ref_checksum(&requirement.ref_name))
+                .map(|checksum| (origin, checksum.to_string()))
+        });
+        let Some((origin, checksum)) = selected else {
+            if existing.is_some_and(|record| runtime_checkout_is_valid(paths, record))
+                || requirement.optional
+            {
                 continue;
             }
-            if unavailable.contains_key(&origin) {
-                continue;
-            }
-            if !cache.contains_key(&origin) {
-                let loaded = remotes::load_remote_metadata(paths, &origin).and_then(|metadata| {
-                    let summary = metadata.summary_bytes()?;
-                    Ok(CachedRemote { metadata, summary })
-                });
-                match loaded {
-                    Ok(remote) => {
-                        cache.insert(origin.clone(), remote);
-                    }
-                    Err(error) => {
-                        unavailable.insert(origin.clone(), format!("{error:#}"));
-                        continue;
-                    }
-                }
-            }
-            let remote = cache.get(&origin).expect("inserted remote metadata");
-            if let Some(checksum) = remote.metadata.ref_checksum(&requirement.ref_name) {
-                selected = Some((
-                    remote.metadata.remote_name().to_string(),
-                    checksum.to_string(),
-                ));
-                break;
-            }
-        }
-        if selected.is_none() && requirement.optional {
-            continue;
-        }
-        let (origin, checksum) = selected.with_context(|| {
             let failures = unavailable
                 .iter()
                 .map(|(origin, error)| format!("{origin}: {error}"))
                 .collect::<Vec<_>>()
                 .join("; ");
-            if failures.is_empty() {
+            anyhow::bail!(if failures.is_empty() {
                 format!(
                     "ref is not present in an enabled remote: {}",
                     requirement.ref_name
@@ -150,13 +167,26 @@ pub(crate) fn reconcile_extensions_with_metadata(
                     "ref is not present in available remote metadata: {} ({failures})",
                     requirement.ref_name
                 )
-            }
-        })?;
+            });
+        };
+        let (destination, explicitly_installed) = runtime_destination(
+            paths,
+            &requirement.ref_name,
+            &origin,
+            &checksum,
+            existing,
+            force,
+        );
         resolved.push(ResolvedExtension {
             requirement,
             origin,
             checksum,
+            destination,
+            explicitly_installed,
         });
+    }
+    if resolved.is_empty() {
+        return Ok(StorageTimings::default());
     }
 
     let used_origins = resolved
@@ -177,19 +207,81 @@ pub(crate) fn reconcile_extensions_with_metadata(
         .iter()
         .map(|extension| Deployment {
             remote: &extension.origin,
-            kind: "extension",
+            kind: "runtime",
             ref_name: &extension.requirement.ref_name,
             checksum: &extension.checksum,
-            destination: &extension.requirement.checkout_dir,
+            destination: &extension.destination,
             force,
         })
         .collect::<Vec<_>>();
-    Storage::open(paths)?.deploy_from_sources_with_reuse_output(&sources, &deployments, show_reused)
+    let storage = Storage::open(paths)?;
+    let timings =
+        storage.deploy_from_sources_with_reuse_output(&sources, &deployments, show_reused)?;
+    for extension in resolved {
+        let partial_ref = extension
+            .requirement
+            .ref_name
+            .strip_prefix("runtime/")
+            .expect("extension payload is a runtime ref");
+        crate::installation::write_runtime(
+            paths,
+            &RuntimeRecord {
+                origin: extension.origin,
+                runtime_ref: partial_ref.to_string(),
+                runtime_commit: extension.checksum.clone(),
+                installed_size: storage.installed_size(&extension.checksum)?,
+                explicitly_installed: extension.explicitly_installed,
+                runtime_dir: paths.relative_data_path(&extension.destination)?,
+            },
+        )?;
+    }
+    drop(storage);
+    crate::installation::reconcile_runtime_bindings(paths)?;
+    Ok(timings)
+}
+
+fn runtime_destination(
+    paths: &Installation,
+    ref_name: &str,
+    origin: &str,
+    checksum: &str,
+    existing: Option<&RuntimeRecord>,
+    force: bool,
+) -> (PathBuf, bool) {
+    if let Some(record) = existing.filter(|record| {
+        record.origin == origin
+            && record.runtime_commit == checksum
+            && runtime_checkout_is_valid(paths, record)
+    }) {
+        return (
+            crate::installation::absolute(paths, &record.runtime_dir),
+            record.explicitly_installed,
+        );
+    }
+    let partial_ref = ref_name
+        .strip_prefix("runtime/")
+        .expect("extension payload is a runtime ref");
+    (
+        crate::installation::generation_checkout_dir(
+            &paths
+                .runtimes()
+                .join(super::runtime_checkout_dir(partial_ref)),
+            checksum,
+            force,
+        ),
+        existing.is_some_and(|record| record.explicitly_installed),
+    )
+}
+
+fn runtime_checkout_is_valid(paths: &Installation, record: &RuntimeRecord) -> bool {
+    let directory = crate::installation::absolute(paths, &record.runtime_dir);
+    directory.is_dir() && directory.join("files").is_dir()
 }
 
 fn required_for_app(
     paths: &Installation,
     app: &AppRecord,
+    available_refs: &BTreeSet<String>,
     intel_vaapi: bool,
     gtk_theme: Option<&str>,
 ) -> Result<Vec<RequiredExtension>> {
@@ -197,141 +289,135 @@ fn required_for_app(
     let runtime_dir = crate::installation::get_runtime(paths, &app.runtime_ref)?
         .map(|runtime| crate::installation::absolute(paths, &runtime.runtime_dir))
         .unwrap_or_else(|| crate::installation::absolute(paths, &app.runtime_dir));
+    let architecture = FlatpakArchitecture::from_flatpak_name(&app.arch)?;
+    let mut requirements = Vec::new();
+
     let runtime_metadata_path = runtime_dir.join("metadata");
     let runtime_metadata = fs::read_to_string(&runtime_metadata_path)
         .with_context(|| format!("read runtime metadata {}", runtime_metadata_path.display()))?;
-    let runtime = split_runtime_ref(&app.runtime_ref)?;
-    let architecture = FlatpakArchitecture::from_flatpak_name(&runtime.arch)?;
-    let mut requirements = Vec::new();
-
-    let gtk_section = "Extension org.gtk.Gtk3theme";
-    if let Some(theme) = gtk_theme.filter(|theme| valid_extension_suffix(theme)) {
-        if has_section(&runtime_metadata, gtk_section) {
-            let branch = extension_branch(&runtime_metadata, gtk_section, &runtime.branch);
-            let name = format!("org.gtk.Gtk3theme.{theme}");
-            let mut requirement =
-                requirement(paths, &name, &runtime.arch, &branch, &app.runtime_origin);
-            requirement.optional = true;
-            requirements.push(requirement);
-        }
-    }
-
-    let gl_section = format!("Extension {GL_EXTENSION}");
-    if has_section(&runtime_metadata, &gl_section) {
-        let branch = value(&runtime_metadata, &gl_section, "versions")
-            .and_then(|versions| first_extension_version(&versions))
-            .unwrap_or_else(|| runtime.branch.clone());
-        let default_directory = architecture.default_gl_extension_dir();
-        let directory =
-            value(&runtime_metadata, &gl_section, "directory").unwrap_or(default_directory);
-        ensure_mountpoint(&runtime_dir, &directory, Some("default"))?;
-        requirements.push(requirement(
-            paths,
-            &format!("{GL_EXTENSION}.default"),
-            &runtime.arch,
-            &branch,
-            &app.runtime_origin,
-        ));
-    }
-
-    if intel_vaapi {
-        let section = format!("Extension {INTEL_VAAPI_EXTENSION}");
-        if has_section(&runtime_metadata, &section) {
-            let branch = extension_branch(&runtime_metadata, &section, &runtime.branch);
-            let default_directory = architecture.default_intel_vaapi_extension_dir();
-            let directory =
-                value(&runtime_metadata, &section, "directory").unwrap_or(default_directory);
-            ensure_mountpoint(&runtime_dir, &directory, None)?;
-            requirements.push(requirement(
-                paths,
-                INTEL_VAAPI_EXTENSION,
-                &runtime.arch,
-                &branch,
-                &app.runtime_origin,
-            ));
-        }
-    }
-
-    for section in sections_with_prefix(&runtime_metadata, "Extension ") {
-        let name = section.trim_start_matches("Extension ");
-        if !is_supported_runtime_codec_extension(name) {
-            continue;
-        }
-        let Some(directory) = value(&runtime_metadata, &section, "directory") else {
-            continue;
-        };
-        let branch = extension_branch(&runtime_metadata, &section, &runtime.branch);
-        ensure_mountpoint(&runtime_dir, &directory, None)?;
-        requirements.push(requirement(
-            paths,
-            name,
-            &runtime.arch,
-            &branch,
-            &app.runtime_origin,
-        ));
-    }
+    requirements.extend(required_from_metadata(
+        paths,
+        &runtime_metadata,
+        &ExtensionParent::from_ref(&app.runtime_ref)?,
+        &runtime_dir,
+        &app.runtime_origin,
+        available_refs,
+        intel_vaapi,
+        gtk_theme,
+        Some(architecture),
+    )?);
 
     let app_metadata_path = app_dir.join("metadata");
     let app_metadata = fs::read_to_string(&app_metadata_path)
         .with_context(|| format!("read app metadata {}", app_metadata_path.display()))?;
-    for section in sections_with_prefix(&app_metadata, "Extension ") {
-        let name = section.trim_start_matches("Extension ");
-        if !is_supported_app_extension(name) {
-            continue;
-        }
-        let Some(directory) = value(&app_metadata, &section, "directory") else {
-            continue;
-        };
-        let branch = extension_branch(&app_metadata, &section, &runtime.branch);
-        ensure_mountpoint(&app_dir, &directory, None)?;
-        requirements.push(requirement(
-            paths,
-            name,
-            &runtime.arch,
-            &branch,
-            &app.origin,
-        ));
-    }
-
+    requirements.extend(required_from_metadata(
+        paths,
+        &app_metadata,
+        &ExtensionParent::from_ref(&app.app_ref)?,
+        &app_dir,
+        &app.origin,
+        available_refs,
+        intel_vaapi,
+        gtk_theme,
+        None,
+    )?);
+    requirements.sort_by(|left, right| left.ref_name.cmp(&right.ref_name));
+    requirements.dedup_by(|left, right| left.ref_name == right.ref_name);
     Ok(requirements)
 }
 
-fn requirement(
-    paths: &Installation,
-    name: &str,
-    arch: &str,
-    branch: &str,
+#[allow(clippy::too_many_arguments)]
+fn required_from_metadata(
+    _paths: &Installation,
+    metadata: &str,
+    parent: &ExtensionParent,
+    parent_dir: &Path,
     preferred_origin: &str,
-) -> RequiredExtension {
-    RequiredExtension {
-        ref_name: format!("runtime/{name}/{arch}/{branch}"),
-        checkout_dir: paths.extensions().join(format!(
-            "{}-{}",
-            safe_dir_fragment(name),
-            safe_dir_fragment(branch)
-        )),
-        preferred_origin: preferred_origin.to_string(),
-        optional: false,
+    available_refs: &BTreeSet<String>,
+    intel_vaapi: bool,
+    gtk_theme: Option<&str>,
+    architecture: Option<FlatpakArchitecture>,
+) -> Result<Vec<RequiredExtension>> {
+    let points = parse_extension_points(metadata);
+    let refs = resolve_extension_refs(&points, parent, available_refs);
+    let mut requirements = Vec::new();
+    for ref_name in refs {
+        let point = point_for_ref(&points, parent, &ref_name)
+            .expect("resolved extension has a declaring point");
+        if !autodownload_enabled(point, &ref_name, intel_vaapi, gtk_theme) {
+            continue;
+        }
+        ensure_declared_mountpoint(parent_dir, point, &ref_name, architecture)?;
+        requirements.push(RequiredExtension {
+            ref_name,
+            preferred_origin: preferred_origin.to_string(),
+            optional: point.name == GTK_THEME_EXTENSION,
+        });
     }
+    Ok(requirements)
 }
 
-fn deployment_origin(checkout_dir: &Path, expected_ref: &str) -> Option<String> {
-    let marker = fs::read_to_string(checkout_dir.join(".ostree-commit")).ok()?;
-    let mut lines = marker.lines();
-    if lines.next()? != expected_ref {
-        return None;
+fn autodownload_enabled(
+    point: &ExtensionPoint,
+    ref_name: &str,
+    intel_vaapi: bool,
+    gtk_theme: Option<&str>,
+) -> bool {
+    let name = ref_name
+        .strip_prefix("runtime/")
+        .and_then(|partial| partial.split('/').next())
+        .unwrap_or_default();
+    if point.name == GTK_THEME_EXTENSION {
+        return gtk_theme
+            .filter(|theme| valid_extension_suffix(theme))
+            .is_some_and(|theme| name == format!("{GTK_THEME_EXTENSION}.{theme}"));
     }
-    let _commit = lines.next()?;
-    let _installed_size = lines.next()?;
-    lines.next().map(ToOwned::to_owned)
+    if point.name == GL_EXTENSION && point.has_condition("active-gl-driver") {
+        return name == format!("{GL_EXTENSION}.default");
+    }
+    if point.name == INTEL_VAAPI_EXTENSION {
+        return intel_vaapi;
+    }
+    if point.no_autodownload || !point.download_if.is_empty() {
+        return false;
+    }
+    true
 }
 
-fn ensure_mountpoint(root: &Path, directory: &str, suffix: Option<&str>) -> Result<()> {
-    if !valid_relative_extension_path(directory) {
+fn ensure_declared_mountpoint(
+    root: &Path,
+    point: &ExtensionPoint,
+    ref_name: &str,
+    architecture: Option<FlatpakArchitecture>,
+) -> Result<()> {
+    let directory = point.directory.clone().or_else(|| {
+        let architecture = architecture?;
+        match point.name.as_str() {
+            GL_EXTENSION => Some(architecture.default_gl_extension_dir()),
+            INTEL_VAAPI_EXTENSION => Some(architecture.default_intel_vaapi_extension_dir()),
+            _ => None,
+        }
+    });
+    let Some(directory) = directory else {
+        return Ok(());
+    };
+    if !valid_relative_extension_path(&directory) {
         anyhow::bail!("invalid extension directory: {directory:?}");
     }
     let mut mountpoint = root.join("files").join(directory);
-    if let Some(suffix) = suffix {
+    if point.subdirectories {
+        let name = ref_name
+            .strip_prefix("runtime/")
+            .and_then(|partial| partial.split('/').next())
+            .unwrap_or_default();
+        if let Some(suffix) = name.strip_prefix(&format!("{}.", point.name)) {
+            mountpoint.push(safe_dir_fragment(suffix));
+        }
+    }
+    if let Some(suffix) = &point.subdirectory_suffix {
+        if !valid_relative_extension_path(suffix) {
+            anyhow::bail!("invalid extension subdirectory suffix: {suffix:?}");
+        }
         mountpoint.push(suffix);
     }
     fs::create_dir_all(&mountpoint)

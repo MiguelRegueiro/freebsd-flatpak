@@ -254,13 +254,9 @@ fn plan_unused_deployment_checkouts_with_gtk_theme(
         }
     }
 
-    let installed_extensions = state::list_extensions(paths)?
+    let installed_extension_refs = state::list_runtimes(paths)?
         .into_iter()
-        .map(|extension| (extension.checkout_dir, extension.ref_name, extension.origin))
-        .collect::<Vec<_>>();
-    let installed_extension_refs = installed_extensions
-        .iter()
-        .map(|(_, ref_name, _)| ref_name.clone())
+        .map(|runtime| format!("runtime/{}", runtime.runtime_ref))
         .collect::<BTreeSet<_>>();
 
     let mut required_extensions = BTreeSet::new();
@@ -270,6 +266,7 @@ fn plan_unused_deployment_checkouts_with_gtk_theme(
             .unwrap_or_else(|| state::absolute(paths, &app.runtime_dir));
         required_extensions.extend(runtime::required_extension_refs(
             &state::absolute(paths, &app.app_dir),
+            &app.app_ref,
             &app.runtime_ref,
             &runtime_dir,
             &installed_extension_refs,
@@ -286,6 +283,12 @@ fn plan_unused_deployment_checkouts_with_gtk_theme(
             );
         }
     }
+
+    runtime_roots.extend(
+        required_extensions
+            .iter()
+            .filter_map(|ref_name| ref_name.strip_prefix("runtime/").map(ToOwned::to_owned)),
+    );
 
     let mut runtime_candidates = BTreeMap::<String, (BTreeSet<PathBuf>, BTreeSet<String>)>::new();
     for runtime in state::list_runtimes(paths)? {
@@ -317,19 +320,6 @@ fn plan_unused_deployment_checkouts_with_gtk_theme(
             deployment_paths,
             runtime_ref: Some(runtime_ref),
             origins,
-        });
-    }
-
-    for (path, ref_name, origin) in installed_extensions {
-        if required_extensions.contains(&ref_name) {
-            continue;
-        }
-        plan.push(UnusedRemoval {
-            ref_name,
-            kind: "extension",
-            deployment_paths: BTreeSet::from([path]),
-            runtime_ref: None,
-            origins: BTreeSet::from([origin]),
         });
     }
 

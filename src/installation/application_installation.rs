@@ -243,7 +243,7 @@ pub fn update_runtime(
     Ok(record)
 }
 
-fn generation_checkout_dir(base: &Path, commit: &str, force: bool) -> PathBuf {
+pub(crate) fn generation_checkout_dir(base: &Path, commit: &str, force: bool) -> PathBuf {
     let ordinary = base.join(commit);
     if !force || !ordinary.exists() {
         return ordinary;

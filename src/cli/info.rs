@@ -105,26 +105,7 @@ fn resolve_installed(
             });
         }
     }
-    for extension in state::list_extensions(paths)? {
-        let runtime_ref = extension
-            .ref_name
-            .strip_prefix("runtime/")
-            .unwrap_or(&extension.ref_name);
-        let (id, arch, ref_branch) = split_runtime_ref(runtime_ref)?;
-        if partial.matches(&FlatpakRef::parse(&extension.ref_name)?) {
-            matches.push(InstalledInfo {
-                id,
-                ref_name: extension.ref_name,
-                arch,
-                branch: ref_branch,
-                origin: extension.origin,
-                commit: extension.commit,
-                installed_size: extension.installed_size,
-                location: extension.checkout_dir,
-                runtime: None,
-            });
-        }
-    }
+
     match matches.len() {
         0 => bail!("{name} is not installed"),
         1 => Ok(matches.remove(0)),

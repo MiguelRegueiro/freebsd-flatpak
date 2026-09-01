@@ -172,12 +172,24 @@ fn uninstall_unused_preserves_installed_and_pinned_dependencies() {
         ("pinned-only", "runtime/org.example.PinnedOnly/x86_64/two"),
         ("unused", "runtime/org.example.Unused/x86_64/one"),
     ] {
-        create_marked_checkout(
-            &paths.extensions().join(name),
-            ref_name,
-            name,
-            "[Runtime]\nname=extension\n",
-        );
+        let partial_ref = ref_name.strip_prefix("runtime/").unwrap();
+        let checkout = paths
+            .runtimes()
+            .join(runtime::runtime_checkout_dir(partial_ref))
+            .join(name);
+        create_marked_checkout(&checkout, ref_name, name, "[Runtime]\nname=extension\n");
+        state::write_runtime(
+            &paths,
+            &state::RuntimeRecord {
+                origin: "flathub".to_string(),
+                runtime_ref: partial_ref.to_string(),
+                runtime_commit: name.to_string(),
+                explicitly_installed: false,
+                installed_size: 0,
+                runtime_dir: paths.relative_data_path(&checkout).unwrap(),
+            },
+        )
+        .unwrap();
     }
 
     let plan = plan_unused_deployment_checkouts(&paths).unwrap();
@@ -188,7 +200,9 @@ fn uninstall_unused_preserves_installed_and_pinned_dependencies() {
     assert!(planned_refs.contains(&format!("runtime/{runtime_three}")));
     assert!(planned_refs.contains("runtime/org.example.Unused/x86_64/one"));
     assert!(runtime_three_dir.exists());
-    assert!(paths.extensions().join("unused").exists());
+    assert!(state::get_runtime(&paths, "org.example.Unused/x86_64/one")
+        .unwrap()
+        .is_some());
 
     let removed = apply_unused_deployment_plan(&paths, plan).unwrap();
     let removed_refs = removed
@@ -200,11 +214,17 @@ fn uninstall_unused_preserves_installed_and_pinned_dependencies() {
     assert!(runtime_one_dir.exists());
     assert!(runtime_two_dir.exists());
     assert!(!runtime_three_dir.exists());
-    assert!(paths.extensions().join("keep").exists());
-    assert!(paths.extensions().join("active").exists());
-    assert!(paths.extensions().join("gl-default").exists());
-    assert!(paths.extensions().join("pinned-only").exists());
-    assert!(!paths.extensions().join("unused").exists());
+    for runtime_ref in [
+        "org.example.Keep/x86_64/one",
+        "org.example.Active/x86_64/two",
+        "org.freedesktop.Platform.GL.default/x86_64/one",
+        "org.example.PinnedOnly/x86_64/two",
+    ] {
+        assert!(state::get_runtime(&paths, runtime_ref).unwrap().is_some());
+    }
+    assert!(state::get_runtime(&paths, "org.example.Unused/x86_64/one")
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -248,12 +268,29 @@ fn active_run_record_pins_previous_gtk_theme_after_theme_switch() {
     let previous_ref = "runtime/org.gtk.Gtk3theme.Adwaita/x86_64/3.22";
     let current_ref = "runtime/org.gtk.Gtk3theme.Breeze/x86_64/3.22";
     for (directory, ref_name) in [("adwaita", previous_ref), ("breeze", current_ref)] {
+        let partial_ref = ref_name.strip_prefix("runtime/").unwrap();
+        let checkout = paths
+            .runtimes()
+            .join(runtime::runtime_checkout_dir(partial_ref))
+            .join(directory);
         create_marked_checkout(
-            &paths.extensions().join(directory),
+            &checkout,
             ref_name,
             directory,
             "[Runtime]\nname=org.gtk.Gtk3theme.Theme\n",
         );
+        state::write_runtime(
+            &paths,
+            &state::RuntimeRecord {
+                origin: "flathub".to_string(),
+                runtime_ref: partial_ref.to_string(),
+                runtime_commit: directory.to_string(),
+                explicitly_installed: false,
+                installed_size: 0,
+                runtime_dir: paths.relative_data_path(&checkout).unwrap(),
+            },
+        )
+        .unwrap();
     }
     state::write_pinned_run_record_with_extensions(
         &paths,

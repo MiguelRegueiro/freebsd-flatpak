@@ -37,7 +37,12 @@ fn install_extension_for_arch(
     branch: &str,
     origin: &str,
 ) -> PathBuf {
-    let checkout = paths.extensions().join(format!("{name}-{branch}"));
+    crate::installation::ensure_layout(paths).unwrap();
+    let partial_ref = format!("{name}/{arch}/{branch}");
+    let checkout = paths
+        .runtimes()
+        .join(runtime_checkout_dir(&partial_ref))
+        .join(format!("commit-{branch}"));
     fs::create_dir_all(checkout.join("files")).unwrap();
     fs::write(
         checkout.join("metadata"),
@@ -47,6 +52,18 @@ fn install_extension_for_arch(
     fs::write(
         checkout.join(".ostree-commit"),
         format!("runtime/{name}/{arch}/{branch}\ncommit-{branch}\n42\n{origin}\n"),
+    )
+    .unwrap();
+    crate::installation::write_runtime(
+        paths,
+        &crate::installation::RuntimeRecord {
+            origin: origin.to_string(),
+            runtime_ref: partial_ref,
+            runtime_commit: format!("commit-{branch}"),
+            installed_size: 42,
+            explicitly_installed: false,
+            runtime_dir: paths.relative_data_path(&checkout).unwrap(),
+        },
     )
     .unwrap();
     checkout

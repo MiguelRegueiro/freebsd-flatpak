@@ -87,7 +87,7 @@ pub fn cleanup_retired_deployments(paths: &Installation) -> Result<Vec<PathBuf>>
 }
 
 fn remove_managed_path(paths: &Installation, path: &Path) -> Result<()> {
-    let allowed = [paths.apps(), paths.runtimes(), paths.extensions()];
+    let allowed = [paths.apps(), paths.runtimes()];
     if !allowed
         .iter()
         .any(|root| path.starts_with(root) && path != root)
@@ -158,12 +158,7 @@ pub fn safe_remove_dir(paths: &Installation, path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let allowed = [
-        paths.apps(),
-        paths.runtimes(),
-        paths.chroots(),
-        paths.extensions(),
-    ];
+    let allowed = [paths.apps(), paths.runtimes(), paths.chroots()];
     if !allowed
         .iter()
         .any(|root| path.starts_with(root) && path != *root)

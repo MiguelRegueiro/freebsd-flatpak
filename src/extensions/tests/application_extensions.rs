@@ -10,8 +10,6 @@ fn fixture(metadata: &str) -> (Installation, FlatpakApp, PathBuf) {
         NEXT_DIR.fetch_add(1, Ordering::Relaxed)
     ));
     let paths = Installation::for_test(&root);
-    fs::create_dir_all(paths.remote_configs()).unwrap();
-    fs::write(paths.remote_configs().join("poison.conf"), [0xff]).unwrap();
     let app_dir = root.join("app");
     let runtime_dir = root.join("runtime");
     fs::create_dir_all(app_dir.join("files")).unwrap();
@@ -29,15 +27,18 @@ fn fixture(metadata: &str) -> (Installation, FlatpakApp, PathBuf) {
 }
 
 #[test]
-fn valid_app_extension_activates_locally_using_app_selected_branch() {
+fn valid_app_extension_activates_from_normal_runtime_record() {
     let (paths, app, root) = fixture(
         "[Application]\nname=org.example.App\n\
          [Extension org.freedesktop.Platform.ffmpeg-full]\nversions=23.08;22.08\ndirectory=lib/ffmpeg\nadd-ld-path=lib\n",
     );
     fs::create_dir_all(app.app_dir.join("files/lib/ffmpeg")).unwrap();
+    crate::installation::ensure_layout(&paths).unwrap();
+    let runtime_ref = "org.freedesktop.Platform.ffmpeg-full/x86_64/23.08";
     let checkout = paths
-        .extensions()
-        .join("org.freedesktop.Platform.ffmpeg-full-23.08");
+        .runtimes()
+        .join(crate::installation::runtime_checkout_dir(runtime_ref))
+        .join("commit");
     fs::create_dir_all(checkout.join("files")).unwrap();
     fs::write(
         checkout.join("metadata"),
@@ -47,6 +48,18 @@ fn valid_app_extension_activates_locally_using_app_selected_branch() {
     fs::write(
         checkout.join(".ostree-commit"),
         "runtime/org.freedesktop.Platform.ffmpeg-full/x86_64/23.08\ncommit\n7\napp-origin\n",
+    )
+    .unwrap();
+    crate::installation::write_runtime(
+        &paths,
+        &crate::installation::RuntimeRecord {
+            origin: "app-origin".to_string(),
+            runtime_ref: runtime_ref.to_string(),
+            runtime_commit: "commit".to_string(),
+            installed_size: 7,
+            explicitly_installed: false,
+            runtime_dir: paths.relative_data_path(&checkout).unwrap(),
+        },
     )
     .unwrap();
 
@@ -66,7 +79,7 @@ fn valid_app_extension_activates_locally_using_app_selected_branch() {
 }
 
 #[test]
-fn app_without_supported_extensions_needs_no_extension_installation() {
+fn app_without_launch_compatibility_consumer_activates_no_codec_mount() {
     let (paths, app, root) = fixture(
         "[Application]\nname=org.example.App\n\
          [Extension org.example.Optional]\nversion=24.08\ndirectory=lib/optional\n",
@@ -75,6 +88,5 @@ fn app_without_supported_extensions_needs_no_extension_installation() {
     let extensions = activate_app_codec_extensions(&paths, &app).unwrap();
 
     assert!(extensions.is_empty());
-    assert!(!paths.extensions().exists());
     fs::remove_dir_all(root).unwrap();
 }

@@ -58,29 +58,6 @@ fn installed_rows(paths: &Installation, options: &Options) -> Result<Vec<Install
                 installed_size: runtime.installed_size,
             });
         }
-        for extension in state::list_extensions(paths)? {
-            let partial = extension
-                .ref_name
-                .strip_prefix("runtime/")
-                .unwrap_or(&extension.ref_name);
-            let (application, arch, branch) = split_ref(partial)?;
-            let (name, version) = installed_appstream_fields(
-                &state::absolute(paths, &extension.checkout_dir),
-                &application,
-            );
-            rows.push(InstalledRow {
-                name,
-                application,
-                arch,
-                version,
-                branch,
-                runtime: String::new(),
-                ref_name: extension.ref_name,
-                origin: extension.origin,
-                active: extension.commit,
-                installed_size: extension.installed_size,
-            });
-        }
     }
     rows.sort_by(|left, right| left.ref_name.cmp(&right.ref_name));
     rows.dedup_by(|left, right| {

@@ -1,5 +1,5 @@
 use super::runtime_extensions::{
-    first_extension_version, safe_dir_fragment, split_runtime_ref, validate_extension_checkout,
+    first_extension_version, split_runtime_ref, validate_extension_checkout,
 };
 use super::AppExtension;
 use crate::flatpak_metadata::{sections_with_prefix, value};
@@ -53,11 +53,16 @@ pub fn activate_app_codec_extensions(
             "runtime/{}/{}/{}",
             name, runtime_parts.arch, extension_branch
         );
-        let checkout_dir = paths.extensions().join(format!(
-            "{}-{}",
-            safe_dir_fragment(name),
-            safe_dir_fragment(&extension_branch)
-        ));
+        let partial_ref = ref_name
+            .strip_prefix("runtime/")
+            .expect("runtime extension ref");
+        let checkout_dir = crate::installation::get_runtime(paths, partial_ref)?
+            .map(|record| crate::installation::absolute(paths, &record.runtime_dir))
+            .unwrap_or_else(|| {
+                paths
+                    .runtimes()
+                    .join(super::runtime_extensions::runtime_checkout_dir(partial_ref))
+            });
         validate_extension_checkout(&ref_name, &checkout_dir)?;
         let ld_library_relative = value(&metadata, &section, "add-ld-path")
             .filter(|path| !path.is_empty())
