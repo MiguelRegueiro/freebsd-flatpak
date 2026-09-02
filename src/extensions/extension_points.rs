@@ -164,32 +164,50 @@ pub(crate) fn required_extension_refs(
     installed_runtime_refs: &BTreeSet<String>,
     active_gtk_theme: Option<&str>,
 ) -> Result<BTreeSet<String>> {
-    let facts = ExtensionFacts::detect(active_gtk_theme);
     let sources = [
-        (
-            app_dir.join("metadata"),
-            ExtensionParent::from_ref(app_ref)?,
-        ),
-        (
-            runtime_dir.join("metadata"),
-            ExtensionParent::from_ref(runtime_ref)?,
-        ),
+        (app_dir.join("metadata"), app_ref),
+        (runtime_dir.join("metadata"), runtime_ref),
     ];
     let mut refs = BTreeSet::new();
-    for (metadata_path, parent) in sources {
-        let Ok(metadata) = fs::read_to_string(&metadata_path) else {
-            continue;
-        };
-        let points = parse_extension_points(&metadata);
-        for ref_name in resolve_extension_refs(&points, &parent, installed_runtime_refs) {
-            let point = point_for_ref(&points, &parent, &ref_name)
-                .expect("resolved extension has a declaring point");
-            if keeps_installed_ref(point, &ref_name, &facts) {
-                refs.insert(ref_name);
-            }
-        }
+    for (metadata_path, parent_ref) in sources {
+        refs.extend(applicable_extension_refs(
+            &metadata_path,
+            parent_ref,
+            installed_runtime_refs,
+            active_gtk_theme,
+        )?);
     }
     Ok(refs)
+}
+
+pub(crate) fn applicable_extension_refs(
+    metadata_path: &Path,
+    parent_ref: &str,
+    installed_runtime_refs: &BTreeSet<String>,
+    active_gtk_theme: Option<&str>,
+) -> Result<BTreeSet<String>> {
+    let Ok(metadata) = fs::read_to_string(metadata_path) else {
+        return Ok(BTreeSet::new());
+    };
+    let parent = ExtensionParent::from_ref(parent_ref)?;
+    let facts = ExtensionFacts::detect(active_gtk_theme);
+    let points = parse_extension_points(&metadata);
+    Ok(
+        resolve_extension_refs(&points, &parent, installed_runtime_refs)
+            .into_iter()
+            .filter(|ref_name| {
+                point_for_ref(&points, &parent, ref_name)
+                    .is_some_and(|point| keeps_installed_ref(point, ref_name, &facts))
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn is_hidden_related_ref(runtime_ref: &str) -> bool {
+    runtime_ref.split('/').next().is_some_and(|id| {
+        id.split('.')
+            .any(|component| matches!(component, "Locale" | "Debug"))
+    })
 }
 
 pub(crate) fn autodelete_extension_refs(

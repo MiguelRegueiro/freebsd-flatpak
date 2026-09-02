@@ -15,6 +15,7 @@ pub(super) struct UninstallOptions {
     pub(super) transaction: TransactionOptions,
     pub(super) unused: bool,
     pub(super) delete_data: bool,
+    pub(super) no_related: bool,
     pub(super) kind: Option<RefKind>,
     pub(super) reference: Option<String>,
 }
@@ -23,6 +24,7 @@ pub(super) fn parse_uninstall_args(args: Vec<String>) -> Result<UninstallOptions
     let mut transaction = TransactionOptions::default();
     let mut unused = false;
     let mut delete_data = false;
+    let mut no_related = false;
     let mut kind = None;
     let mut operands = Vec::new();
     for arg in args {
@@ -31,6 +33,7 @@ pub(super) fn parse_uninstall_args(args: Vec<String>) -> Result<UninstallOptions
             "--noninteractive" => transaction.noninteractive = true,
             "--unused" => unused = true,
             "--delete-data" => delete_data = true,
+            "--no-related" => no_related = true,
             "--app" => set_kind_filter(&mut kind, RefKind::App)?,
             "--runtime" => set_kind_filter(&mut kind, RefKind::Runtime)?,
             _ if arg.starts_with('-') => bail!("unknown uninstall option: {arg}"),
@@ -48,6 +51,7 @@ pub(super) fn parse_uninstall_args(args: Vec<String>) -> Result<UninstallOptions
         transaction,
         unused,
         delete_data,
+        no_related,
         kind,
         reference: operands.pop(),
     })
@@ -77,17 +81,7 @@ pub(crate) fn cmd_uninstall(paths: &Installation, args: Vec<String>) -> Result<(
     if !present_and_confirm(&entries, options.transaction)? {
         return Ok(());
     }
-    let installed_runtime_refs = state::list_runtimes(paths)?
-        .into_iter()
-        .map(|runtime| format!("runtime/{}", runtime.runtime_ref))
-        .collect::<BTreeSet<_>>();
-    let autodelete_refs = runtime::autodelete_extension_refs(
-        &state::absolute(paths, &record.app_dir),
-        &record.app_ref,
-        &record.runtime_ref,
-        &state::absolute(paths, &record.runtime_dir),
-        &installed_runtime_refs,
-    )?;
+    let autodelete_refs = related_refs_for_uninstall(paths, &record, options.no_related)?;
     desktop_integration::remove_export(paths, app_id)?;
     if state::remove_app_record(paths, app_id)?.is_none() {
         println!("{app_id} is not installed");
@@ -125,6 +119,27 @@ pub(crate) fn cmd_uninstall(paths: &Installation, args: Vec<String>) -> Result<(
         }
     }
     Ok(())
+}
+
+fn related_refs_for_uninstall(
+    paths: &Installation,
+    record: &state::AppRecord,
+    no_related: bool,
+) -> Result<BTreeSet<String>> {
+    if no_related {
+        return Ok(BTreeSet::new());
+    }
+    let installed_runtime_refs = state::list_runtimes(paths)?
+        .into_iter()
+        .map(|runtime| format!("runtime/{}", runtime.runtime_ref))
+        .collect::<BTreeSet<_>>();
+    runtime::autodelete_extension_refs(
+        &state::absolute(paths, &record.app_dir),
+        &record.app_ref,
+        &record.runtime_ref,
+        &state::absolute(paths, &record.runtime_dir),
+        &installed_runtime_refs,
+    )
 }
 
 #[derive(Debug)]

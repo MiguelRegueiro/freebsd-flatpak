@@ -18,6 +18,7 @@ pub struct FlatpakApp {
 #[derive(Debug, Default)]
 pub struct ResolveAppOptions {
     pub app_dir: Option<PathBuf>,
+    pub runtime_ref: Option<String>,
     pub runtime_dir: Option<PathBuf>,
     pub entry: Option<String>,
     pub args: Vec<String>,
@@ -47,12 +48,13 @@ pub fn resolve_app(
         bail!("metadata app id mismatch: requested {app_id}, checkout contains {metadata_app_id}");
     }
 
-    let runtime_ref = value(&metadata, "Application", "runtime").with_context(|| {
+    let metadata_runtime_ref = value(&metadata, "Application", "runtime").with_context(|| {
         format!(
             "metadata has no Application/runtime in {}",
             metadata_path.display()
         )
     })?;
+    let runtime_ref = options.runtime_ref.unwrap_or(metadata_runtime_ref);
     let command = options
         .entry
         .or_else(|| value(&metadata, "Application", "command"))

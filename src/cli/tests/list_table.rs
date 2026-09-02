@@ -16,6 +16,25 @@ fn details_selects_every_truthful_column() {
 }
 
 #[test]
+fn all_and_app_runtime_filters_parse() {
+    let options =
+        parse_options(&["--all", "--app-runtime=org.example.Platform//50"].map(str::to_string))
+            .unwrap();
+    assert!(options.all);
+    assert!(options.apps);
+    assert!(!options.runtimes);
+    let runtime = options.app_runtime.unwrap();
+    assert_eq!(runtime.id, "org.example.Platform");
+    assert_eq!(runtime.arch, None);
+    assert_eq!(runtime.branch.as_deref(), Some("50"));
+
+    assert!(parse_options(
+        &["--runtime", "--app-runtime=org.example.Platform"].map(str::to_string)
+    )
+    .is_err());
+}
+
+#[test]
 fn validates_columns_and_unique_prefixes() {
     assert_eq!(resolve_column("siz").unwrap(), Some(Column::Size));
     assert!(resolve_column("missing").is_err());

@@ -78,6 +78,7 @@ pub(crate) fn run() -> Result<()> {
             Some("info") => help::print_info_help(),
             Some("kill") => help::print_kill_help(),
             Some("list") => help::print_list_help(),
+            Some("run") => help::print_run_help(),
             Some("update" | "upgrade") => help::print_update_help(),
             Some("uninstall" | "remove") => help::print_uninstall_help(),
             Some("remotes") => help::print_remotes_help(),

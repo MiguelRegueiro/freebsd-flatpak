@@ -3,6 +3,7 @@ use crate::{
     installation::{self as state, installation_paths::Installation},
 };
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 struct InstalledInfo {
@@ -15,16 +16,19 @@ struct InstalledInfo {
     installed_size: u64,
     location: PathBuf,
     runtime: Option<String>,
+    extensions: Vec<state::RuntimeRecord>,
 }
 
 pub(crate) fn cmd_info(paths: &Installation, args: Vec<String>) -> Result<()> {
     let mut show_size = false;
     let mut show_location = false;
+    let mut show_extensions = false;
     let mut operands = Vec::new();
     for arg in args {
         match arg.as_str() {
             "-s" | "--show-size" => show_size = true,
             "-l" | "--show-location" => show_location = true,
+            "-e" | "--show-extensions" => show_extensions = true,
             _ if arg.starts_with('-') => bail!("unknown info option: {arg}"),
             _ => operands.push(arg),
         }
@@ -45,6 +49,9 @@ pub(crate) fn cmd_info(paths: &Installation, args: Vec<String>) -> Result<()> {
             values.push(info.location.display().to_string());
         }
         println!("{}", values.join(" "));
+        if show_extensions {
+            print_extensions(&info.extensions);
+        }
         return Ok(());
     }
 
@@ -63,7 +70,31 @@ pub(crate) fn cmd_info(paths: &Installation, args: Vec<String>) -> Result<()> {
         println!("{:>15} {}", "Runtime:", runtime);
     }
     println!("{:>15} {}", "Commit:", info.commit);
+    if show_extensions {
+        print_extensions(&info.extensions);
+    }
     Ok(())
+}
+
+fn print_extensions(extensions: &[state::RuntimeRecord]) {
+    for extension in extensions {
+        let id = extension
+            .runtime_ref
+            .split('/')
+            .next()
+            .unwrap_or(&extension.runtime_ref);
+        println!();
+        println!("{:>15} runtime/{}", "Extension:", extension.runtime_ref);
+        println!("{:>15} {id}", "ID:");
+        println!("{:>15} {}", "Origin:", extension.origin);
+        println!("{:>15} {}", "Commit:", extension.runtime_commit);
+        println!("{:>15} user", "Installation:");
+        println!(
+            "{:>15} {}",
+            "Installed Size:",
+            super::size_format::format(extension.installed_size)
+        );
+    }
 }
 
 fn resolve_installed(
@@ -72,9 +103,26 @@ fn resolve_installed(
     branch: Option<&str>,
 ) -> Result<InstalledInfo> {
     let partial = PartialRef::parse(name)?.with_default_branch(branch)?;
+    let runtimes = state::list_runtimes(paths)?;
+    let installed_runtime_refs = runtimes
+        .iter()
+        .map(|runtime| format!("runtime/{}", runtime.runtime_ref))
+        .collect::<BTreeSet<_>>();
+    let active_gtk_theme = crate::host_resources::cursor_themes::active_gtk_theme();
     let mut matches = Vec::new();
     for app in state::list_apps(paths)? {
         if partial.matches(&FlatpakRef::parse(&app.app_ref)?) {
+            let runtime_dir = state::get_runtime(paths, &app.runtime_ref)?
+                .map(|runtime| state::absolute(paths, &runtime.runtime_dir))
+                .unwrap_or_else(|| state::absolute(paths, &app.runtime_dir));
+            let extension_refs = state::required_extension_refs(
+                &state::absolute(paths, &app.app_dir),
+                &app.app_ref,
+                &app.runtime_ref,
+                &runtime_dir,
+                &installed_runtime_refs,
+                active_gtk_theme.as_deref(),
+            )?;
             matches.push(InstalledInfo {
                 id: app.app_id,
                 ref_name: app.app_ref,
@@ -85,23 +133,31 @@ fn resolve_installed(
                 installed_size: app.installed_size,
                 location: paths.absolute_data_path(&app.app_dir),
                 runtime: Some(app.runtime_ref),
+                extensions: extension_records(&runtimes, &extension_refs),
             });
         }
     }
-    for runtime in state::list_runtimes(paths)? {
+    for runtime in &runtimes {
         let (id, arch, ref_branch) = split_runtime_ref(&runtime.runtime_ref)?;
         let full_ref = format!("runtime/{}", runtime.runtime_ref);
         if partial.matches(&FlatpakRef::parse(&full_ref)?) {
+            let extension_refs = state::applicable_extension_refs(
+                &state::absolute(paths, &runtime.runtime_dir).join("metadata"),
+                &runtime.runtime_ref,
+                &installed_runtime_refs,
+                active_gtk_theme.as_deref(),
+            )?;
             matches.push(InstalledInfo {
                 id,
                 ref_name: full_ref,
                 arch,
                 branch: ref_branch,
-                origin: runtime.origin,
-                commit: runtime.runtime_commit,
+                origin: runtime.origin.clone(),
+                commit: runtime.runtime_commit.clone(),
                 installed_size: runtime.installed_size,
                 location: paths.absolute_data_path(&runtime.runtime_dir),
                 runtime: None,
+                extensions: extension_records(&runtimes, &extension_refs),
             });
         }
     }
@@ -111,6 +167,17 @@ fn resolve_installed(
         1 => Ok(matches.remove(0)),
         _ => bail!("{name} matches multiple installed refs; specify a full ref or branch"),
     }
+}
+
+fn extension_records(
+    runtimes: &[state::RuntimeRecord],
+    refs: &BTreeSet<String>,
+) -> Vec<state::RuntimeRecord> {
+    runtimes
+        .iter()
+        .filter(|runtime| refs.contains(&format!("runtime/{}", runtime.runtime_ref)))
+        .cloned()
+        .collect()
 }
 
 fn split_runtime_ref(value: &str) -> Result<(String, String, String)> {

@@ -1,4 +1,5 @@
 use super::list_table::{self, InstalledRow, Options};
+use crate::flatpak_ref::FlatpakRef;
 use crate::installation::{self as state, installation_paths::Installation};
 use anyhow::{bail, Result};
 use std::fs;
@@ -22,6 +23,12 @@ fn installed_rows(paths: &Installation, options: &Options) -> Result<Vec<Install
     let mut rows = Vec::new();
     if options.apps {
         for app in state::list_apps(paths)? {
+            if let Some(runtime) = &options.app_runtime {
+                let candidate = FlatpakRef::parse(&format!("runtime/{}", app.runtime_ref))?;
+                if !runtime.matches(&candidate) {
+                    continue;
+                }
+            }
             let (name, version) =
                 installed_appstream_fields(&state::absolute(paths, &app.app_dir), &app.app_id);
             rows.push(InstalledRow {
@@ -40,6 +47,9 @@ fn installed_rows(paths: &Installation, options: &Options) -> Result<Vec<Install
     }
     if options.runtimes {
         for runtime in state::list_runtimes(paths)? {
+            if !options.all && state::is_hidden_related_ref(&runtime.runtime_ref) {
+                continue;
+            }
             let (application, arch, branch) = split_ref(&runtime.runtime_ref)?;
             let (name, version) = installed_appstream_fields(
                 &state::absolute(paths, &runtime.runtime_dir),

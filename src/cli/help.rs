@@ -34,6 +34,7 @@ Options:
   --runtime             Look for a runtime ref
   --unused             Remove unused runtime and extension refs
   --delete-data        Delete app data
+  --no-related         Don't uninstall related extensions
   -y, --assumeyes      Automatically answer yes for all questions
   --noninteractive     Produce minimal output and don't ask questions
   -h, --help           Show help
@@ -46,6 +47,7 @@ Options:
   --app                Look for an application ref
   --runtime            Look for a runtime ref
   --or-update          Update install if already installed
+  --no-related         Don't install related extensions
   -y, --assumeyes      Automatically answer yes for all questions
   --noninteractive     Produce minimal output and don't ask questions
   -h, --help           Show help
@@ -58,6 +60,7 @@ Options:
   --app                 Update application refs
   --runtime             Update runtime refs
   --commit=COMMIT      Update to this commit
+  --no-related         Don't update related extensions
   -y, --assumeyes      Automatically answer yes for all questions
   --noninteractive     Produce minimal output and don't ask questions
   -h, --help           Show help
@@ -69,6 +72,8 @@ const LIST_HELP: &str = r#"Usage:
 Options:
   --app                List installed applications
   --runtime            List installed runtimes and extensions
+  -a, --all            Include normally hidden related refs
+  --app-runtime=REF    List applications that use this runtime
   -d, --show-details   Show all supported details (same as --columns=all)
   --columns=FIELD,...  Specify the columns to show; may be repeated
   -h, --help           Show help
@@ -95,7 +100,18 @@ Show information about an installed application or runtime.
 Options:
   -s, --show-size      Show installed size in bytes
   -l, --show-location  Show deployment location
+  -e, --show-extensions
+                       Show applicable installed extensions
   -h, --help           Show help
+"#;
+
+const RUN_HELP: &str = r#"Usage:
+  flatpak run [OPTION] APP [-- APP-ARG...]
+
+Options:
+  --runtime=RUNTIME        Use this installed runtime for the launch
+  --runtime-version=BRANCH Use this installed runtime branch for the launch
+  -h, --help               Show help
 "#;
 
 const REMOTES_HELP: &str = r#"Usage:
@@ -185,7 +201,7 @@ pub(super) fn print_usage() {
     eprintln!("  flatpak kill INSTANCE");
     eprintln!("  flatpak prune");
     eprintln!("  flatpak repair");
-    eprintln!("  flatpak run <app-id> [-- app-args...]");
+    eprintln!("  flatpak run [OPTION] <app-id> [-- app-args...]");
     eprintln!("  flatpak uninstall [OPTION] [--unused | <ref>]");
     eprintln!("  flatpak update [OPTION] [ref...]");
 }
@@ -211,6 +227,11 @@ pub(super) fn print_list_help() -> bool {
 
 pub(super) fn print_info_help() -> bool {
     print!("{INFO_HELP}");
+    true
+}
+
+pub(super) fn print_run_help() -> bool {
+    print!("{RUN_HELP}");
     true
 }
 

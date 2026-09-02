@@ -162,6 +162,7 @@ pub(crate) fn cmd_update(
         paths,
         resolved,
         options.transaction,
+        options.no_related,
         diagnostics,
         transaction_metadata.into_values().collect(),
     )
@@ -294,6 +295,7 @@ pub(super) fn update_resolved(
     paths: &Installation,
     resolved: Vec<(state::AppRecord, remotes::RemoteApp)>,
     options: TransactionOptions,
+    no_related: bool,
     diagnostics: &Diagnostics,
     remote_metadata: Vec<remotes::RemoteMetadata>,
 ) -> Result<()> {
@@ -339,13 +341,17 @@ pub(super) fn update_resolved(
         });
     }
     if plans.is_empty() {
-        let extension_timings = runtime::reconcile_extensions_with_metadata(
-            paths,
-            &selected_apps,
-            false,
-            remote_metadata,
-            diagnostics.enabled(Detail::Summary),
-        )?;
+        let extension_timings = if no_related {
+            Default::default()
+        } else {
+            runtime::reconcile_extensions_with_metadata(
+                paths,
+                &selected_apps,
+                false,
+                remote_metadata,
+                diagnostics.enabled(Detail::Summary),
+            )?
+        };
         if !options.noninteractive {
             if extension_timings.checkout.is_zero() {
                 println!("Nothing to update.");
@@ -471,15 +477,17 @@ pub(super) fn update_resolved(
         state::cleanup_retired_deployments(paths)?;
     }
 
-    diagnostics.measure(Detail::Detailed, "update", "reconcile extensions", || {
-        runtime::reconcile_extensions_with_metadata(
-            paths,
-            &selected_apps,
-            false,
-            remote_metadata,
-            diagnostics.enabled(Detail::Summary),
-        )
-    })?;
+    if !no_related {
+        diagnostics.measure(Detail::Detailed, "update", "reconcile extensions", || {
+            runtime::reconcile_extensions_with_metadata(
+                paths,
+                &selected_apps,
+                false,
+                remote_metadata,
+                diagnostics.enabled(Detail::Summary),
+            )
+        })?;
+    }
 
     if !options.noninteractive {
         println!("Update complete.");
@@ -492,6 +500,7 @@ pub(super) fn update_resolved(
 pub(super) struct UpdateOptions {
     pub(super) transaction: TransactionOptions,
     pub(super) commit: Option<String>,
+    pub(super) no_related: bool,
     pub(super) kind: Option<RefKind>,
     pub(super) refs: Vec<String>,
 }
@@ -499,6 +508,7 @@ pub(super) struct UpdateOptions {
 pub(super) fn parse_update_args(args: Vec<String>) -> Result<UpdateOptions> {
     let mut transaction = TransactionOptions::default();
     let mut commit = None;
+    let mut no_related = false;
     let mut kind = None;
     let mut refs = Vec::new();
     let mut args = args.into_iter();
@@ -508,6 +518,7 @@ pub(super) fn parse_update_args(args: Vec<String>) -> Result<UpdateOptions> {
             "--noninteractive" => transaction.noninteractive = true,
             "--app" => set_kind_filter(&mut kind, RefKind::App)?,
             "--runtime" => set_kind_filter(&mut kind, RefKind::Runtime)?,
+            "--no-related" => no_related = true,
             "--commit" => {
                 if commit.is_some() {
                     bail!("--commit may only be specified once");
@@ -530,6 +541,7 @@ pub(super) fn parse_update_args(args: Vec<String>) -> Result<UpdateOptions> {
     Ok(UpdateOptions {
         transaction,
         commit,
+        no_related,
         kind,
         refs,
     })

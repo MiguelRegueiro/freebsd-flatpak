@@ -159,6 +159,19 @@ fn debug_and_locale_related_refs_get_flatpak_lifecycle_defaults() {
 }
 
 #[test]
+fn locale_and_nested_debug_refs_are_hidden_by_default() {
+    assert!(is_hidden_related_ref(
+        "org.freedesktop.Platform.Locale/x86_64/25.08"
+    ));
+    assert!(is_hidden_related_ref(
+        "org.freedesktop.Platform.GL.Debug.default/x86_64/25.08"
+    ));
+    assert!(!is_hidden_related_ref(
+        "org.freedesktop.Platform.GL.default/x86_64/25.08"
+    ));
+}
+
+#[test]
 fn autoprune_unless_uses_the_same_or_condition_engine() {
     let point = &parse_extension_points(
         "[Extension org.example.Driver]\nsubdirectories=true\n\

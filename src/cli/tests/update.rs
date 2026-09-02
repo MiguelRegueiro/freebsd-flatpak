@@ -10,10 +10,12 @@ use std::path::PathBuf;
 fn transaction_options_parse_with_update_target() {
     let update = parse_update_args(vec![
         "--noninteractive".to_string(),
+        "--no-related".to_string(),
         "org.example.App".to_string(),
     ])
     .unwrap();
     assert!(update.transaction.noninteractive);
+    assert!(update.no_related);
 }
 
 #[test]
@@ -251,6 +253,7 @@ fn update_commit_requires_exactly_one_app() {
         UpdateOptions {
             transaction: TransactionOptions::default(),
             commit: Some("abc123".to_string()),
+            no_related: false,
             kind: None,
             refs: vec!["org.example.App".to_string()],
         }

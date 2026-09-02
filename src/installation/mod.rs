@@ -11,9 +11,10 @@ mod run_records;
 mod runtime_records;
 
 pub(crate) use crate::extensions::{
-    autodelete_extension_refs, reconcile_extensions, reconcile_extensions_with_metadata,
-    required_extension_refs, resolve_extension_mount_plan, runtime_checkout_dir, ExtensionFacts,
-    ExtensionMergeDirectory, ExtensionMount, ExtensionMountPlan,
+    applicable_extension_refs, autodelete_extension_refs, is_hidden_related_ref,
+    reconcile_extensions, reconcile_extensions_with_metadata, required_extension_refs,
+    resolve_extension_mount_plan, runtime_checkout_dir, ExtensionFacts, ExtensionMergeDirectory,
+    ExtensionMount, ExtensionMountPlan,
 };
 pub(crate) use crate::flatpak_metadata::value as metadata_value;
 pub(crate) use crate::ostree::{prune_repo, recover_storage, remove_remote_refs, repair_repo};

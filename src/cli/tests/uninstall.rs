@@ -9,11 +9,13 @@ use std::fs;
 fn transaction_and_delete_data_options_parse_together() {
     let uninstall = parse_uninstall_args(vec![
         "--delete-data".to_string(),
+        "--no-related".to_string(),
         "--assumeyes".to_string(),
         "org.example.App".to_string(),
     ])
     .unwrap();
     assert!(uninstall.delete_data);
+    assert!(uninstall.no_related);
     assert!(uninstall.transaction.assumeyes);
     assert!(
         parse_uninstall_args(vec!["--unused".to_string(), "--delete-data".to_string(),]).is_err()
@@ -407,7 +409,7 @@ fn autodelete_extension_is_removed_with_its_parent_but_the_platform_is_kept() {
         "extension-commit",
         "[Runtime]\nname=org.example.App.Plugin\n",
     );
-    state::record_install(
+    let app = state::record_install(
         &paths,
         &runtime::InstalledApp {
             origin: "flathub".to_string(),
@@ -442,14 +444,10 @@ fn autodelete_extension_is_removed_with_its_parent_but_the_platform_is_kept() {
     .unwrap();
 
     let installed = BTreeSet::from([format!("runtime/{extension_ref}")]);
-    let autodelete = runtime::autodelete_extension_refs(
-        &app_dir,
-        app_ref,
-        runtime_ref,
-        &runtime_dir,
-        &installed,
-    )
-    .unwrap();
+    assert!(related_refs_for_uninstall(&paths, &app, true)
+        .unwrap()
+        .is_empty());
+    let autodelete = related_refs_for_uninstall(&paths, &app, false).unwrap();
     assert_eq!(autodelete, installed);
 
     state::remove_app_record(&paths, app_id).unwrap();

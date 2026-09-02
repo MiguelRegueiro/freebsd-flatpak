@@ -1,4 +1,5 @@
-use anyhow::{bail, Result};
+use crate::flatpak_ref::{PartialRef, RefKind};
+use anyhow::{bail, Context, Result};
 
 const DEFAULT_COLUMNS: &[Column] = &[
     Column::Name,
@@ -73,6 +74,8 @@ impl Column {
 pub(super) struct Options {
     pub(super) apps: bool,
     pub(super) runtimes: bool,
+    pub(super) all: bool,
+    pub(super) app_runtime: Option<PartialRef>,
     columns: Vec<Column>,
     pub(super) columns_help: bool,
 }
@@ -94,6 +97,8 @@ pub(super) struct InstalledRow {
 pub(super) fn parse_options(args: &[String]) -> Result<Options> {
     let mut app = false;
     let mut runtime = false;
+    let mut all = false;
+    let mut app_runtime = None;
     let mut show_details = false;
     let mut selectors = Vec::new();
     let mut index = 0;
@@ -102,6 +107,15 @@ pub(super) fn parse_options(args: &[String]) -> Result<Options> {
         match arg.as_str() {
             "--app" => app = true,
             "--runtime" => runtime = true,
+            "-a" | "--all" => all = true,
+            "--app-runtime" => {
+                index += 1;
+                let value = args.get(index).context("missing value for --app-runtime")?;
+                set_app_runtime(&mut app_runtime, value)?;
+            }
+            _ if arg.starts_with("--app-runtime=") => {
+                set_app_runtime(&mut app_runtime, &arg[14..])?;
+            }
             "-d" | "--show-details" => show_details = true,
             "--columns" => {
                 index += 1;
@@ -116,7 +130,12 @@ pub(super) fn parse_options(args: &[String]) -> Result<Options> {
         }
         index += 1;
     }
-    if !app && !runtime {
+    if app_runtime.is_some() {
+        if runtime {
+            bail!("--app-runtime cannot be used with --runtime");
+        }
+        app = true;
+    } else if !app && !runtime {
         app = true;
         runtime = true;
     }
@@ -154,9 +173,21 @@ pub(super) fn parse_options(args: &[String]) -> Result<Options> {
     Ok(Options {
         apps: app,
         runtimes: runtime,
+        all,
+        app_runtime,
         columns,
         columns_help,
     })
+}
+
+fn set_app_runtime(target: &mut Option<PartialRef>, value: &str) -> Result<()> {
+    if target.is_some() {
+        bail!("--app-runtime may only be specified once");
+    }
+    let partial = PartialRef::parse(value)?;
+    partial.effective_kind(Some(RefKind::Runtime))?;
+    *target = Some(partial);
+    Ok(())
 }
 
 fn resolve_column(field: &str) -> Result<Option<Column>> {

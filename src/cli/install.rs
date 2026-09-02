@@ -14,6 +14,7 @@ use std::time::Instant;
 pub(super) struct InstallOptions {
     pub(super) transaction: TransactionOptions,
     pub(super) or_update: bool,
+    pub(super) no_related: bool,
     pub(super) kind: Option<RefKind>,
     pub(super) ref_name: String,
     pub(super) remote: Option<String>,
@@ -22,6 +23,7 @@ pub(super) struct InstallOptions {
 pub(super) fn parse_install_args(args: Vec<String>) -> Result<InstallOptions> {
     let mut transaction = TransactionOptions::default();
     let mut or_update = false;
+    let mut no_related = false;
     let mut kind = None;
     let mut operands = Vec::new();
     for arg in args {
@@ -29,6 +31,7 @@ pub(super) fn parse_install_args(args: Vec<String>) -> Result<InstallOptions> {
             "-y" | "--assumeyes" => transaction.assumeyes = true,
             "--noninteractive" => transaction.noninteractive = true,
             "--or-update" => or_update = true,
+            "--no-related" => no_related = true,
             "--app" => set_kind_filter(&mut kind, RefKind::App)?,
             "--runtime" => set_kind_filter(&mut kind, RefKind::Runtime)?,
             _ if arg.starts_with('-') => bail!("unknown install option: {arg}"),
@@ -43,6 +46,7 @@ pub(super) fn parse_install_args(args: Vec<String>) -> Result<InstallOptions> {
     Ok(InstallOptions {
         transaction,
         or_update,
+        no_related,
         kind,
         ref_name,
         remote,
@@ -77,7 +81,9 @@ pub(crate) fn cmd_install(
         state::get_app(paths, &options.ref_name).or_else(|_| state::get_app(paths, &remote.app_id))
     {
         if !options.or_update {
-            runtime::reconcile_extensions(paths, std::slice::from_ref(&record), false)?;
+            if !options.no_related {
+                runtime::reconcile_extensions(paths, std::slice::from_ref(&record), false)?;
+            }
             println!("{} is already installed", remote.app_id);
             return Ok(());
         }
@@ -85,6 +91,7 @@ pub(crate) fn cmd_install(
             paths,
             vec![(record, remote)],
             options.transaction,
+            options.no_related,
             diagnostics,
             Vec::new(),
         );
@@ -127,14 +134,17 @@ pub(crate) fn cmd_install(
     let mut installed = runtime::update_app(paths, &remote, true, runtime_changed)?;
     installed.timings.resolution = resolution;
     let record = state::record_install(paths, &installed)?;
-    let extension_timings =
+    let extension_timings = if options.no_related {
+        Default::default()
+    } else {
         match runtime::reconcile_extensions(paths, std::slice::from_ref(&record), false) {
             Ok(timings) => timings,
             Err(error) => {
                 let _ = state::remove_app_record(paths, &record.app_id);
                 return Err(error).context("reconcile required extensions");
             }
-        };
+        }
+    };
     installed.timings.pull += extension_timings.pull;
     installed.timings.checkout += extension_timings.checkout;
     if !options.transaction.noninteractive {

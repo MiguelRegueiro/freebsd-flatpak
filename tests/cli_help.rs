@@ -38,6 +38,7 @@ Options:
   --runtime             Look for a runtime ref
   --unused             Remove unused runtime and extension refs
   --delete-data        Delete app data
+  --no-related         Don't uninstall related extensions
   -y, --assumeyes      Automatically answer yes for all questions
   --noninteractive     Produce minimal output and don't ask questions
   -h, --help           Show help
@@ -50,6 +51,7 @@ Options:
   --app                Look for an application ref
   --runtime            Look for a runtime ref
   --or-update          Update install if already installed
+  --no-related         Don't install related extensions
   -y, --assumeyes      Automatically answer yes for all questions
   --noninteractive     Produce minimal output and don't ask questions
   -h, --help           Show help
@@ -62,6 +64,7 @@ Options:
   --app                 Update application refs
   --runtime             Update runtime refs
   --commit=COMMIT      Update to this commit
+  --no-related         Don't update related extensions
   -y, --assumeyes      Automatically answer yes for all questions
   --noninteractive     Produce minimal output and don't ask questions
   -h, --help           Show help
@@ -143,6 +146,20 @@ fn kill_help_is_available_without_initializing_an_installation() {
         assert!(output.stderr.is_empty());
     }
 }
+
+#[test]
+fn run_help_documents_runtime_overrides_without_initializing_an_installation() {
+    let output = Command::new(env!("CARGO_BIN_EXE_flatpak"))
+        .args(["run", "--help"])
+        .env_remove("HOME")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "run --help failed: {output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("--runtime=RUNTIME"));
+    assert!(stdout.contains("--runtime-version=BRANCH"));
+    assert!(output.stderr.is_empty());
+}
 #[test]
 fn compatibility_aliases_work_but_stay_hidden_from_top_level_help() {
     for (alias, expected) in [
@@ -207,8 +224,8 @@ fn remote_command_help_is_recognized_before_initialization_and_operand_parsing()
 #[test]
 fn installed_ref_command_help_is_recognized_before_initialization() {
     for (command, options) in [
-        ("list", ["--columns", "--show-details"]),
-        ("info", ["--show-size", "--show-location"]),
+        ("list", ["--all", "--app-runtime"]),
+        ("info", ["--show-size", "--show-extensions"]),
     ] {
         for flag in ["-h", "--help"] {
             let output = Command::new(env!("CARGO_BIN_EXE_flatpak"))
