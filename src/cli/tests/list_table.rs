@@ -61,7 +61,7 @@ fn default_table_has_new_columns_and_wider_spacing() {
     let options = parse_options(&[]).unwrap();
     assert_eq!(options.columns, DEFAULT_COLUMNS);
     assert_eq!(
-        render(&[example_row()], &options, false),
+        render(&[example_row()], &options, false, None),
         concat!(
             "Name       Application ID     Version    Branch    Origin\n",
             "Example    org.example.App    2.4        stable    example-origin\n",
@@ -72,11 +72,33 @@ fn default_table_has_new_columns_and_wider_spacing() {
 #[test]
 fn table_bolds_only_headers_when_styled() {
     let options = parse_options(&[]).unwrap();
-    let plain = render(&[example_row()], &options, false);
-    let styled = render(&[example_row()], &options, true);
+    let plain = render(&[example_row()], &options, false, None);
+    let styled = render(&[example_row()], &options, true, None);
 
     assert!(!plain.contains("\x1b["));
     assert!(styled.starts_with("\x1b[1mName\x1b[0m"));
     assert!(styled.contains("\x1b[1mApplication ID\x1b[0m"));
     assert!(!styled.lines().nth(1).unwrap().contains("\x1b["));
+}
+
+#[test]
+fn narrow_table_truncates_cells_with_ellipses() {
+    let options = parse_options(&["--columns=application,origin".to_string()]).unwrap();
+
+    assert_eq!(
+        render(&[example_row()], &options, false, Some(20)),
+        concat!("Applica…    Origin\n", "org.exa…    example…\n")
+    );
+}
+
+#[test]
+fn narrow_all_columns_stay_on_one_line() {
+    let options = parse_options(&["--columns=all".to_string()]).unwrap();
+    let output = render(&[example_row()], &options, false, Some(50));
+
+    assert!(output.contains('…'));
+    for line in output.lines() {
+        assert!(line.chars().count() <= 50, "line is too wide: {line:?}");
+        assert_eq!(line.split("   ").count(), ALL_COLUMNS.len());
+    }
 }

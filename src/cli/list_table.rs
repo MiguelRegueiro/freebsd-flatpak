@@ -1,6 +1,8 @@
 use crate::flatpak_ref::{PartialRef, RefKind};
 use anyhow::{bail, Context, Result};
 
+const COLUMN_SPACING: usize = 4;
+
 const DEFAULT_COLUMNS: &[Column] = &[
     Column::Name,
     Column::Application,
@@ -206,7 +208,25 @@ fn resolve_column(field: &str) -> Result<Option<Column>> {
     }
 }
 
-pub(super) fn render(rows: &[InstalledRow], options: &Options, styled: bool) -> String {
+pub(super) fn terminal_width() -> Option<usize> {
+    let mut size = std::mem::MaybeUninit::<libc::winsize>::zeroed();
+    // SAFETY: `size` points to writable storage for the `winsize` requested by
+    // TIOCGWINSZ, and stdout remains open for the duration of the call.
+    let result = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, size.as_mut_ptr()) };
+    if result != 0 {
+        return None;
+    }
+    // SAFETY: a successful TIOCGWINSZ call initialized the winsize structure.
+    let columns = unsafe { size.assume_init() }.ws_col as usize;
+    (columns > 0).then_some(columns)
+}
+
+pub(super) fn render(
+    rows: &[InstalledRow],
+    options: &Options,
+    styled: bool,
+    terminal_width: Option<usize>,
+) -> String {
     if rows.is_empty() || options.columns.is_empty() {
         return String::new();
     }
@@ -220,7 +240,7 @@ pub(super) fn render(rows: &[InstalledRow], options: &Options, styled: bool) -> 
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    let widths = options
+    let mut widths = options
         .columns
         .iter()
         .enumerate()
@@ -233,6 +253,7 @@ pub(super) fn render(rows: &[InstalledRow], options: &Options, styled: bool) -> 
                 .unwrap_or(0)
         })
         .collect::<Vec<_>>();
+    let spacing = fit_widths(&mut widths, terminal_width);
     let mut output = String::new();
     write_table_line(
         &mut output,
@@ -242,6 +263,7 @@ pub(super) fn render(rows: &[InstalledRow], options: &Options, styled: bool) -> 
             .map(|column| column.title())
             .collect::<Vec<_>>(),
         &widths,
+        spacing,
         styled,
     );
     for row in &values {
@@ -249,10 +271,37 @@ pub(super) fn render(rows: &[InstalledRow], options: &Options, styled: bool) -> 
             &mut output,
             &row.iter().map(String::as_str).collect::<Vec<_>>(),
             &widths,
+            spacing,
             false,
         );
     }
     output
+}
+
+fn fit_widths(widths: &mut [usize], terminal_width: Option<usize>) -> usize {
+    let Some(terminal_width) = terminal_width else {
+        return COLUMN_SPACING;
+    };
+    let separators = widths.len().saturating_sub(1);
+    let spacing = COLUMN_SPACING.min(
+        terminal_width
+            .saturating_sub(widths.len())
+            .checked_div(separators)
+            .unwrap_or(0),
+    );
+    let available = terminal_width.saturating_sub(spacing * separators);
+    while widths.iter().sum::<usize>() > available {
+        let Some((index, _)) = widths
+            .iter()
+            .enumerate()
+            .filter(|(_, width)| **width > 0)
+            .max_by_key(|(_, width)| **width)
+        else {
+            break;
+        };
+        widths[index] -= 1;
+    }
+    spacing
 }
 
 fn value(row: &InstalledRow, column: Column) -> String {
@@ -271,12 +320,19 @@ fn value(row: &InstalledRow, column: Column) -> String {
     }
 }
 
-fn write_table_line(output: &mut String, values: &[&str], widths: &[usize], bold: bool) {
+fn write_table_line(
+    output: &mut String,
+    values: &[&str],
+    widths: &[usize],
+    spacing: usize,
+    bold: bool,
+) {
     for (index, value) in values.iter().enumerate() {
         if index > 0 {
-            output.push_str("    ");
+            output.extend(std::iter::repeat_n(' ', spacing));
         }
-        output.push_str(&super::style::bold(value, bold));
+        let value = truncate(value, widths[index]);
+        output.push_str(&super::style::bold(&value, bold));
         if index + 1 < values.len() {
             output.extend(std::iter::repeat_n(
                 ' ',
@@ -285,6 +341,20 @@ fn write_table_line(output: &mut String, values: &[&str], widths: &[usize], bold
         }
     }
     output.push('\n');
+}
+
+fn truncate(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        return value.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    value
+        .chars()
+        .take(width - 1)
+        .chain(std::iter::once('…'))
+        .collect()
 }
 
 pub(super) fn print_column_help() {

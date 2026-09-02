@@ -12,9 +12,15 @@ pub(crate) fn cmd_list(paths: &Installation, args: Vec<String>) -> Result<()> {
         return Ok(());
     }
     let rows = installed_rows(paths, &options)?;
+    let styled = super::style::stdout_enabled();
     print!(
         "{}",
-        list_table::render(&rows, &options, super::style::stdout_enabled())
+        list_table::render(
+            &rows,
+            &options,
+            styled,
+            styled.then(list_table::terminal_width).flatten(),
+        )
     );
     Ok(())
 }
