@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 const SIGNALFD_SHIM_LIB: &str = "libsignalfd-shim.so";
 const SOCKET_OPTION_ERRNO_SHIM_LIB: &str = "libsocket-option-errno-shim.so";
 const UNIX_SEQPACKET_SHIM_LIB: &str = "libunix-seqpacket-shim.so";
+const V4L2_COMPAT_SHIM_LIB: &str = "libv4l2-compat-shim.so";
 const FLATPAK_SPAWN_WRAPPER: &str = "linux-bin/flatpak-spawn";
 const HELPER_SANDBOX_DIR: &str = "/run/host/freebsd-flatpak";
 const RUNTIME_BIN: &str = "bin";
@@ -35,6 +36,7 @@ impl HostLinuxCompat {
         let helper = paths.libexec_root().join(SIGNALFD_SHIM_LIB);
         let socket_option_helper = paths.libexec_root().join(SOCKET_OPTION_ERRNO_SHIM_LIB);
         let unix_seqpacket_helper = paths.libexec_root().join(UNIX_SEQPACKET_SHIM_LIB);
+        let v4l2_compat_helper = paths.libexec_root().join(V4L2_COMPAT_SHIM_LIB);
         let spawn_wrapper = paths.libexec_root().join(FLATPAK_SPAWN_WRAPPER);
         if !spawn_wrapper.is_file() {
             bail!(
@@ -60,6 +62,12 @@ impl HostLinuxCompat {
                 unix_seqpacket_helper.display()
             );
         }
+        if !v4l2_compat_helper.is_file() {
+            bail!(
+                "installed V4L2 compatibility helper is missing: {}",
+                v4l2_compat_helper.display()
+            );
+        }
         let helper_dir = helper
             .parent()
             .context("Linux compatibility helper path has no parent")?
@@ -81,6 +89,7 @@ impl HostLinuxCompat {
         vec![
             format!("{HELPER_SANDBOX_DIR}/{UNIX_SEQPACKET_SHIM_LIB}"),
             format!("{HELPER_SANDBOX_DIR}/{SOCKET_OPTION_ERRNO_SHIM_LIB}"),
+            format!("{HELPER_SANDBOX_DIR}/{V4L2_COMPAT_SHIM_LIB}"),
         ]
     }
 

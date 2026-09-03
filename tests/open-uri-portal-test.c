@@ -12,6 +12,19 @@ void handle_filechooser_open(BridgeState *state, const char *sender,
   (void)parameters;
   (void)invocation;
 }
+bool pipewire_camera_available(const PipeWireCompat *compat) {
+  (void)compat;
+  return false;
+}
+void handle_camera_method(BridgeState *state, const char *sender,
+                          const char *method_name, GVariant *parameters,
+                          GDBusMethodInvocation *invocation) {
+  (void)state;
+  (void)sender;
+  (void)method_name;
+  (void)parameters;
+  (void)invocation;
+}
 void handle_screencast_create(BridgeState *state, const char *sender,
                               GVariant *parameters,
                               GDBusMethodInvocation *invocation) {
@@ -52,24 +65,25 @@ static void test_open_uri_introspection(void) {
   GError *error = NULL;
   GDBusNodeInfo *node = g_dbus_node_info_new_for_xml(DESKTOP_XML, &error);
   g_assert_no_error(error);
-  GDBusInterfaceInfo *interface = g_dbus_node_info_lookup_interface(
-      node, "org.freedesktop.portal.OpenURI");
+  GDBusInterfaceInfo *interface =
+      g_dbus_node_info_lookup_interface(node, "org.freedesktop.portal.OpenURI");
   g_assert_nonnull(interface);
   const char *methods[] = {"OpenURI", "OpenFile", "OpenDirectory",
                            "SchemeSupported"};
   for (gsize i = 0; i < G_N_ELEMENTS(methods); i++) {
-    g_assert_nonnull(g_dbus_interface_info_lookup_method(interface, methods[i]));
+    g_assert_nonnull(
+        g_dbus_interface_info_lookup_method(interface, methods[i]));
   }
   g_assert_nonnull(g_dbus_interface_info_lookup_property(interface, "version"));
   g_dbus_node_info_unref(node);
 }
 
 static void test_open_uri_parameter_forwarding(void) {
-  GVariant *parameters = g_variant_ref_sink(g_variant_new(
-      "(ss@a{sv})", "wayland:window", "https://example.com/path?x=1",
-      test_options()));
-  GVariant *forwarded = g_variant_ref_sink(open_uri_host_parameters(
-      "OpenURI", parameters, "host-token", -1));
+  GVariant *parameters = g_variant_ref_sink(
+      g_variant_new("(ss@a{sv})", "wayland:window",
+                    "https://example.com/path?x=1", test_options()));
+  GVariant *forwarded = g_variant_ref_sink(
+      open_uri_host_parameters("OpenURI", parameters, "host-token", -1));
   const char *parent = NULL;
   const char *uri = NULL;
   GVariant *options = NULL;

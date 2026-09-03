@@ -1,7 +1,255 @@
 #include "pipewire_screencast_linker.h"
 #include "portal_bridge_process.h"
+#include <glob.h>
+#include <spa/support/plugin.h>
+#include <spa/utils/keys.h>
+#include <sys/file.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/time.h>
 void pipewire_compat_try_links(PipeWireCompat *compat);
+void publish_v4l2_cameras(PipeWireCompat *compat);
 
+#define COMPAT_V4L2_CAP_VIDEO_CAPTURE UINT32_C(0x00000001)
+#define COMPAT_V4L2_CAP_STREAMING UINT32_C(0x04000000)
+#define COMPAT_V4L2_CAP_DEVICE_CAPS UINT32_C(0x80000000)
+struct compat_v4l2_capability {
+  uint8_t driver[16];
+  uint8_t card[32];
+  uint8_t bus_info[32];
+  uint32_t version;
+  uint32_t capabilities;
+  uint32_t device_caps;
+  uint32_t reserved[3];
+};
+#define COMPAT_VIDIOC_QUERYCAP _IOR('V', 0, struct compat_v4l2_capability)
+struct compat_v4l2_format {
+  uint8_t bytes[208];
+};
+#define COMPAT_VIDIOC_TRY_FMT _IOWR('V', 64, struct compat_v4l2_format)
+struct compat_v4l2_buffer {
+  uint32_t index;
+  uint32_t type;
+  uint32_t bytesused;
+  uint32_t flags;
+  uint32_t field;
+  uint32_t alignment;
+  struct timeval timestamp;
+  uint8_t trailing[48];
+};
+_Static_assert(sizeof(struct compat_v4l2_buffer) == 88, "V4L2 buffer ABI");
+#define COMPAT_VIDIOC_QBUF _IOWR('V', 15, struct compat_v4l2_buffer)
+#define COMPAT_VIDIOC_DQBUF _IOWR('V', 17, struct compat_v4l2_buffer)
+
+extern void *__sys_mmap(void *, size_t, int, int, int, off_t);
+extern int __sys_open(const char *, int, mode_t);
+extern int __sys_close(int);
+
+static _Thread_local bool cache_v4l2_fd;
+static _Thread_local int retained_v4l2_fd = -1;
+static _Thread_local char retained_v4l2_path[64];
+struct cached_v4l2_ioctl {
+  struct compat_v4l2_format input;
+  struct compat_v4l2_format output;
+};
+static _Thread_local struct cached_v4l2_ioctl cached_try_formats[32];
+static _Thread_local size_t n_cached_try_formats;
+
+extern int __sys_ioctl(int, unsigned long, char *);
+bool pipewire_v4l2_mmap_retryable(int fd, int flags, int error) {
+  char device[64];
+  if (error != EINVAL || (flags & MAP_PRIVATE) == 0 ||
+      (flags & MAP_SHARED) != 0 ||
+      fdevname_r(fd, device, sizeof(device)) == NULL ||
+      strncmp(device, "video", sizeof("video") - 1) != 0) {
+    return false;
+  }
+  const char *suffix = device + sizeof("video") - 1;
+  if (*suffix == 0) {
+    return false;
+  }
+  while (*suffix >= 48 && *suffix <= 57) {
+    suffix++;
+  }
+  return *suffix == 0;
+}
+
+void *compat_mmap(void *address, size_t length, int protection, int flags,
+                  int fd, off_t offset) {
+  void *result = __sys_mmap(address, length, protection, flags, fd, offset);
+  int error = errno;
+  if (result == MAP_FAILED && pipewire_v4l2_mmap_retryable(fd, flags, error)) {
+    result = __sys_mmap(address, length, protection,
+                        (flags & ~MAP_PRIVATE) | MAP_SHARED, fd, offset);
+  } else {
+    errno = error;
+  }
+  return result;
+}
+__sym_compat(mmap, compat_mmap, FBSD_1.0);
+
+int compat_open(const char *path, int flags, ...) {
+  mode_t mode = 0;
+  if ((flags & O_CREAT) != 0) {
+    va_list arguments;
+    va_start(arguments, flags);
+    mode = va_arg(arguments, int);
+    va_end(arguments);
+  }
+  if (cache_v4l2_fd && retained_v4l2_fd >= 0 &&
+      g_strcmp0(path, retained_v4l2_path) == 0) {
+    int fd = retained_v4l2_fd;
+    retained_v4l2_fd = -1;
+    return fd;
+  }
+  return __sys_open(path, flags, mode);
+}
+__sym_compat(open, compat_open, FBSD_1.0);
+
+int compat_close(int fd) {
+  char device[64];
+  if (cache_v4l2_fd && retained_v4l2_fd < 0 &&
+      fdevname_r(fd, device, sizeof(device)) != NULL &&
+      g_snprintf(retained_v4l2_path, sizeof(retained_v4l2_path), "/dev/%s",
+                 device) > 0 &&
+      g_str_has_prefix(device, "video")) {
+    retained_v4l2_fd = fd;
+    return 0;
+  }
+  return __sys_close(fd);
+}
+__sym_compat(close, compat_close, FBSD_1.0);
+
+static void begin_v4l2_fd_cache(void) {
+  cache_v4l2_fd = true;
+  n_cached_try_formats = 0;
+}
+
+static void end_v4l2_fd_cache(void) {
+  cache_v4l2_fd = false;
+  if (retained_v4l2_fd >= 0) {
+    __sys_close(retained_v4l2_fd);
+    retained_v4l2_fd = -1;
+  }
+  retained_v4l2_path[0] = 0;
+  n_cached_try_formats = 0;
+}
+
+bool pipewire_v4l2_normalize_timestamp(int64_t timestamp_us,
+                                       int64_t realtime_us,
+                                       int64_t monotonic_us,
+                                       int64_t *normalized_us) {
+  const int64_t ten_minutes_us = INT64_C(10) * 60 * 1000 * 1000;
+  const int64_t future_tolerance_us = INT64_C(60) * 1000 * 1000;
+  if (normalized_us == NULL || timestamp_us < realtime_us - ten_minutes_us ||
+      timestamp_us > realtime_us + future_tolerance_us) {
+    return false;
+  }
+  *normalized_us = timestamp_us - (realtime_us - monotonic_us);
+  return true;
+}
+
+bool pipewire_v4l2_ioctl_matches(unsigned long request,
+                                 unsigned long expected) {
+  return (uint32_t)request == (uint32_t)expected;
+}
+
+bool pipewire_v4l2_timestamp_is_stale(int64_t timestamp_us, int64_t realtime_us,
+                                      int64_t monotonic_us,
+                                      int64_t maximum_age_us) {
+  int64_t normalized_us = 0;
+  return maximum_age_us >= 0 &&
+         pipewire_v4l2_normalize_timestamp(timestamp_us, realtime_us,
+                                           monotonic_us, &normalized_us) &&
+         monotonic_us - normalized_us > maximum_age_us;
+}
+
+int compat_ioctl(int fd, unsigned long request, ...) {
+  static bool reported_first_dequeue;
+  va_list arguments;
+  va_start(arguments, request);
+  void *argument = va_arg(arguments, void *);
+  va_end(arguments);
+  struct compat_v4l2_format try_format_input;
+  bool cache_try_format =
+      cache_v4l2_fd && argument != NULL &&
+      pipewire_v4l2_ioctl_matches(request, COMPAT_VIDIOC_TRY_FMT);
+  if (cache_try_format) {
+    for (size_t i = 0; i < n_cached_try_formats; i++) {
+      if (memcmp(argument, &cached_try_formats[i].input,
+                 sizeof(struct compat_v4l2_format)) == 0) {
+        memcpy(argument, &cached_try_formats[i].output,
+               sizeof(struct compat_v4l2_format));
+        return 0;
+      }
+    }
+    memcpy(&try_format_input, argument, sizeof(try_format_input));
+  }
+  int result = __sys_ioctl(fd, request, argument);
+  if (result == 0 && cache_v4l2_fd && argument != NULL &&
+      n_cached_try_formats < G_N_ELEMENTS(cached_try_formats) &&
+      cache_try_format) {
+    struct cached_v4l2_ioctl *cached =
+        &cached_try_formats[n_cached_try_formats++];
+    memcpy(&cached->input, &try_format_input, sizeof(cached->input));
+    memcpy(&cached->output, argument, sizeof(cached->output));
+  }
+  if (result == 0 &&
+      pipewire_v4l2_ioctl_matches(request, COMPAT_VIDIOC_DQBUF) &&
+      argument != NULL) {
+    struct compat_v4l2_buffer *buffer = argument;
+    struct compat_v4l2_buffer newest = *buffer;
+    struct compat_v4l2_buffer dropped[16];
+    size_t n_dropped = 0;
+    while (n_dropped < G_N_ELEMENTS(dropped)) {
+      struct compat_v4l2_buffer candidate = newest;
+      if (__sys_ioctl(fd, COMPAT_VIDIOC_DQBUF, (char *)&candidate) != 0) {
+        break;
+      }
+      dropped[n_dropped++] = newest;
+      newest = candidate;
+    }
+    for (size_t i = 0; i < n_dropped; i++) {
+      if (__sys_ioctl(fd, COMPAT_VIDIOC_QBUF, (char *)&dropped[i]) != 0) {
+        log_line("requeue stale V4L2 frame failed: %s", g_strerror(errno));
+      }
+    }
+    *buffer = newest;
+    struct timespec realtime = {0};
+    struct timespec monotonic = {0};
+    if (clock_gettime(CLOCK_REALTIME, &realtime) == 0 &&
+        clock_gettime(CLOCK_MONOTONIC, &monotonic) == 0) {
+      int64_t timestamp_us = (int64_t)buffer->timestamp.tv_sec * 1000000 +
+                             buffer->timestamp.tv_usec;
+      int64_t realtime_us =
+          (int64_t)realtime.tv_sec * 1000000 + realtime.tv_nsec / 1000;
+      int64_t monotonic_us =
+          (int64_t)monotonic.tv_sec * 1000000 + monotonic.tv_nsec / 1000;
+      int64_t normalized_us = 0;
+      if (pipewire_v4l2_normalize_timestamp(timestamp_us, realtime_us,
+                                            monotonic_us, &normalized_us)) {
+        if (pipewire_v4l2_timestamp_is_stale(timestamp_us, realtime_us,
+                                             monotonic_us, INT64_C(150000))) {
+          if (__sys_ioctl(fd, COMPAT_VIDIOC_QBUF, (char *)buffer) != 0) {
+            log_line("requeue stale V4L2 frame failed: %s", g_strerror(errno));
+          }
+          errno = EAGAIN;
+          return -1;
+        }
+        buffer->timestamp.tv_sec = normalized_us / 1000000;
+        buffer->timestamp.tv_usec = normalized_us % 1000000;
+        if (!reported_first_dequeue) {
+          reported_first_dequeue = true;
+          diagnostic_line("normalized first V4L2 frame timestamp (capture "
+                          "age=%" G_GINT64_FORMAT " us)",
+                          monotonic_us - normalized_us);
+        }
+      }
+    }
+  }
+  return result;
+}
+__sym_compat(ioctl, compat_ioctl, FBSD_1.0);
 uint32_t parse_pipewire_id(const char *value) {
   if (value == NULL || *value == '\0') {
     return SPA_ID_INVALID;
@@ -87,11 +335,52 @@ void free_pipewire_node(PipeWireNode *node) {
     return;
   }
   g_free(node->media_class);
+  g_free(node->media_role);
   g_free(node->target_object);
   g_free(node);
 }
 
 void free_pipewire_port(PipeWirePort *port) { g_free(port); }
+
+bool pipewire_node_is_camera(const PipeWireNode *node) {
+  return node != NULL && g_strcmp0(node->media_class, "Video/Source") == 0 &&
+         g_strcmp0(node->media_role, "Camera") == 0;
+}
+
+bool pipewire_camera_present(const PipeWireCompat *compat) {
+  if (compat == NULL) {
+    return false;
+  }
+  for (guint i = 0; i < compat->nodes->len; i++) {
+    PipeWireNode *node = g_ptr_array_index(compat->nodes, i);
+    if (!pipewire_node_is_camera(node)) {
+      continue;
+    }
+    for (guint j = 0; j < compat->ports->len; j++) {
+      PipeWirePort *port = g_ptr_array_index(compat->ports, j);
+      if (port->node_id == node->id && port->is_output) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+bool pipewire_camera_available(const PipeWireCompat *compat) {
+  if (pipewire_camera_present(compat)) {
+    return true;
+  }
+
+  glob_t devices = {0};
+  bool available =
+      glob("/dev/video[0-9]*", 0, NULL, &devices) == 0 && devices.gl_pathc > 0;
+  globfree(&devices);
+  return available;
+}
+
+bool pipewire_camera_publication_needed(const PipeWireCompat *compat) {
+  return compat != NULL && compat->camera_requested &&
+         !pipewire_camera_present(compat);
+}
 
 void free_pipewire_link(PipeWireLink *link) {
   if (link == NULL) {
@@ -462,9 +751,14 @@ void on_pipewire_registry_global(void *user_data, uint32_t id,
         spa_dict_lookup(properties, PW_KEY_OBJECT_SERIAL));
     node->media_class =
         g_strdup(spa_dict_lookup(properties, PW_KEY_MEDIA_CLASS));
+    node->media_role = g_strdup(spa_dict_lookup(properties, PW_KEY_MEDIA_ROLE));
     node->target_object =
         g_strdup(spa_dict_lookup(properties, PW_KEY_TARGET_OBJECT));
     g_ptr_array_add(compat->nodes, node);
+    if (pipewire_node_is_camera(node)) {
+      diagnostic_line("discovered host PipeWire camera node %u (%s)", node->id,
+                      node->media_role != NULL ? node->media_role : "no role");
+    }
     if (g_strcmp0(node->media_class, "Stream/Input/Video") == 0) {
       refresh_pipewire_permissions_for_client(compat, node->client_id);
     }
@@ -484,6 +778,7 @@ void on_pipewire_registry_global(void *user_data, uint32_t id,
 
 void on_pipewire_registry_global_remove(void *user_data, uint32_t id) {
   PipeWireCompat *compat = user_data;
+  bool camera_removed = false;
   for (guint i = compat->clients->len; i > 0; i--) {
     PipeWireClient *client = g_ptr_array_index(compat->clients, i - 1);
     if (client->id == id) {
@@ -496,6 +791,7 @@ void on_pipewire_registry_global_remove(void *user_data, uint32_t id) {
     if (node->id != id) {
       continue;
     }
+    camera_removed = pipewire_node_is_camera(node);
     remove_pipewire_links_for_object(compat, id, false);
     for (guint session_index = 0;
          session_index < compat->state->screencast.sessions->len;
@@ -516,6 +812,12 @@ void on_pipewire_registry_global_remove(void *user_data, uint32_t id) {
       g_ptr_array_remove_index(compat->ports, i - 1);
     }
   }
+  if (camera_removed && pipewire_camera_publication_needed(compat)) {
+    if (compat->camera_lock_fd >= 0) {
+      g_ptr_array_set_size(compat->published_cameras, 0);
+    }
+    publish_v4l2_cameras(compat);
+  }
 }
 
 static const struct pw_registry_events PIPEWIRE_REGISTRY_EVENTS = {
@@ -524,14 +826,151 @@ static const struct pw_registry_events PIPEWIRE_REGISTRY_EVENTS = {
     .global_remove = on_pipewire_registry_global_remove,
 };
 
+void destroy_published_camera(gpointer data) {
+  PublishedCamera *camera = data;
+  if (camera == NULL) {
+    return;
+  }
+  if (camera->proxy != NULL) {
+    pw_proxy_destroy(camera->proxy);
+  }
+  if (camera->handle != NULL) {
+    pw_unload_spa_handle(camera->handle);
+  }
+  g_free(camera);
+}
+
+bool pipewire_v4l2_caps_usable(uint32_t capabilities,
+                               uint32_t device_capabilities) {
+  uint32_t effective = (capabilities & COMPAT_V4L2_CAP_DEVICE_CAPS) != 0
+                           ? device_capabilities
+                           : capabilities;
+  return (effective & COMPAT_V4L2_CAP_VIDEO_CAPTURE) != 0 &&
+         (effective & COMPAT_V4L2_CAP_STREAMING) != 0;
+}
+
+static bool v4l2_camera_usable(const char *path) {
+  int fd = open(path, O_RDWR | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
+  if (fd < 0) {
+    return false;
+  }
+  struct compat_v4l2_capability capability = {0};
+  bool usable = ioctl(fd, COMPAT_VIDIOC_QUERYCAP, &capability) == 0 &&
+                pipewire_v4l2_caps_usable(capability.capabilities,
+                                          capability.device_caps);
+  close(fd);
+  return usable;
+}
+
+bool acquire_camera_publisher_lock(PipeWireCompat *compat) {
+  if (compat->camera_lock_fd >= 0) {
+    return true;
+  }
+  const char *runtime = g_get_user_runtime_dir();
+  char *directory = g_build_filename(runtime, "freebsd-flatpak", NULL);
+  if (g_mkdir_with_parents(directory, 0700) != 0) {
+    log_line("create camera publisher runtime directory failed: %s",
+             g_strerror(errno));
+    g_free(directory);
+    return false;
+  }
+  char *path = g_build_filename(directory, "camera-publisher.lock", NULL);
+  g_free(directory);
+  int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+  g_free(path);
+  if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) != 0) {
+    if (fd >= 0) {
+      close(fd);
+    }
+    return false;
+  }
+  compat->camera_lock_fd = fd;
+  return true;
+}
+
+void publish_v4l2_cameras(PipeWireCompat *compat) {
+  int64_t started_us = g_get_monotonic_time();
+  if (pipewire_camera_present(compat) ||
+      !acquire_camera_publisher_lock(compat)) {
+    return;
+  }
+  glob_t devices = {0};
+  if (glob("/dev/video[0-9]*", 0, NULL, &devices) != 0) {
+    globfree(&devices);
+    return;
+  }
+  for (size_t i = 0; i < devices.gl_pathc; i++) {
+    const char *path = devices.gl_pathv[i];
+    if (!v4l2_camera_usable(path)) {
+      diagnostic_line("skipping unusable V4L2 endpoint %s", path);
+      continue;
+    }
+    char *element = g_path_get_basename(path);
+    char *name = g_strdup_printf("freebsd_flatpak.camera.%s", element);
+    char *description = g_strdup_printf("V4L2 Camera (%s)", path);
+    struct pw_properties *properties = pw_properties_new(
+        SPA_KEY_LIBRARY_NAME, "v4l2/libspa-v4l2", PW_KEY_FACTORY_NAME,
+        "api.v4l2.source", SPA_KEY_API_V4L2_PATH, path, PW_KEY_NODE_NAME, name,
+        PW_KEY_NODE_DESCRIPTION, description, PW_KEY_DEVICE_API, "v4l2",
+        PW_KEY_MEDIA_CLASS, "Video/Source", PW_KEY_MEDIA_ROLE, "Camera",
+        PW_KEY_NODE_PAUSE_ON_IDLE, "true", PW_KEY_OBJECT_LINGER, "false", NULL);
+    struct spa_handle *handle = pw_context_load_spa_handle(
+        compat->context, "api.v4l2.source", &properties->dict);
+    struct spa_node *node = NULL;
+    int interface_result =
+        handle == NULL ? -errno
+                       : spa_handle_get_interface(
+                             handle, SPA_TYPE_INTERFACE_Node, (void **)&node);
+    begin_v4l2_fd_cache();
+    struct pw_proxy *proxy =
+        interface_result < 0
+            ? NULL
+            : pw_core_export(compat->core, SPA_TYPE_INTERFACE_Node,
+                             &properties->dict, node, 0);
+    end_v4l2_fd_cache();
+    pw_properties_free(properties);
+    if (proxy == NULL) {
+      int result = interface_result < 0 ? interface_result : -errno;
+      log_line("publish V4L2 camera %s failed: %s", path, spa_strerror(result));
+      if (handle != NULL) {
+        pw_unload_spa_handle(handle);
+      }
+    } else {
+      PublishedCamera *camera = g_new0(PublishedCamera, 1);
+      camera->handle = handle;
+      camera->proxy = proxy;
+      g_ptr_array_add(compat->published_cameras, camera);
+      diagnostic_line(
+          "publishing V4L2 camera %s into host PipeWire after %" G_GINT64_FORMAT
+          " us",
+          path, g_get_monotonic_time() - started_us);
+    }
+    g_free(description);
+    g_free(name);
+    g_free(element);
+  }
+  globfree(&devices);
+  if (compat->published_cameras->len == 0 && compat->camera_lock_fd >= 0) {
+    close(compat->camera_lock_fd);
+    compat->camera_lock_fd = -1;
+  }
+  pw_core_sync(compat->core, PW_ID_CORE, 0);
+}
+
+void pipewire_request_camera_publication(PipeWireCompat *compat) {
+  if (compat == NULL) {
+    return;
+  }
+  compat->camera_requested = true;
+  publish_v4l2_cameras(compat);
+}
+
 void on_pipewire_core_error(void *user_data, uint32_t id, int seq, int result,
                             const char *message) {
   (void)user_data;
   (void)seq;
-  if (id == PW_ID_CORE) {
-    log_line("PipeWire compatibility connection failed: %s (%s)", message,
-             spa_strerror(result));
-  }
+  log_line("PipeWire compatibility object %u failed: %s (%s)", id, message,
+           spa_strerror(result));
 }
 
 static const struct pw_core_events PIPEWIRE_CORE_EVENTS = {
@@ -577,6 +1016,13 @@ void free_pipewire_compat(PipeWireCompat *compat) {
     g_source_destroy(compat->source);
     g_source_unref(compat->source);
   }
+  if (compat->camera_lock_fd >= 0) {
+    close(compat->camera_lock_fd);
+    compat->camera_lock_fd = -1;
+  }
+  if (compat->published_cameras != NULL) {
+    g_ptr_array_free(compat->published_cameras, TRUE);
+  }
   if (compat->links != NULL) {
     g_ptr_array_free(compat->links, TRUE);
   }
@@ -610,6 +1056,7 @@ PipeWireCompat *new_pipewire_compat(BridgeState *state) {
   pw_init(NULL, NULL);
   PipeWireCompat *compat = g_new0(PipeWireCompat, 1);
   compat->state = state;
+  compat->camera_lock_fd = -1;
   compat->clients =
       g_ptr_array_new_with_free_func((GDestroyNotify)free_pipewire_client);
   compat->nodes =
@@ -618,6 +1065,8 @@ PipeWireCompat *new_pipewire_compat(BridgeState *state) {
       g_ptr_array_new_with_free_func((GDestroyNotify)free_pipewire_port);
   compat->links =
       g_ptr_array_new_with_free_func((GDestroyNotify)free_pipewire_link);
+  compat->published_cameras =
+      g_ptr_array_new_with_free_func(destroy_published_camera);
   compat->loop = pw_main_loop_new(NULL);
   if (compat->loop == NULL) {
     free_pipewire_compat(compat);

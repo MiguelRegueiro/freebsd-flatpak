@@ -276,6 +276,7 @@ impl HostFilesystem {
         Ok(translated)
     }
 
+    #[cfg(test)]
     pub fn write_xdg_user_dirs_config(&self, config_home: &Path) -> Result<()> {
         fs::create_dir_all(config_home)
             .with_context(|| format!("create {}", config_home.display()))?;
@@ -300,10 +301,13 @@ impl HostFilesystem {
         }
         env
     }
+    pub fn host_user_dirs_config(&self) -> Option<&Path> {
+        self.xdg_dirs.config_file.as_deref()
+    }
 
     pub fn sandbox_home_env(&self, fallback: &str) -> String {
         if self.grants.iter().any(|grant| {
-            grant.sandbox_path == self.sandbox_home
+            grant.label.starts_with("xdg-")
                 || grant.sandbox_path.starts_with(&self.sandbox_home)
                     && (grant.label == "home" || grant.source_permission == "host")
         }) {
@@ -734,6 +738,7 @@ struct XdgUserDirs {
     public_share: PathBuf,
     templates: PathBuf,
     videos: PathBuf,
+    config_file: Option<PathBuf>,
 }
 
 impl XdgUserDirs {
@@ -747,6 +752,7 @@ impl XdgUserDirs {
             public_share: home.join("Public"),
             templates: home.join("Templates"),
             videos: home.join("Videos"),
+            config_file: None,
         }
     }
 
@@ -763,6 +769,7 @@ impl XdgUserDirs {
         let Ok(data) = fs::read_to_string(&user_dirs) else {
             return dirs;
         };
+        dirs.config_file = Some(user_dirs);
 
         for line in data.lines() {
             let line = line.trim();
@@ -837,6 +844,7 @@ impl XdgUserDirs {
     }
 }
 
+#[cfg(test)]
 fn escape_xdg_config_value(value: &str) -> String {
     value
         .replace('\\', "\\\\")

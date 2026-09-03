@@ -1,14 +1,15 @@
 #include "basic_desktop_portals.h"
-#include "document_grant_store.h"
+#include "camera_portal.h"
 #include "document_grant_persistence.h"
+#include "document_grant_store.h"
 #include "document_portal.h"
+#include "flatpak_spawn_portal.h"
 #include "host_command.h"
 #include "pipewire_screencast_linker.h"
 #include "portal_bridge_process.h"
 #include "portal_request.h"
 #include "sandbox_document_registration.h"
 #include "screencast_portal.h"
-#include "flatpak_spawn_portal.h"
 const char *arg_value(int argc, char **argv, const char *name) {
   for (int i = 1; i + 1 < argc; i++) {
     if (strcmp(argv[i], name) == 0) {
@@ -82,6 +83,12 @@ int main(int argc, char **argv) {
               .request_counter = 0,
               .host_token_counter = 0,
           },
+      .camera =
+          {
+              .allowed_senders =
+                  g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL),
+              .version = 1,
+          },
       .screencast =
           {
               .sessions =
@@ -98,8 +105,10 @@ int main(int argc, char **argv) {
       .control_node = NULL,
       .flatpak_node = NULL,
       .enable_host_command = enable_host_command,
-      .spawn_lifecycles = g_ptr_array_new_with_free_func((GDestroyNotify)flatpak_spawn_lifecycle_free),
-      .spawn_sender_roots = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, flatpak_spawn_sender_root_free),
+      .spawn_lifecycles = g_ptr_array_new_with_free_func(
+          (GDestroyNotify)flatpak_spawn_lifecycle_free),
+      .spawn_sender_roots = g_hash_table_new_full(
+          g_str_hash, g_str_equal, g_free, flatpak_spawn_sender_root_free),
   };
   if (state.host_bus == NULL || state.desktop_node == NULL) {
     fprintf(stderr, "portal bridge setup failed: %s\n", error->message);
@@ -118,7 +127,8 @@ int main(int argc, char **argv) {
   state.control_node = g_dbus_node_info_new_for_xml(CONTROL_XML, &error);
   state.flatpak_node = g_dbus_node_info_new_for_xml(FLATPAK_SPAWN_XML, &error);
   if (state.documents_node == NULL || state.request_node == NULL ||
-      state.session_node == NULL || state.control_node == NULL || state.flatpak_node == NULL) {
+      state.session_node == NULL || state.control_node == NULL ||
+      state.flatpak_node == NULL) {
     fprintf(stderr, "portal bridge introspection failed: %s\n", error->message);
     g_error_free(error);
     return 1;
@@ -200,6 +210,8 @@ int main(int argc, char **argv) {
   state.screencast.sessions = NULL;
   g_ptr_array_free(state.request_store.requests, TRUE);
   state.request_store.requests = NULL;
+  g_hash_table_destroy(state.camera.allowed_senders);
+  state.camera.allowed_senders = NULL;
   if (flatpak_development_owner_id != 0) {
     g_bus_unown_name(flatpak_development_owner_id);
   }

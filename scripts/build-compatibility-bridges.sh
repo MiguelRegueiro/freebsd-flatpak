@@ -25,6 +25,7 @@ pkg-config --cflags --libs gio-2.0 gio-unix-2.0 glib-2.0 libpipewire-0.3 \
     >"$PORTAL_RESPONSE"
 cc -O2 -Wall -Wextra \
     compatibility_helpers/portal_bridge/basic_desktop_portals.c \
+    compatibility_helpers/portal_bridge/camera_portal.c \
     compatibility_helpers/portal_bridge/document_grant_store.c \
     compatibility_helpers/portal_bridge/document_grant_persistence.c \
     compatibility_helpers/portal_bridge/document_id.c \
@@ -42,6 +43,7 @@ cc -O2 -Wall -Wextra \
     compatibility_helpers/portal_bridge/sandbox_document_registration.c \
     compatibility_helpers/portal_bridge/screencast_portal.c \
     -o "$OUTPUT_DIR/portal-bridge" \
+    -Wl,--version-script="$BASE/compatibility_helpers/portal_bridge/portal_bridge.map" \
     @"$PORTAL_RESPONSE"
 
 ui_progress "Status notifier bridge"

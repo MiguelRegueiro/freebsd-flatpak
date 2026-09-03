@@ -1,14 +1,15 @@
 #include "portal_bridge_process.h"
 #include "basic_desktop_portals.h"
+#include "camera_portal.h"
 #include "document_grant_store.h"
 #include "document_mounts.h"
-#include "host_command.h"
 #include "document_portal.h"
+#include "flatpak_spawn_portal.h"
+#include "host_command.h"
 #include "pipewire_screencast_linker.h"
 #include "portal_request.h"
 #include "sandbox_document_registration.h"
 #include "screencast_portal.h"
-#include "flatpak_spawn_portal.h"
 void log_line(const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
@@ -75,8 +76,7 @@ void portal_bridge_process_load_host_properties(BridgeState *state) {
   reply = g_dbus_connection_call_sync(
       state->host_bus, "org.freedesktop.portal.Desktop",
       "/org/freedesktop/portal/desktop", "org.freedesktop.DBus.Properties",
-      "Get",
-      g_variant_new("(ss)", "org.freedesktop.portal.OpenURI", "version"),
+      "Get", g_variant_new("(ss)", "org.freedesktop.portal.OpenURI", "version"),
       G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, -1, NULL, &error);
   if (reply == NULL) {
     log_line("read host OpenURI version failed: %s", error->message);
@@ -98,6 +98,7 @@ void portal_bridge_process_load_host_properties(BridgeState *state) {
 void portal_bridge_process_close_client_resources(BridgeState *state,
                                                   const char *client_sender) {
   host_command_service_close_client(&state->host_command, client_sender);
+  camera_portal_forget_sender(state, client_sender);
   for (guint i = 0; i < state->request_store.requests->len; i++) {
     RequestRecord *request =
         g_ptr_array_index(state->request_store.requests, i);
@@ -213,8 +214,13 @@ void portal_bridge_process_on_bus_acquired(GDBusConnection *connection,
     g_main_loop_quit(state->loop);
     return;
   }
-  if (!portal_bridge_process_register_interfaces(connection, "/org/freedesktop/portal/Flatpak", state->flatpak_node, &FLATPAK_SPAWN_VTABLE, state, &error)) {
-    log_line("register Flatpak portal failed: %s", error->message); g_error_free(error); g_main_loop_quit(state->loop); return;
+  if (!portal_bridge_process_register_interfaces(
+          connection, "/org/freedesktop/portal/Flatpak", state->flatpak_node,
+          &FLATPAK_SPAWN_VTABLE, state, &error)) {
+    log_line("register Flatpak portal failed: %s", error->message);
+    g_error_free(error);
+    g_main_loop_quit(state->loop);
+    return;
   }
   state->local_objects_registered = true;
 }

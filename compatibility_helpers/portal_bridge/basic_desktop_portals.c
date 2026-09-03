@@ -1,6 +1,8 @@
 #include "basic_desktop_portals.h"
+#include "camera_portal.h"
 #include "file_chooser_portal.h"
 #include "open_uri_portal.h"
+#include "pipewire_screencast_linker.h"
 #include "portal_bridge_process.h"
 #include "screencast_portal.h"
 const char *DESKTOP_XML =
@@ -99,6 +101,19 @@ const char *DESKTOP_XML =
     "      <arg type='a{sv}' name='state'/>"
     "    </signal>"
     "  </interface>"
+    "  <interface name='org.freedesktop.portal.Camera'>"
+    "    <property name='version' type='u' access='read'/>"
+    "    <property name='IsCameraPresent' type='b' access='read'/>"
+    "    <method name='AccessCamera'>"
+    "      <arg type='a{sv}' name='options' direction='in'/>"
+    "      <arg type='o' name='handle' direction='out'/>"
+    "    </method>"
+    "    <method name='OpenPipeWireRemote'>"
+    "      <annotation name='org.gtk.GDBus.C.UnixFD' value='true'/>"
+    "      <arg type='a{sv}' name='options' direction='in'/>"
+    "      <arg type='h' name='fd' direction='out'/>"
+    "    </method>"
+    "  </interface>"
     "  <interface name='org.freedesktop.portal.ScreenCast'>"
     "    <property name='AvailableSourceTypes' type='u' access='read'/>"
     "    <property name='AvailableCursorModes' type='u' access='read'/>"
@@ -188,8 +203,11 @@ void handle_desktop_method(GDBusConnection *connection, const gchar *sender,
   (void)object_path;
 
   BridgeState *state = user_data;
-  if (g_strcmp0(interface_name, "org.freedesktop.portal.ScreenCast") == 0 &&
-      g_strcmp0(method_name, "CreateSession") == 0) {
+  if (g_strcmp0(interface_name, "org.freedesktop.portal.Camera") == 0) {
+    handle_camera_method(state, sender, method_name, parameters, invocation);
+  } else if (g_strcmp0(interface_name, "org.freedesktop.portal.ScreenCast") ==
+                 0 &&
+             g_strcmp0(method_name, "CreateSession") == 0) {
     handle_screencast_create(state, sender, parameters, invocation);
   } else if (g_strcmp0(interface_name, "org.freedesktop.portal.ScreenCast") ==
                  0 &&
@@ -259,6 +277,12 @@ GVariant *handle_get_property(GDBusConnection *connection, const gchar *sender,
   (void)object_path;
   BridgeState *state = user_data;
 
+  if (g_strcmp0(interface_name, "org.freedesktop.portal.Camera") == 0 &&
+      g_strcmp0(property_name, "IsCameraPresent") == 0) {
+    return g_variant_new_boolean(
+        pipewire_camera_available(state->screencast.pipewire));
+  }
+
   if (g_strcmp0(interface_name, "org.freedesktop.portal.ScreenCast") == 0) {
     if (g_strcmp0(property_name, "version") == 0) {
       return g_variant_new_uint32(state->screencast.version);
@@ -272,6 +296,9 @@ GVariant *handle_get_property(GDBusConnection *connection, const gchar *sender,
   }
 
   if (g_strcmp0(property_name, "version") == 0) {
+    if (g_strcmp0(interface_name, "org.freedesktop.portal.Camera") == 0) {
+      return g_variant_new_uint32(state->camera.version);
+    }
     if (g_strcmp0(interface_name, "org.freedesktop.portal.FileChooser") == 0) {
       return g_variant_new_uint32(4);
     }

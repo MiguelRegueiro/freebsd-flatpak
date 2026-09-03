@@ -149,6 +149,26 @@ fn all_xdg_user_directory_permissions_are_published_consistently() {
 }
 
 #[test]
+fn xdg_subdirectory_permission_projects_host_user_dirs_config() {
+    let tree = TestTree::new("xdg-subdirectory-user-dirs");
+    let pictures = tree.path("home/user/Images");
+    fs::create_dir_all(&pictures).unwrap();
+    let filesystem = filesystem_with_user_dirs(
+        &tree,
+        "xdg-pictures/Camera:create;",
+        Some("XDG_PICTURES_DIR=\"$HOME/Images\"\n"),
+    );
+
+    assert_eq!(
+        filesystem.host_user_dirs_config(),
+        Some(tree.path("host-config/user-dirs.dirs").as_path())
+    );
+    assert_eq!(filesystem.grants()[0].host_path(), pictures.join("Camera"));
+    assert_eq!(filesystem.sandbox_home_env("/var/data"), "/home/user");
+    assert!(filesystem.user_dir_env().is_empty());
+}
+
+#[test]
 fn missing_user_dirs_config_uses_xdg_default_download_path() {
     let tree = TestTree::new("missing-user-dirs");
     let download = tree.path("home/user/Downloads");

@@ -12,6 +12,7 @@ void handle_screencast_create(BridgeState *, const char *, GVariant *,
 void handle_screencast_request(BridgeState *, const char *, const char *,
                                GVariant *, GDBusMethodInvocation *);
 gint32 copy_unix_fd(GUnixFDList *, gint32, GUnixFDList *, GError **);
+void on_open_pipewire_remote(GObject *, GAsyncResult *, gpointer);
 void handle_open_pipewire_remote(BridgeState *, const char *, GVariant *,
                                  GDBusMethodInvocation *);
 #endif

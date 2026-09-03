@@ -1,17 +1,18 @@
 #include "../compatibility_helpers/portal_bridge/basic_desktop_portals.h"
-#include "../compatibility_helpers/portal_bridge/flatpak_spawn_portal.h"
-#include "../compatibility_helpers/portal_bridge/document_grant_store.h"
+#include "../compatibility_helpers/portal_bridge/camera_portal.h"
 #include "../compatibility_helpers/portal_bridge/document_grant_persistence.h"
-#include "../compatibility_helpers/portal_bridge/document_mounts.h"
+#include "../compatibility_helpers/portal_bridge/document_grant_store.h"
 #include "../compatibility_helpers/portal_bridge/document_id.h"
+#include "../compatibility_helpers/portal_bridge/document_mounts.h"
 #include "../compatibility_helpers/portal_bridge/document_portal.h"
 #include "../compatibility_helpers/portal_bridge/file_chooser_portal.h"
+#include "../compatibility_helpers/portal_bridge/flatpak_spawn_portal.h"
 #include "../compatibility_helpers/portal_bridge/pipewire_screencast_linker.h"
 #include "../compatibility_helpers/portal_bridge/portal_request.h"
 #include "../compatibility_helpers/portal_bridge/sandbox_document_registration.h"
 #include "../compatibility_helpers/portal_bridge/screencast_portal.h"
-#include "../compatibility_helpers/status_notifier_bridge/status_notifier_watcher.h"
 #include "../compatibility_helpers/status_notifier_bridge/icon_resolver.h"
+#include "../compatibility_helpers/status_notifier_bridge/status_notifier_watcher.h"
 #include <arpa/inet.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 
@@ -102,16 +103,27 @@ static void test_flatpak_spawn_contract(void) {
   GError *error = NULL;
   GDBusNodeInfo *node = g_dbus_node_info_new_for_xml(FLATPAK_SPAWN_XML, &error);
   g_assert_no_error(error);
-  GDBusInterfaceInfo *iface = g_dbus_node_info_lookup_interface(node, "org.freedesktop.portal.Flatpak");
+  GDBusInterfaceInfo *iface =
+      g_dbus_node_info_lookup_interface(node, "org.freedesktop.portal.Flatpak");
   g_assert_nonnull(iface);
   GDBusMethodInfo *spawn = g_dbus_interface_info_lookup_method(iface, "Spawn");
   g_assert_nonnull(spawn);
   const char *expected[] = {"ay", "aay", "a{uh}", "a{ss}", "u", "a{sv}"};
-  for (guint i = 0; i < 6; i++) g_assert_cmpstr(spawn->in_args[i]->signature, ==, expected[i]);
+  for (guint i = 0; i < 6; i++)
+    g_assert_cmpstr(spawn->in_args[i]->signature, ==, expected[i]);
   g_assert_cmpstr(spawn->out_args[0]->signature, ==, "u");
-  g_assert_cmpstr(g_dbus_interface_info_lookup_method(iface, "SpawnSignal")->in_args[1]->signature, ==, "u");
-  g_assert_cmpstr(g_dbus_interface_info_lookup_signal(iface, "SpawnStarted")->args[1]->signature, ==, "u");
-  g_assert_cmpstr(g_dbus_interface_info_lookup_signal(iface, "SpawnExited")->args[1]->signature, ==, "u");
+  g_assert_cmpstr(g_dbus_interface_info_lookup_method(iface, "SpawnSignal")
+                      ->in_args[1]
+                      ->signature,
+                  ==, "u");
+  g_assert_cmpstr(g_dbus_interface_info_lookup_signal(iface, "SpawnStarted")
+                      ->args[1]
+                      ->signature,
+                  ==, "u");
+  g_assert_cmpstr(g_dbus_interface_info_lookup_signal(iface, "SpawnExited")
+                      ->args[1]
+                      ->signature,
+                  ==, "u");
 
   GVariant *version = FLATPAK_SPAWN_VTABLE.get_property(
       NULL, NULL, NULL, NULL, "version", &error, NULL);
@@ -133,6 +145,16 @@ static void test_introspection(void) {
   GDBusNodeInfo *desktop = g_dbus_node_info_new_for_xml(DESKTOP_XML, &error);
   g_assert_no_error(error);
   g_assert_nonnull(desktop);
+  GDBusInterfaceInfo *camera = g_dbus_node_info_lookup_interface(
+      desktop, "org.freedesktop.portal.Camera");
+  g_assert_nonnull(camera);
+  g_assert_nonnull(
+      g_dbus_interface_info_lookup_property(camera, "IsCameraPresent"));
+  g_assert_nonnull(g_dbus_interface_info_lookup_method(camera, "AccessCamera"));
+  g_assert_nonnull(
+      g_dbus_interface_info_lookup_method(camera, "OpenPipeWireRemote"));
+  g_assert_nonnull(g_dbus_interface_info_lookup_property(camera, "version"));
+
   GDBusInterfaceInfo *screencast = g_dbus_node_info_lookup_interface(
       desktop, "org.freedesktop.portal.ScreenCast");
   g_assert_nonnull(screencast);
@@ -236,14 +258,16 @@ static void test_remove_sandbox_is_per_instance_and_idempotent(void) {
   g_ptr_array_free(state.documents.grants, TRUE);
 }
 
-static void test_failed_document_unmount_keeps_the_document_root_registered(void) {
+static void
+test_failed_document_unmount_keeps_the_document_root_registered(void) {
   BridgeState state = {0};
   const char *doc_dir =
       "/runtime/chroots/org.example.App/first/run/user/1001/doc";
   DocumentGrant *grant = g_new0(DocumentGrant, 1);
   grant->target_paths = g_ptr_array_new_with_free_func(g_free);
   g_ptr_array_add(grant->target_paths,
-                  g_strdup("/runtime/chroots/org.example.App/first/run/user/1001/doc/grant/file"));
+                  g_strdup("/runtime/chroots/org.example.App/first/run/user/"
+                           "1001/doc/grant/file"));
   state.documents.grants =
       g_ptr_array_new_with_free_func((GDestroyNotify)free_grant);
   state.documents.sandbox_doc_dirs = g_ptr_array_new_with_free_func(g_free);
@@ -351,18 +375,15 @@ static void init_document_test_state(BridgeState *state, const char *root,
   state->documents.persistent_store = (char *)store;
   state->documents.grants =
       g_ptr_array_new_with_free_func((GDestroyNotify)free_grant);
-  state->documents.sandbox_doc_dirs =
-      g_ptr_array_new_with_free_func(g_free);
+  state->documents.sandbox_doc_dirs = g_ptr_array_new_with_free_func(g_free);
   g_assert_cmpint(g_mkdir_with_parents(state->documents.doc_dir, 0700), ==, 0);
 }
 
-static void assert_direct_grant_mount(TestMountCall *call,
-                                      const char *host_dir,
+static void assert_direct_grant_mount(TestMountCall *call, const char *host_dir,
                                       const char *sandbox_doc_dir,
                                       const char *doc_id) {
   char *base = g_path_get_basename(host_dir);
-  char *expected_target =
-      g_build_filename(sandbox_doc_dir, doc_id, base, NULL);
+  char *expected_target = g_build_filename(sandbox_doc_dir, doc_id, base, NULL);
   g_assert_cmpstr(call->source, ==, host_dir);
   g_assert_cmpstr(call->target, ==, expected_target);
   g_assert_false(call->read_only);
@@ -393,10 +414,10 @@ static void test_grant_mount_order_is_direct_and_equivalent(void) {
   char *host_dir = g_build_filename(root, "Selected", NULL);
   char *store = g_build_filename(root, "grants.ini", NULL);
   char *sandbox_root = g_build_filename(root, "sandboxes", NULL);
-  char *first_sandbox = g_build_filename(
-      sandbox_root, "first", "run", "user", "1001", "doc", NULL);
-  char *second_sandbox = g_build_filename(
-      sandbox_root, "second", "run", "user", "1001", "doc", NULL);
+  char *first_sandbox = g_build_filename(sandbox_root, "first", "run", "user",
+                                         "1001", "doc", NULL);
+  char *second_sandbox = g_build_filename(sandbox_root, "second", "run", "user",
+                                          "1001", "doc", NULL);
   g_assert_cmpint(g_mkdir(host_dir, 0700), ==, 0);
   g_assert_cmpint(g_mkdir_with_parents(first_sandbox, 0700), ==, 0);
   g_assert_cmpint(g_mkdir_with_parents(second_sandbox, 0700), ==, 0);
@@ -411,8 +432,7 @@ static void test_grant_mount_order_is_direct_and_equivalent(void) {
   DocumentGrant *first_grant = NULL;
   g_assert_true(create_document_grant_from_path(
       &grant_first, host_dir, grant_first.app_id, permissions, true, false,
-      false,
-      &first_grant, &error));
+      false, &first_grant, &error));
   g_assert_no_error(error);
   g_assert_true(register_document_grant(&grant_first, first_grant, &error));
   g_assert_no_error(error);
@@ -435,8 +455,7 @@ static void test_grant_mount_order_is_direct_and_equivalent(void) {
   DocumentGrant *second_grant = NULL;
   g_assert_true(create_document_grant_from_path(
       &sandbox_first, host_dir, sandbox_first.app_id, permissions, true, false,
-      false,
-      &second_grant, &error));
+      false, &second_grant, &error));
   g_assert_no_error(error);
   g_assert_true(register_document_grant(&sandbox_first, second_grant, &error));
   g_assert_no_error(error);
@@ -477,9 +496,9 @@ static void test_directory_grant_persists_and_translates(void) {
   init_document_test_state(&first, root, store);
   char **permissions = read_write_permissions();
   DocumentGrant *grant = NULL;
-  g_assert_true(create_document_grant_from_path(
-      &first, host_dir, first.app_id, permissions, true, true, false, &grant,
-      &error));
+  g_assert_true(create_document_grant_from_path(&first, host_dir, first.app_id,
+                                                permissions, true, true, false,
+                                                &grant, &error));
   g_assert_no_error(error);
   g_assert_true(register_document_grant(&first, grant, &error));
   g_assert_no_error(error);
@@ -491,9 +510,9 @@ static void test_directory_grant_persists_and_translates(void) {
       g_strv_contains((const char *const *)grant->permissions, "write"));
   char *doc_id = g_strdup(grant->doc_id);
   DocumentGrant *reused = NULL;
-  g_assert_true(create_document_grant_from_path(
-      &first, host_dir, first.app_id, permissions, true, true, true, &reused,
-      &error));
+  g_assert_true(create_document_grant_from_path(&first, host_dir, first.app_id,
+                                                permissions, true, true, true,
+                                                &reused, &error));
   g_assert_no_error(error);
   g_assert_true(reused == grant);
   g_assert_true(register_document_grant(&first, reused, &error));
@@ -582,8 +601,8 @@ static void test_missing_persistent_grant_is_pruned(void) {
   char **permissions = read_permissions();
   DocumentGrant *stale = NULL;
   g_assert_true(create_document_grant_from_path(
-      &first, stale_path, first.app_id, permissions, false, true, false,
-      &stale, &error));
+      &first, stale_path, first.app_id, permissions, false, true, false, &stale,
+      &error));
   g_assert_no_error(error);
   g_assert_true(register_document_grant(&first, stale, &error));
   g_assert_no_error(error);
@@ -591,8 +610,8 @@ static void test_missing_persistent_grant_is_pruned(void) {
 
   DocumentGrant *valid = NULL;
   g_assert_true(create_document_grant_from_path(
-      &first, valid_path, first.app_id, permissions, false, true, false,
-      &valid, &error));
+      &first, valid_path, first.app_id, permissions, false, true, false, &valid,
+      &error));
   g_assert_no_error(error);
   g_assert_true(register_document_grant(&first, valid, &error));
   g_assert_no_error(error);
@@ -613,8 +632,8 @@ static void test_missing_persistent_grant_is_pruned(void) {
   g_assert_cmpstr(restored->host_path, ==, valid_path);
 
   GKeyFile *saved = g_key_file_new();
-  g_assert_true(g_key_file_load_from_file(saved, store, G_KEY_FILE_NONE,
-                                          &error));
+  g_assert_true(
+      g_key_file_load_from_file(saved, store, G_KEY_FILE_NONE, &error));
   g_assert_no_error(error);
   g_assert_false(g_key_file_has_group(saved, stale_id));
   g_assert_true(g_key_file_has_group(saved, valid_id));
@@ -653,8 +672,7 @@ static void test_ungrantable_filechooser_uri_is_not_leaked(void) {
   g_variant_builder_add(&uris, "s", host_uri);
   GVariantBuilder results;
   g_variant_builder_init(&results, G_VARIANT_TYPE_VARDICT);
-  g_variant_builder_add(&results, "{sv}", "uris",
-                        g_variant_builder_end(&uris));
+  g_variant_builder_add(&results, "{sv}", "uris", g_variant_builder_end(&uris));
   GVariant *result = g_variant_ref_sink(g_variant_builder_end(&results));
   GVariant *rewritten =
       g_variant_ref_sink(rewrite_filechooser_results(&state, 0, result, false));
@@ -682,8 +700,7 @@ static void test_ungrantable_filechooser_uri_is_not_leaked(void) {
 
 static void test_directly_accessible_filechooser_uri_is_not_exported(void) {
   GError *error = NULL;
-  char *root =
-      g_dir_make_tmp("freebsd-flatpak-direct-uri-test-XXXXXX", &error);
+  char *root = g_dir_make_tmp("freebsd-flatpak-direct-uri-test-XXXXXX", &error);
   g_assert_no_error(error);
   char *store = g_build_filename(root, "grants.ini", NULL);
   BridgeState state;
@@ -699,8 +716,7 @@ static void test_directly_accessible_filechooser_uri_is_not_exported(void) {
   g_assert_cmpint(link(host_path, sandbox_path), ==, 0);
   char *sandbox_doc_dir =
       g_build_filename(sandbox_root, "run/user/1001/doc", NULL);
-  g_ptr_array_add(state.documents.sandbox_doc_dirs,
-                  g_strdup(sandbox_doc_dir));
+  g_ptr_array_add(state.documents.sandbox_doc_dirs, g_strdup(sandbox_doc_dir));
 
   char *host_uri = g_filename_to_uri(host_path, NULL, &error);
   g_assert_no_error(error);
@@ -734,8 +750,7 @@ static void test_directly_accessible_filechooser_uri_is_not_exported(void) {
 
 static void test_inaccessible_filechooser_uri_is_exported(void) {
   GError *error = NULL;
-  char *root =
-      g_dir_make_tmp("freebsd-flatpak-export-uri-test-XXXXXX", &error);
+  char *root = g_dir_make_tmp("freebsd-flatpak-export-uri-test-XXXXXX", &error);
   g_assert_no_error(error);
   char *store = g_build_filename(root, "grants.ini", NULL);
   test_mount_calls =
@@ -748,8 +763,7 @@ static void test_inaccessible_filechooser_uri_is_exported(void) {
   g_assert_no_error(error);
   char *sandbox_doc_dir =
       g_build_filename(root, "sandbox/run/user/1001/doc", NULL);
-  g_ptr_array_add(state.documents.sandbox_doc_dirs,
-                  g_strdup(sandbox_doc_dir));
+  g_ptr_array_add(state.documents.sandbox_doc_dirs, g_strdup(sandbox_doc_dir));
 
   char *host_uri = g_filename_to_uri(host_path, NULL, &error);
   g_assert_no_error(error);
@@ -777,6 +791,89 @@ static void test_inaccessible_filechooser_uri_is_exported(void) {
   g_free(host_path);
   g_free(store);
   g_free(root);
+}
+
+static void test_camera_state_and_pipewire_classification(void) {
+  BridgeState state = {0};
+  state.camera.allowed_senders =
+      g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+  g_assert_false(camera_sender_is_allowed(&state, ":1.20"));
+  camera_portal_allow_sender(&state, ":1.20");
+  g_assert_true(camera_sender_is_allowed(&state, ":1.20"));
+  g_assert_false(camera_sender_is_allowed(&state, ":1.21"));
+  camera_portal_forget_sender(&state, ":1.20");
+  g_assert_false(camera_sender_is_allowed(&state, ":1.20"));
+
+  RequestRecord access = {.state = &state, .client_sender = ":1.22"};
+  camera_portal_apply_response(&access, 1);
+  g_assert_false(camera_sender_is_allowed(&state, ":1.22"));
+  camera_portal_apply_response(&access, 2);
+  g_assert_false(camera_sender_is_allowed(&state, ":1.22"));
+  access.close_requested = true;
+  camera_portal_apply_response(&access, 0);
+  g_assert_false(camera_sender_is_allowed(&state, ":1.22"));
+  access.close_requested = false;
+  camera_portal_apply_response(&access, 0);
+  g_assert_true(camera_sender_is_allowed(&state, ":1.22"));
+
+  PipeWireCompat compat = {0};
+  compat.nodes = g_ptr_array_new();
+  compat.ports = g_ptr_array_new();
+  g_assert_false(pipewire_camera_publication_needed(&compat));
+  compat.camera_requested = true;
+  g_assert_true(pipewire_camera_publication_needed(&compat));
+  PipeWireNode camera = {
+      .id = 17, .media_class = "Video/Source", .media_role = "Camera"};
+  PipeWirePort output = {.id = 18, .node_id = 17, .is_output = true};
+  g_ptr_array_add(compat.nodes, &camera);
+  g_assert_true(pipewire_node_is_camera(&camera));
+  g_assert_false(pipewire_camera_present(&compat));
+  g_ptr_array_add(compat.ports, &output);
+  g_assert_true(pipewire_camera_present(&compat));
+  g_assert_false(pipewire_camera_publication_needed(&compat));
+  camera.media_role = NULL;
+  g_assert_false(pipewire_node_is_camera(&camera));
+  g_assert_false(pipewire_camera_present(&compat));
+  camera.media_role = "Screen";
+  g_assert_false(pipewire_node_is_camera(&camera));
+  g_assert_false(pipewire_camera_present(&compat));
+  camera.media_role = "Camera";
+  g_assert_true(pipewire_node_is_camera(&camera));
+  g_assert_true(pipewire_camera_present(&compat));
+  camera.media_class = "Stream/Output/Video";
+  g_assert_false(pipewire_node_is_camera(&camera));
+  g_assert_false(pipewire_camera_present(&compat));
+  g_assert_true(pipewire_v4l2_caps_usable(
+      UINT32_C(0x00000001) | UINT32_C(0x04000000), 0));
+  g_assert_true(
+      pipewire_v4l2_caps_usable(UINT32_C(0x80000000) | UINT32_C(0x00800000),
+                                UINT32_C(0x00000001) | UINT32_C(0x04000000)));
+  g_assert_false(pipewire_v4l2_caps_usable(
+      UINT32_C(0x80000000) | UINT32_C(0x00000001) | UINT32_C(0x04000000),
+      UINT32_C(0x00800000) | UINT32_C(0x04000000)));
+  g_assert_false(pipewire_v4l2_caps_usable(UINT32_C(0x00000001), 0));
+  int64_t normalized_us = 0;
+  g_assert_true(pipewire_v4l2_normalize_timestamp(
+      INT64_C(1788384977157040), INT64_C(1788384977200000),
+      INT64_C(16500000000), &normalized_us));
+  g_assert_cmpuint((guint64)normalized_us, ==, UINT64_C(16499957040));
+  g_assert_false(pipewire_v4l2_normalize_timestamp(
+      INT64_C(16499957040), INT64_C(1788384977200000), INT64_C(16500000000),
+      &normalized_us));
+  g_assert_true(pipewire_v4l2_ioctl_matches(UINT64_C(0xffffffffc0585611),
+                                            UINT64_C(0x00000000c0585611)));
+  g_assert_false(pipewire_v4l2_ioctl_matches(UINT64_C(0xffffffffc0585611),
+                                             UINT64_C(0x00000000c0585610)));
+  g_assert_true(pipewire_v4l2_timestamp_is_stale(
+      INT64_C(1788384976800000), INT64_C(1788384977200000),
+      INT64_C(16500000000), INT64_C(150000)));
+  g_assert_false(pipewire_v4l2_timestamp_is_stale(
+      INT64_C(1788384977157040), INT64_C(1788384977200000),
+      INT64_C(16500000000), INT64_C(150000)));
+
+  g_ptr_array_free(compat.ports, TRUE);
+  g_ptr_array_free(compat.nodes, TRUE);
+  g_hash_table_destroy(state.camera.allowed_senders);
 }
 
 static void test_screencast_source_tracking(void) {
@@ -884,8 +981,7 @@ static void test_pipewire_source_generation_tracking(void) {
 
 static void save_test_icon(const char *path) {
   GError *error = NULL;
-  GdkPixbuf *pixbuf =
-      gdk_pixbuf_new(GDK_COLORSPACE_RGB, TRUE, 8, 2, 1);
+  GdkPixbuf *pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, TRUE, 8, 2, 1);
   g_assert_nonnull(pixbuf);
   guchar *pixels = gdk_pixbuf_get_pixels(pixbuf);
   pixels[0] = 0x11;
@@ -913,8 +1009,7 @@ static void assert_test_icon_pixmap(GVariant *pixmaps) {
   g_assert_cmpint(height, ==, 1);
   gsize size = 0;
   const guchar *argb = g_variant_get_fixed_array(bytes, &size, 1);
-  const guchar expected[] = {0x44, 0x11, 0x22, 0x33,
-                             0xdd, 0xaa, 0xbb, 0xcc};
+  const guchar expected[] = {0x44, 0x11, 0x22, 0x33, 0xdd, 0xaa, 0xbb, 0xcc};
   g_assert_cmpuint(size, ==, sizeof(expected));
   g_assert_cmpmem(argb, size, expected, sizeof(expected));
   g_variant_unref(bytes);
@@ -931,8 +1026,7 @@ static void test_status_icon_resolution(void) {
   char *icon_dir = g_build_filename(app_root, "share", "icons", "hicolor",
                                     "32x32", "apps", NULL);
   char *named_icon = g_build_filename(icon_dir, "org.example.Tray.png", NULL);
-  char *runtime_icon_dir =
-      g_build_filename(runtime_root, "custom", NULL);
+  char *runtime_icon_dir = g_build_filename(runtime_root, "custom", NULL);
   char *runtime_icon = g_build_filename(runtime_icon_dir, "absolute.png", NULL);
   g_assert_cmpint(g_mkdir_with_parents(icon_dir, 0700), ==, 0);
   g_assert_cmpint(g_mkdir_with_parents(runtime_icon_dir, 0700), ==, 0);
@@ -943,14 +1037,13 @@ static void test_status_icon_resolution(void) {
       .app_root = app_root,
       .runtime_root = runtime_root,
   };
-  assert_test_icon_pixmap(
-      resolve_status_icon(&state, "org.example.Tray", ""));
+  assert_test_icon_pixmap(resolve_status_icon(&state, "org.example.Tray", ""));
   assert_test_icon_pixmap(
       resolve_status_icon(&state, "/usr/custom/absolute.png", ""));
   g_assert_null(resolve_status_icon(&state, "org.example.Missing", ""));
   g_assert_null(resolve_status_icon(&state, "../outside", ""));
-  g_assert_null(
-      resolve_status_icon(&state, "/app/../../runtime/custom/absolute.png", ""));
+  g_assert_null(resolve_status_icon(
+      &state, "/app/../../runtime/custom/absolute.png", ""));
 
   g_assert_cmpint(g_remove(runtime_icon), ==, 0);
   g_assert_cmpint(g_remove(named_icon), ==, 0);
@@ -978,20 +1071,46 @@ static void test_status_icon_resolution(void) {
 static void test_flatpak_lifecycle_source_is_async(void) {
   int pair[2];
   g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, pair), ==, 0);
-  BridgeState state = { .spawn_lifecycles = g_ptr_array_new_with_free_func((GDestroyNotify)flatpak_spawn_lifecycle_free) };
+  BridgeState state = {.spawn_lifecycles = g_ptr_array_new_with_free_func(
+                           (GDestroyNotify)flatpak_spawn_lifecycle_free)};
   flatpak_spawn_watch_lifecycle(&state, pair[1], 55, 55, NULL, 0);
-  unsigned char accepted[24] = {0}; guint32 magic = htonl(0x46534250), request = htonl(55), length = htonl(4); guint16 version = htons(1), type = htons(6);
-  memcpy(accepted, &magic, 4); memcpy(accepted + 4, &version, 2); memcpy(accepted + 6, &type, 2); memcpy(accepted + 8, &request, 4); memcpy(accepted + 12, &length, 4); memcpy(accepted + 20, &request, 4);
-  g_assert_cmpint(send(pair[0], accepted, sizeof(accepted), 0), ==, sizeof(accepted));
+  unsigned char accepted[24] = {0};
+  guint32 magic = htonl(0x46534250), request = htonl(55), length = htonl(4);
+  guint16 version = htons(1), type = htons(6);
+  memcpy(accepted, &magic, 4);
+  memcpy(accepted + 4, &version, 2);
+  memcpy(accepted + 6, &type, 2);
+  memcpy(accepted + 8, &request, 4);
+  memcpy(accepted + 12, &length, 4);
+  memcpy(accepted + 20, &request, 4);
+  g_assert_cmpint(send(pair[0], accepted, sizeof(accepted), 0), ==,
+                  sizeof(accepted));
   g_main_context_iteration(NULL, TRUE);
   g_assert_cmpuint(state.spawn_lifecycles->len, ==, 1);
-  unsigned char started[28] = {0}; guint32 pid = htonl(55); type = htons(12); length = htonl(8);
-  memcpy(started, &magic, 4); memcpy(started + 4, &version, 2); memcpy(started + 6, &type, 2); memcpy(started + 8, &request, 4); memcpy(started + 12, &length, 4); memcpy(started + 20, &pid, 4); memcpy(started + 24, &pid, 4);
-  g_assert_cmpint(send(pair[0], started, sizeof(started), 0), ==, sizeof(started));
+  unsigned char started[28] = {0};
+  guint32 pid = htonl(55);
+  type = htons(12);
+  length = htonl(8);
+  memcpy(started, &magic, 4);
+  memcpy(started + 4, &version, 2);
+  memcpy(started + 6, &type, 2);
+  memcpy(started + 8, &request, 4);
+  memcpy(started + 12, &length, 4);
+  memcpy(started + 20, &pid, 4);
+  memcpy(started + 24, &pid, 4);
+  g_assert_cmpint(send(pair[0], started, sizeof(started), 0), ==,
+                  sizeof(started));
   g_main_context_iteration(NULL, TRUE);
   g_assert_cmpuint(state.spawn_lifecycles->len, ==, 1);
-  unsigned char exited[28] = {0}; type = htons(7); length = htonl(8);
-  memcpy(exited, &magic, 4); memcpy(exited + 4, &version, 2); memcpy(exited + 6, &type, 2); memcpy(exited + 8, &request, 4); memcpy(exited + 12, &length, 4); memcpy(exited + 20, &request, 4);
+  unsigned char exited[28] = {0};
+  type = htons(7);
+  length = htonl(8);
+  memcpy(exited, &magic, 4);
+  memcpy(exited + 4, &version, 2);
+  memcpy(exited + 6, &type, 2);
+  memcpy(exited + 8, &request, 4);
+  memcpy(exited + 12, &length, 4);
+  memcpy(exited + 20, &request, 4);
   g_assert_cmpint(send(pair[0], exited, sizeof(exited), 0), ==, sizeof(exited));
   g_main_context_iteration(NULL, TRUE);
   g_assert_cmpuint(state.spawn_lifecycles->len, ==, 0);
@@ -1004,22 +1123,36 @@ static void test_flatpak_watch_bus_lifecycle_closes_only_matching_spawns(void) {
   g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, watched), ==, 0);
   g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, ordinary), ==, 0);
   g_assert_cmpint(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, other_sender), ==, 0);
-  BridgeState state = { .spawn_lifecycles = g_ptr_array_new_with_free_func((GDestroyNotify)flatpak_spawn_lifecycle_free) };
+  BridgeState state = {.spawn_lifecycles = g_ptr_array_new_with_free_func(
+                           (GDestroyNotify)flatpak_spawn_lifecycle_free)};
   flatpak_spawn_watch_lifecycle(&state, watched[1], 1, 101, ":1.5", 16);
   flatpak_spawn_watch_lifecycle(&state, ordinary[1], 2, 102, ":1.5", 0);
   flatpak_spawn_watch_lifecycle(&state, other_sender[1], 3, 103, ":1.6", 16);
 
-  unsigned char exited[28] = {0}; guint32 magic = htonl(0x46534250), exited_request = htonl(1), length = htonl(8), exited_pid = htonl(101); guint16 version = htons(1), exited_type = htons(10);
-  memcpy(exited, &magic, 4); memcpy(exited + 4, &version, 2); memcpy(exited + 6, &exited_type, 2); memcpy(exited + 8, &exited_request, 4); memcpy(exited + 12, &length, 4); memcpy(exited + 20, &exited_pid, 4);
-  g_assert_cmpint(send(watched[0], exited, sizeof(exited), 0), ==, sizeof(exited));
-  while (g_main_context_iteration(NULL, FALSE));
+  unsigned char exited[28] = {0};
+  guint32 magic = htonl(0x46534250), exited_request = htonl(1),
+          length = htonl(8), exited_pid = htonl(101);
+  guint16 version = htons(1), exited_type = htons(10);
+  memcpy(exited, &magic, 4);
+  memcpy(exited + 4, &version, 2);
+  memcpy(exited + 6, &exited_type, 2);
+  memcpy(exited + 8, &exited_request, 4);
+  memcpy(exited + 12, &length, 4);
+  memcpy(exited + 20, &exited_pid, 4);
+  g_assert_cmpint(send(watched[0], exited, sizeof(exited), 0), ==,
+                  sizeof(exited));
+  while (g_main_context_iteration(NULL, FALSE))
+    ;
   g_assert_cmpuint(state.spawn_lifecycles->len, ==, 3);
 
   flatpak_spawn_close_watch_bus_lifecycles(&state, ":1.5");
 
   g_assert_cmpuint(state.spawn_lifecycles->len, ==, 2);
-  unsigned char terminate[20]; guint16 type; guint32 request;
-  g_assert_cmpint(recv(watched[0], terminate, sizeof(terminate), MSG_DONTWAIT), ==, sizeof(terminate));
+  unsigned char terminate[20];
+  guint16 type;
+  guint32 request;
+  g_assert_cmpint(recv(watched[0], terminate, sizeof(terminate), MSG_DONTWAIT),
+                  ==, sizeof(terminate));
   memcpy(&type, terminate + 6, sizeof(type));
   memcpy(&request, terminate + 8, sizeof(request));
   g_assert_cmpuint(ntohs(type), ==, 11);
@@ -1027,7 +1160,8 @@ static void test_flatpak_watch_bus_lifecycle_closes_only_matching_spawns(void) {
   char byte;
   g_assert_cmpint(recv(ordinary[0], &byte, sizeof(byte), MSG_DONTWAIT), ==, -1);
   g_assert_true(errno == EAGAIN || errno == EWOULDBLOCK);
-  g_assert_cmpint(recv(other_sender[0], &byte, sizeof(byte), MSG_DONTWAIT), ==, -1);
+  g_assert_cmpint(recv(other_sender[0], &byte, sizeof(byte), MSG_DONTWAIT), ==,
+                  -1);
   g_assert_true(errno == EAGAIN || errno == EWOULDBLOCK);
 
   flatpak_spawn_cleanup_lifecycles(&state);
@@ -1054,6 +1188,7 @@ int main(void) {
   test_directly_accessible_filechooser_uri_is_not_exported();
   test_inaccessible_filechooser_uri_is_exported();
   test_missing_persistent_grant_is_pruned();
+  test_camera_state_and_pipewire_classification();
   test_screencast_source_tracking();
   test_pipewire_client_session_ownership();
   test_pipewire_source_generation_tracking();

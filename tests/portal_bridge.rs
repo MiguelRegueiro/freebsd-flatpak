@@ -29,6 +29,7 @@ fn compatibility_bridge_contract() {
         .args([
             "tests/portal-bridge-test.c",
             "compatibility_helpers/portal_bridge/basic_desktop_portals.c",
+            "compatibility_helpers/portal_bridge/camera_portal.c",
             "compatibility_helpers/portal_bridge/document_grant_store.c",
             "compatibility_helpers/portal_bridge/document_grant_persistence.c",
             "compatibility_helpers/portal_bridge/document_id.c",
@@ -50,6 +51,7 @@ fn compatibility_bridge_contract() {
         ])
         .arg("-o")
         .arg(&output)
+        .arg("-Wl,--version-script=compatibility_helpers/portal_bridge/portal_bridge.map")
         .args(flags.split_whitespace());
     let compile_status = compiler.status().expect("compile portal bridge C test");
     assert!(

@@ -1,5 +1,6 @@
 #ifndef FREEBSD_FLATPAK_PORTAL_BRIDGE_PROCESS_H
 #define FREEBSD_FLATPAK_PORTAL_BRIDGE_PROCESS_H
+#include "host_command.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <gio/gio.h>
@@ -20,7 +21,6 @@
 #include <sys/user.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include "host_command.h"
 typedef struct _PortalBridgeProcess PortalBridgeProcess;
 typedef PortalBridgeProcess BridgeState;
 typedef struct _DocumentGrant DocumentGrant;
@@ -30,6 +30,7 @@ typedef struct _PipeWireCompat PipeWireCompat;
 typedef enum {
   REQUEST_FILECHOOSER,
   REQUEST_OPEN_URI,
+  REQUEST_CAMERA_ACCESS,
   REQUEST_SCREENCAST_CREATE,
   REQUEST_SCREENCAST_OTHER,
   REQUEST_SCREENCAST_START
@@ -61,6 +62,10 @@ typedef struct {
 typedef struct {
   guint32 version;
 } OpenUriPortalState;
+typedef struct {
+  GHashTable *allowed_senders;
+  guint32 version;
+} CameraPortalState;
 struct _DocumentGrant {
   char *doc_id;
   char *host_path;
@@ -112,6 +117,7 @@ struct _PortalBridgeProcess {
   DocumentGrantStore documents;
   PortalRequestStore request_store;
   OpenUriPortalState open_uri;
+  CameraPortalState camera;
   ScreenCastPortalState screencast;
   guint local_name_signal_id;
   bool local_objects_registered;

@@ -279,9 +279,6 @@ impl ChrootNullfsBackend {
             fs::create_dir_all(&source)
                 .with_context(|| format!("create persistent app directory {}", source.display()))?;
         }
-        instance
-            .host_filesystem
-            .write_xdg_user_dirs_config(&app_data.join("config"))?;
         for name in ["data", "config", "cache"] {
             instance.mount_nullfs_secure(
                 &app_data.join(name),
@@ -289,6 +286,14 @@ impl ChrootNullfsBackend {
                 false,
             )?;
         }
+        if let Some(user_dirs) = instance
+            .host_filesystem
+            .host_user_dirs_config()
+            .map(Path::to_path_buf)
+        {
+            instance.mount_nullfs_secure(&user_dirs, "var/config/user-dirs.dirs", true)?;
+        }
+
         let extension_mounts = instance.extension_plan.mounts.clone();
         let extension_merges = instance
             .extension_plan

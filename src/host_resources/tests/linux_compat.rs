@@ -14,6 +14,7 @@ fn linux_compat_helpers_are_mounted_and_required() {
     fs::write(libexec.join(SIGNALFD_SHIM_LIB), []).unwrap();
     fs::write(libexec.join(SOCKET_OPTION_ERRNO_SHIM_LIB), []).unwrap();
     fs::write(libexec.join(UNIX_SEQPACKET_SHIM_LIB), []).unwrap();
+    fs::write(libexec.join(V4L2_COMPAT_SHIM_LIB), []).unwrap();
     fs::write(libexec.join(FLATPAK_SPAWN_WRAPPER), []).unwrap();
     let paths = Installation::for_test(&root);
 
@@ -26,6 +27,7 @@ fn linux_compat_helpers_are_mounted_and_required() {
         vec![
             "/run/host/freebsd-flatpak/libunix-seqpacket-shim.so",
             "/run/host/freebsd-flatpak/libsocket-option-errno-shim.so",
+            "/run/host/freebsd-flatpak/libv4l2-compat-shim.so",
         ]
     );
 
@@ -47,6 +49,7 @@ fn runtime_flatpak_spawn_is_preserved_before_the_wrapper_is_projected() {
     fs::write(libexec.join(SIGNALFD_SHIM_LIB), []).unwrap();
     fs::write(libexec.join(SOCKET_OPTION_ERRNO_SHIM_LIB), []).unwrap();
     fs::write(libexec.join(UNIX_SEQPACKET_SHIM_LIB), []).unwrap();
+    fs::write(libexec.join(V4L2_COMPAT_SHIM_LIB), []).unwrap();
     fs::write(libexec.join(FLATPAK_SPAWN_WRAPPER), []).unwrap();
     fs::write(runtime_bin.join(RUNTIME_FLATPAK_SPAWN), []).unwrap();
     fs::write(runtime_bin.join("marker"), []).unwrap();
@@ -98,6 +101,34 @@ fn runtime_flatpak_spawn_is_preserved_before_the_wrapper_is_projected() {
         .unwrap()
         .is_empty());
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn v4l2_compat_shim_selects_mmap_without_changing_other_camera_ioctls() {
+    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let output_dir = project_root.join("target/v4l2-compat-tests");
+    fs::create_dir_all(&output_dir).unwrap();
+    let output = output_dir.join("v4l2-compat-shim-test");
+    let compile = Command::new("/compat/linux/usr/bin/gcc")
+        .args(["-O2", "-Wall", "-Wextra", "-Werror"])
+        .arg("-DV4L2_COMPAT_SHIM_TEST")
+        .arg(project_root.join("compatibility_helpers/v4l2-compat-shim.c"))
+        .arg(project_root.join("tests/v4l2-compat-shim-test.c"))
+        .arg("-o")
+        .arg(&output)
+        .arg("-pthread")
+        .env(
+            "PATH",
+            "/compat/linux/usr/bin:/compat/linux/bin:/usr/bin:/bin",
+        )
+        .status()
+        .expect("compile V4L2 compatibility shim test");
+    assert!(compile.success());
+
+    let run = Command::new(&output)
+        .status()
+        .expect("run V4L2 compatibility shim test");
+    assert!(run.success());
 }
 
 #[test]
