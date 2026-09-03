@@ -207,9 +207,7 @@ impl ChrootNullfsBackend {
         let host_graphics = HostGraphics::prepare(
             &self.paths,
             app,
-            extension_plan
-                .conditioned_mount("active-gl-driver")
-                .cloned(),
+            extension_plan.active_gl_mount().cloned(),
             &instance_id,
             diagnostics,
         )?;
@@ -345,7 +343,7 @@ impl ChrootNullfsBackend {
                 instance.mount_nullfs(mount.host_path(), target, true)?;
             }
         }
-        if let Some((source, target)) = instance.host_system_bus.runtime_mount() {
+        for (source, target) in instance.host_system_bus.runtime_mounts() {
             instance.mount_nullfs(&source, target, true)?;
         }
         let flatpak_data_plan = FlatpakDataMountPlan::build(

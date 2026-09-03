@@ -13,6 +13,7 @@ use std::time::Duration;
 
 const NETWORK_MANAGER_NAME: &str = "org.freedesktop.NetworkManager";
 const NETWORK_MANAGER_HELPER: &str = "network-manager-compat";
+const SYSTEM_BUS_MOUNT_TARGETS: [&str; 2] = ["run/dbus", "var/run/dbus"];
 
 #[derive(Debug)]
 pub struct HostSystemBus {
@@ -104,10 +105,14 @@ impl HostSystemBus {
         wait_for_name(address, NETWORK_MANAGER_NAME)
     }
 
-    pub fn runtime_mount(&self) -> Option<(PathBuf, PathBuf)> {
-        self.directory
-            .as_ref()
-            .map(|directory| (directory.clone(), PathBuf::from("run/dbus")))
+    pub fn runtime_mounts(&self) -> Vec<(PathBuf, PathBuf)> {
+        let Some(directory) = self.directory.as_ref() else {
+            return Vec::new();
+        };
+        SYSTEM_BUS_MOUNT_TARGETS
+            .iter()
+            .map(|target| (directory.clone(), PathBuf::from(target)))
+            .collect()
     }
 
     pub fn describe(&self) -> Vec<String> {

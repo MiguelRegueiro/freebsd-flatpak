@@ -107,6 +107,12 @@ impl ChrootInstance {
     }
 
     pub(super) fn mount_extension_merge(&mut self, merge: &ExtensionMergeDirectory) -> Result<()> {
+        if merge.entries.is_empty() {
+            return Ok(());
+        }
+        if let Some(source) = direct_merge_source(merge) {
+            return self.mount_nullfs(&source, &merge.target, true);
+        }
         self.mount_extension_merge_inner(merge, &std::collections::BTreeSet::new())
     }
 
@@ -346,6 +352,44 @@ impl ChrootInstance {
         });
         Ok(())
     }
+}
+
+fn direct_merge_source(merge: &ExtensionMergeDirectory) -> Option<PathBuf> {
+    let source_dir = merge.entries.first()?.source.parent()?.to_path_buf();
+    if merge
+        .entries
+        .iter()
+        .any(|entry| entry.source.parent() != Some(source_dir.as_path()))
+    {
+        return None;
+    }
+
+    let base_is_empty = match fs::read_dir(&merge.base_source) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            true
+        }
+        Err(_) => false,
+    };
+    if !base_is_empty {
+        return None;
+    }
+
+    let selected = merge
+        .entries
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let source_entries = fs::read_dir(&source_dir)
+        .ok()?
+        .map(|entry| entry.ok().map(|entry| PathBuf::from(entry.file_name())))
+        .collect::<Option<std::collections::BTreeSet<_>>>()?;
+    (selected == source_entries).then_some(source_dir)
 }
 
 fn nullfs_source_aliases_parent(

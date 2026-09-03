@@ -321,9 +321,8 @@ fn required_from_metadata(
 ) -> Result<Vec<RequiredExtension>> {
     let points = parse_extension_points(metadata);
     let mut requirements = Vec::new();
-    for point in &points {
-        for ref_name in resolve_extension_refs(std::slice::from_ref(point), parent, available_refs)
-        {
+    for ref_name in resolve_extension_refs(&points, parent, available_refs) {
+        if let Some(point) = super::extension_points::point_for_ref(&points, parent, &ref_name) {
             if !installed_refs.contains(&ref_name) && !autodownload_enabled(point, &ref_name, facts)
             {
                 continue;

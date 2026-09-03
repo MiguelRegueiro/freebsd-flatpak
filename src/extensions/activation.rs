@@ -207,6 +207,16 @@ impl ExtensionMountPlan {
             .find(|mount| mount.conditions.iter().any(|item| item == condition))
     }
 
+    pub(crate) fn active_gl_mount(&self) -> Option<&ExtensionMount> {
+        self.mounts.iter().find(|mount| {
+            mount
+                .conditions
+                .iter()
+                .any(|condition| condition == "active-gl-driver")
+                && !is_debug_extension_name(&mount.name)
+        })
+    }
+
     pub(crate) fn app_info(&self) -> Vec<String> {
         extension_info(
             self.mounts
@@ -378,8 +388,8 @@ fn resolve_metadata_mounts(
         .with_context(|| format!("read extension metadata {}", metadata_path.display()))?;
     let parent = ExtensionParent::from_ref(parent_ref)?;
     let points = parse_extension_points(&metadata);
-    for point in &points {
-        for ref_name in resolve_extension_refs(std::slice::from_ref(point), &parent, available) {
+    for ref_name in resolve_extension_refs(&points, &parent, available) {
+        if let Some(point) = super::extension_points::point_for_ref(&points, &parent, &ref_name) {
             if !launch_enabled(point, &ref_name, facts) {
                 continue;
             }
@@ -489,6 +499,10 @@ fn mount_target(point: &ExtensionPoint, ref_name: &str, scope: ExtensionScope) -
         target.push(suffix);
     }
     Ok(target)
+}
+
+fn is_debug_extension_name(name: &str) -> bool {
+    name.split('.').any(|component| component == "Debug")
 }
 
 fn runtime_name(ref_name: &str) -> Option<&str> {

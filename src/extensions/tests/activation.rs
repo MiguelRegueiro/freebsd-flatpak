@@ -94,6 +94,21 @@ fn fixture() -> (Installation, FlatpakApp, PathBuf) {
     )
 }
 
+fn gl_mount(name: &str, target: &str) -> ExtensionMount {
+    ExtensionMount {
+        name: name.to_string(),
+        ref_name: format!("runtime/{name}/x86_64/25.08"),
+        commit: format!("{name}-commit"),
+        checkout_dir: PathBuf::from("/extensions").join(name),
+        target: PathBuf::from(target),
+        add_ld_paths: Vec::new(),
+        merge_dirs: Vec::new(),
+        priority: 0,
+        scope: ExtensionScope::Runtime,
+        conditions: vec!["active-gl-driver".to_string()],
+    }
+}
+
 #[test]
 fn conditions_are_or_expressions_and_match_dynamic_suffixes() {
     let facts = ExtensionFacts {
@@ -120,6 +135,50 @@ fn conditions_are_or_expressions_and_match_dynamic_suffixes() {
         &["have-intel-gpu".into(), "on-xdg-desktop-KDE".into()],
         "org.example.Extension"
     ));
+}
+
+#[test]
+fn freedesktop_debug_symbols_are_mounted_but_never_the_gl_provider() {
+    let debug = gl_mount(
+        "org.freedesktop.Platform.GL.Debug.default",
+        "usr/lib/debug/usr/lib/x86_64-linux-gnu/GL/default",
+    );
+    let normal = gl_mount(
+        "org.freedesktop.Platform.GL.default",
+        "usr/lib/x86_64-linux-gnu/GL/default",
+    );
+    let plan = ExtensionMountPlan {
+        mounts: vec![debug.clone(), normal.clone()],
+    };
+
+    assert!(plan.mounts.contains(&debug));
+    assert_eq!(plan.active_gl_mount(), Some(&normal));
+    assert_eq!(
+        ExtensionMountPlan {
+            mounts: vec![debug],
+        }
+        .active_gl_mount(),
+        None
+    );
+}
+
+#[test]
+fn kde_broad_gl_point_cannot_promote_debug_symbols_to_provider() {
+    let debug = gl_mount(
+        "org.freedesktop.Platform.GL.Debug.default",
+        "usr/lib/x86_64-linux-gnu/GL/Debug.default",
+    );
+    let normal = gl_mount(
+        "org.freedesktop.Platform.GL.default",
+        "usr/lib/x86_64-linux-gnu/GL/default",
+    );
+    let plan = ExtensionMountPlan {
+        // KDE mount ordering puts the upper-case Debug directory first.
+        mounts: vec![debug.clone(), normal.clone()],
+    };
+
+    assert_eq!(plan.conditioned_mount("active-gl-driver"), Some(&debug));
+    assert_eq!(plan.active_gl_mount(), Some(&normal));
 }
 
 #[test]

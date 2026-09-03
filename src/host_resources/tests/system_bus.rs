@@ -16,12 +16,36 @@ fn private_bus_scope_is_short_and_instance_specific() {
 fn private_bus_policy_is_destination_scoped_and_not_eavesdroppable() {
     let config = private_system_bus_config(
         Path::new("/tmp/private/system_bus_socket"),
-        &[NETWORK_MANAGER_NAME.to_string()],
+        &[
+            NETWORK_MANAGER_NAME.to_string(),
+            "org.freedesktop.hostname1".to_string(),
+        ],
     );
     assert!(config.contains("<deny send_destination=\"*\"/>"));
     assert!(config.contains("<allow send_destination=\"org.freedesktop.NetworkManager\"/>"));
+    assert!(config.contains("<allow send_destination=\"org.freedesktop.hostname1\"/>"));
     assert!(config.contains("<deny eavesdrop=\"true\"/>"));
     assert!(!config.contains("/run/dbus/system_bus_socket"));
+}
+
+#[test]
+fn private_bus_is_projected_at_both_linux_system_bus_paths() {
+    let directory = PathBuf::from("/private/filtered-system-bus");
+    let mut bus = HostSystemBus {
+        directory: Some(directory.clone()),
+        bus: None,
+        service: None,
+        allowed_names: vec![NETWORK_MANAGER_NAME.to_string()],
+    };
+
+    assert_eq!(
+        bus.runtime_mounts(),
+        vec![
+            (directory.clone(), PathBuf::from("run/dbus")),
+            (directory, PathBuf::from("var/run/dbus")),
+        ]
+    );
+    bus.directory = None;
 }
 
 #[test]
@@ -33,6 +57,6 @@ fn no_system_bus_policy_does_not_create_a_mount() {
     let paths = Installation::for_test(&root);
     let mut bus =
         HostSystemBus::prepare(&paths, "[Context]\nshared=network;\n", "instance").unwrap();
-    assert!(bus.runtime_mount().is_none());
+    assert!(bus.runtime_mounts().is_empty());
     bus.cleanup().unwrap();
 }

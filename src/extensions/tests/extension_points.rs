@@ -147,6 +147,61 @@ fn architecture_isolation_and_duplicate_metadata_are_deterministic() {
 }
 
 #[test]
+fn nested_subdirectory_points_own_their_payloads() {
+    let points = parse_extension_points(
+        "[Extension org.freedesktop.Platform.GL]\nversions=25.08;1.4\nsubdirectories=true\n\
+         [Extension org.freedesktop.Platform.GL.Debug]\nversions=25.08;1.4\nsubdirectories=true\n",
+    );
+    let parent =
+        ExtensionParent::from_ref("runtime/org.freedesktop.Platform/x86_64/25.08").unwrap();
+    let available = refs(&[
+        "runtime/org.freedesktop.Platform.GL.default/x86_64/25.08",
+        "runtime/org.freedesktop.Platform.GL.Debug.default/x86_64/25.08",
+    ]);
+
+    assert_eq!(
+        resolve_extension_refs(&points, &parent, &available),
+        available
+    );
+    assert_eq!(
+        point_for_ref(
+            &points,
+            &parent,
+            "runtime/org.freedesktop.Platform.GL.Debug.default/x86_64/25.08",
+        )
+        .map(|point| point.name.as_str()),
+        Some("org.freedesktop.Platform.GL.Debug")
+    );
+}
+
+#[test]
+fn broad_kde_gl_point_owns_debug_payload_without_making_it_a_provider() {
+    let points = parse_extension_points(
+        "[Extension org.freedesktop.Platform.GL]\nversions=25.08;1.4\nsubdirectories=true\n\
+         enable-if=active-gl-driver\n",
+    );
+    let parent = ExtensionParent::from_ref("runtime/org.kde.Platform/x86_64/6.10").unwrap();
+    let available = refs(&[
+        "runtime/org.freedesktop.Platform.GL.default/x86_64/25.08",
+        "runtime/org.freedesktop.Platform.GL.Debug.default/x86_64/25.08",
+    ]);
+
+    assert_eq!(
+        resolve_extension_refs(&points, &parent, &available),
+        available
+    );
+    assert_eq!(
+        point_for_ref(
+            &points,
+            &parent,
+            "runtime/org.freedesktop.Platform.GL.Debug.default/x86_64/25.08",
+        )
+        .map(|point| point.name.as_str()),
+        Some("org.freedesktop.Platform.GL")
+    );
+}
+
+#[test]
 fn debug_and_locale_related_refs_get_flatpak_lifecycle_defaults() {
     let points = parse_extension_points(
         "[Extension org.example.App.Debug]\ndirectory=lib/debug\n\

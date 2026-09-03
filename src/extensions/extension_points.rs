@@ -131,7 +131,10 @@ pub(crate) fn resolve_extension_refs(
         for name in names {
             for branch in point.branches(parent) {
                 let candidate = format!("runtime/{name}/{}/{branch}", parent.arch);
-                if available_refs.contains(&candidate) {
+                if available_refs.contains(&candidate)
+                    && point_for_ref(points, parent, &candidate)
+                        .is_some_and(|owner| std::ptr::eq(owner, point))
+                {
                     resolved.insert(candidate);
                     break;
                 }
@@ -146,14 +149,27 @@ pub(crate) fn point_for_ref<'a>(
     parent: &ExtensionParent,
     ref_name: &str,
 ) -> Option<&'a ExtensionPoint> {
-    points.iter().find(|point| {
-        resolve_extension_refs(
-            std::slice::from_ref(point),
-            parent,
-            &BTreeSet::from([ref_name.to_string()]),
-        )
-        .contains(ref_name)
-    })
+    let candidate = runtime_ref_parts(ref_name)?;
+    if candidate.arch != parent.arch {
+        return None;
+    }
+    points
+        .iter()
+        .filter(|point| {
+            (candidate.name == point.name
+                || (point.subdirectories
+                    && candidate
+                        .name
+                        .strip_prefix(&point.name)
+                        .is_some_and(|suffix| suffix.starts_with('.'))))
+                && point
+                    .branches(parent)
+                    .iter()
+                    .any(|branch| branch == candidate.branch)
+        })
+        // Nested extension points own their payloads. For example, GL.Debug
+        // must not also be discovered as a subdirectory of GL.
+        .max_by_key(|point| point.name.len())
 }
 
 pub(crate) fn required_extension_refs(
@@ -232,15 +248,11 @@ pub(crate) fn autodelete_extension_refs(
         let Ok(metadata) = fs::read_to_string(metadata_path) else {
             continue;
         };
-        for point in parse_extension_points(&metadata)
-            .into_iter()
-            .filter(|point| point.autodelete)
-        {
-            refs.extend(resolve_extension_refs(
-                std::slice::from_ref(&point),
-                &parent,
-                installed_runtime_refs,
-            ));
+        let points = parse_extension_points(&metadata);
+        for ref_name in resolve_extension_refs(&points, &parent, installed_runtime_refs) {
+            if point_for_ref(&points, &parent, &ref_name).is_some_and(|point| point.autodelete) {
+                refs.insert(ref_name);
+            }
         }
     }
     Ok(refs)
@@ -269,6 +281,7 @@ fn keeps_installed_ref(point: &ExtensionPoint, ref_name: &str, facts: &Extension
 struct RuntimeRefParts<'a> {
     name: &'a str,
     arch: &'a str,
+    branch: &'a str,
 }
 
 fn runtime_ref_parts(ref_name: &str) -> Option<RuntimeRefParts<'_>> {
@@ -276,6 +289,7 @@ fn runtime_ref_parts(ref_name: &str) -> Option<RuntimeRefParts<'_>> {
     Some(RuntimeRefParts {
         name: parts.next()?,
         arch: parts.next()?,
+        branch: parts.next()?,
     })
 }
 

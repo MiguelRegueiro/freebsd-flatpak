@@ -2,6 +2,43 @@ use super::*;
 use crate::sandbox::chroot_instance::OwnedMount;
 use std::path::PathBuf;
 #[test]
+fn complete_single_source_merge_uses_one_directory_mount() {
+    use crate::extensions::activation::{ExtensionMergeDirectory, ExtensionMergeEntry};
+    use std::fs;
+
+    let root = std::env::temp_dir().join(format!(
+        "freebsd-flatpak-direct-merge-{}",
+        std::process::id()
+    ));
+    let base = root.join("base");
+    let source = root.join("source");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("driver-a"), "a").unwrap();
+    fs::write(source.join("driver-b"), "b").unwrap();
+    let merge = ExtensionMergeDirectory {
+        target: PathBuf::from("usr/lib/GL/lib/dri"),
+        base_source: base.clone(),
+        entries: ["driver-a", "driver-b"]
+            .into_iter()
+            .map(|name| ExtensionMergeEntry {
+                name: PathBuf::from(name),
+                source: source.join(name),
+            })
+            .collect(),
+    };
+
+    assert_eq!(direct_merge_source(&merge), Some(source.clone()));
+    fs::write(base.join("runtime-driver"), "base").unwrap();
+    assert_eq!(direct_merge_source(&merge), None);
+    fs::remove_file(base.join("runtime-driver")).unwrap();
+    let mut incomplete = merge.clone();
+    incomplete.entries.pop();
+    assert_eq!(direct_merge_source(&incomplete), None);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn owned_mount_cleanup_is_child_first_and_root_scoped() {
     let root = PathBuf::from("/sandbox/first");
     let mounts = vec![
