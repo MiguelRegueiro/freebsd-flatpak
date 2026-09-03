@@ -793,6 +793,62 @@ static void test_inaccessible_filechooser_uri_is_exported(void) {
   g_free(root);
 }
 
+typedef struct {
+  guint ready;
+  guint destroyed;
+} CameraReadyCounters;
+
+static void record_camera_ready(gpointer data) {
+  CameraReadyCounters *counters = data;
+  counters->ready++;
+}
+
+static void record_camera_ready_destroy(gpointer data) {
+  CameraReadyCounters *counters = data;
+  counters->destroyed++;
+}
+
+static void test_cold_camera_publication_readiness(void) {
+  PipeWireCompat compat = {0};
+  compat.nodes = g_ptr_array_new();
+  compat.ports = g_ptr_array_new();
+  compat.camera_ready_callbacks = g_ptr_array_new_with_free_func(g_free);
+  CameraReadyCounters counters = {0};
+
+  pipewire_when_camera_published(&compat, record_camera_ready, &counters,
+                                 record_camera_ready_destroy);
+  g_assert_cmpuint(counters.ready, ==, 0);
+
+  PipeWireNode camera = {
+      .id = 17, .media_class = "Video/Source", .media_role = "Camera"};
+  PipeWirePort output = {.id = 18, .node_id = 17, .is_output = true};
+  g_ptr_array_add(compat.nodes, &camera);
+  pipewire_camera_publication_changed(&compat);
+  g_assert_cmpuint(counters.ready, ==, 0);
+  g_ptr_array_add(compat.ports, &output);
+  pipewire_camera_publication_changed(&compat);
+  g_assert_cmpuint(counters.ready, ==, 1);
+  g_assert_cmpuint(counters.destroyed, ==, 1);
+
+  pipewire_when_camera_published(&compat, record_camera_ready, &counters,
+                                 record_camera_ready_destroy);
+  g_assert_cmpuint(counters.ready, ==, 2);
+  g_assert_cmpuint(counters.destroyed, ==, 2);
+
+  g_ptr_array_set_size(compat.ports, 0);
+  pipewire_when_camera_published(&compat, record_camera_ready, &counters,
+                                 record_camera_ready_destroy);
+  g_assert_cmpuint(counters.ready, ==, 2);
+  g_ptr_array_add(compat.ports, &output);
+  pipewire_camera_publication_changed(&compat);
+  g_assert_cmpuint(counters.ready, ==, 3);
+  g_assert_cmpuint(counters.destroyed, ==, 3);
+
+  g_ptr_array_free(compat.camera_ready_callbacks, TRUE);
+  g_ptr_array_free(compat.ports, TRUE);
+  g_ptr_array_free(compat.nodes, TRUE);
+}
+
 static void test_camera_state_and_pipewire_classification(void) {
   BridgeState state = {0};
   state.camera.allowed_senders =
@@ -1188,6 +1244,7 @@ int main(void) {
   test_directly_accessible_filechooser_uri_is_not_exported();
   test_inaccessible_filechooser_uri_is_exported();
   test_missing_persistent_grant_is_pruned();
+  test_cold_camera_publication_readiness();
   test_camera_state_and_pipewire_classification();
   test_screencast_source_tracking();
   test_pipewire_client_session_ownership();

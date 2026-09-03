@@ -3,6 +3,20 @@
 #include "portal_request.h"
 #include "screencast_portal.h"
 
+typedef struct {
+  RequestRecord *request;
+  GVariant *host_options;
+} PendingCameraAccess;
+
+static void free_pending_camera_access(gpointer data) {
+  PendingCameraAccess *pending = data;
+  if (pending == NULL) {
+    return;
+  }
+  g_variant_unref(pending->host_options);
+  g_free(pending);
+}
+
 bool camera_sender_is_allowed(BridgeState *state, const char *sender) {
   return state->camera.allowed_senders != NULL &&
          g_hash_table_contains(state->camera.allowed_senders, sender);
@@ -45,6 +59,24 @@ void on_host_camera_response(GDBusConnection *connection,
     request->host_signal_id = 0;
   }
 }
+void on_host_camera_access_call(GObject *, GAsyncResult *, gpointer);
+
+static void forward_camera_access(gpointer data) {
+  PendingCameraAccess *pending = data;
+  RequestRecord *request = pending->request;
+  if (request->close_requested) {
+    return;
+  }
+  g_dbus_connection_call(
+      request->state->host_bus, "org.freedesktop.portal.Desktop",
+      "/org/freedesktop/portal/desktop", "org.freedesktop.portal.Camera",
+      "AccessCamera",
+      g_variant_new("(@a{sv})", g_variant_ref(pending->host_options)),
+      G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NONE, -1, NULL,
+      on_host_camera_access_call, request);
+  diagnostic_line("forwarded Camera.AccessCamera as %s", request->local_path);
+}
+
 void subscribe_host_camera_request(RequestRecord *request) {
   if (request->host_signal_id != 0) {
     g_dbus_connection_signal_unsubscribe(request->state->host_bus,
@@ -87,8 +119,6 @@ void handle_camera_access(BridgeState *state, const char *sender,
                           GDBusMethodInvocation *invocation) {
   GVariant *options = g_variant_get_child_value(parameters, 0);
   char *host_token = fresh_host_token(state, "camera");
-  pipewire_request_camera_publication(state->screencast.pipewire);
-
   RequestRecord *request = g_new0(RequestRecord, 1);
   request->state = state;
   request->client_sender = g_strdup(sender);
@@ -111,16 +141,16 @@ void handle_camera_access(BridgeState *state, const char *sender,
   }
   subscribe_host_camera_request(request);
   g_ptr_array_add(state->request_store.requests, request);
-  GVariant *host_options = rewrite_options(options, host_token, NULL);
-  g_dbus_connection_call(state->host_bus, "org.freedesktop.portal.Desktop",
-                         "/org/freedesktop/portal/desktop",
-                         "org.freedesktop.portal.Camera", "AccessCamera",
-                         g_variant_new("(@a{sv})", host_options),
-                         G_VARIANT_TYPE("(o)"), G_DBUS_CALL_FLAGS_NONE, -1,
-                         NULL, on_host_camera_access_call, request);
+  PendingCameraAccess *pending = g_new0(PendingCameraAccess, 1);
+  pending->request = request;
+  pending->host_options =
+      g_variant_ref_sink(rewrite_options(options, host_token, NULL));
+  pipewire_when_camera_published(state->screencast.pipewire,
+                                 forward_camera_access, pending,
+                                 free_pending_camera_access);
+  pipewire_request_camera_publication(state->screencast.pipewire);
   g_dbus_method_invocation_return_value(
       invocation, g_variant_new("(o)", request->local_path));
-  diagnostic_line("forwarded Camera.AccessCamera as %s", request->local_path);
   g_free(host_token);
   g_variant_unref(options);
 }

@@ -43,6 +43,7 @@ typedef struct {
   struct spa_handle *handle;
   struct pw_proxy *proxy;
 } PublishedCamera;
+typedef void (*PipeWireCameraReadyCallback)(gpointer);
 struct _PipeWireCompat {
   BridgeState *state;
   struct pw_main_loop *loop;
@@ -57,6 +58,7 @@ struct _PipeWireCompat {
   GPtrArray *ports;
   GPtrArray *links;
   GPtrArray *published_cameras;
+  GPtrArray *camera_ready_callbacks;
   int camera_lock_fd;
   bool camera_requested;
 };
@@ -76,6 +78,10 @@ bool pipewire_v4l2_timestamp_is_stale(int64_t, int64_t, int64_t, int64_t);
 void free_pipewire_compat(PipeWireCompat *);
 bool pipewire_camera_available(const PipeWireCompat *);
 void pipewire_request_camera_publication(PipeWireCompat *);
+void pipewire_when_camera_published(PipeWireCompat *,
+                                    PipeWireCameraReadyCallback, gpointer,
+                                    GDestroyNotify);
+void pipewire_camera_publication_changed(PipeWireCompat *);
 bool pipewire_camera_publication_needed(const PipeWireCompat *);
 PipeWireCompat *new_pipewire_compat(BridgeState *);
 #endif

@@ -55,6 +55,12 @@ struct cached_v4l2_ioctl {
 static _Thread_local struct cached_v4l2_ioctl cached_try_formats[32];
 static _Thread_local size_t n_cached_try_formats;
 
+typedef struct {
+  PipeWireCameraReadyCallback callback;
+  gpointer data;
+  GDestroyNotify destroy;
+} CameraReadyCallback;
+
 extern int __sys_ioctl(int, unsigned long, char *);
 bool pipewire_v4l2_mmap_retryable(int fd, int flags, int error) {
   char device[64];
@@ -380,6 +386,64 @@ bool pipewire_camera_available(const PipeWireCompat *compat) {
 bool pipewire_camera_publication_needed(const PipeWireCompat *compat) {
   return compat != NULL && compat->camera_requested &&
          !pipewire_camera_present(compat);
+}
+
+static void free_camera_ready_callback(gpointer data) {
+  CameraReadyCallback *ready = data;
+  if (ready == NULL) {
+    return;
+  }
+  if (ready->destroy != NULL) {
+    ready->destroy(ready->data);
+  }
+  g_free(ready);
+}
+
+static void complete_camera_ready_callbacks(PipeWireCompat *compat) {
+  if (compat == NULL || compat->camera_ready_callbacks->len == 0) {
+    return;
+  }
+  GPtrArray *callbacks = compat->camera_ready_callbacks;
+  compat->camera_ready_callbacks =
+      g_ptr_array_new_with_free_func(free_camera_ready_callback);
+  for (guint i = 0; i < callbacks->len; i++) {
+    CameraReadyCallback *ready = g_ptr_array_index(callbacks, i);
+    ready->callback(ready->data);
+    if (ready->destroy != NULL) {
+      ready->destroy(ready->data);
+      ready->destroy = NULL;
+    }
+  }
+  g_ptr_array_free(callbacks, TRUE);
+}
+
+void pipewire_camera_publication_changed(PipeWireCompat *compat) {
+  if (pipewire_camera_present(compat)) {
+    complete_camera_ready_callbacks(compat);
+  }
+}
+
+void pipewire_when_camera_published(PipeWireCompat *compat,
+                                    PipeWireCameraReadyCallback callback,
+                                    gpointer data, GDestroyNotify destroy) {
+  if (callback == NULL) {
+    if (destroy != NULL) {
+      destroy(data);
+    }
+    return;
+  }
+  if (compat == NULL || pipewire_camera_present(compat)) {
+    callback(data);
+    if (destroy != NULL) {
+      destroy(data);
+    }
+    return;
+  }
+  CameraReadyCallback *ready = g_new0(CameraReadyCallback, 1);
+  ready->callback = callback;
+  ready->data = data;
+  ready->destroy = destroy;
+  g_ptr_array_add(compat->camera_ready_callbacks, ready);
 }
 
 void free_pipewire_link(PipeWireLink *link) {
@@ -763,6 +827,7 @@ void on_pipewire_registry_global(void *user_data, uint32_t id,
       refresh_pipewire_permissions_for_client(compat, node->client_id);
     }
     pipewire_compat_try_links(compat);
+    pipewire_camera_publication_changed(compat);
   } else if (g_strcmp0(type, PW_TYPE_INTERFACE_Port) == 0) {
     PipeWirePort *port = g_new0(PipeWirePort, 1);
     port->id = id;
@@ -773,6 +838,7 @@ void on_pipewire_registry_global(void *user_data, uint32_t id,
     port->is_output = g_strcmp0(direction, "out") == 0;
     g_ptr_array_add(compat->ports, port);
     pipewire_compat_try_links(compat);
+    pipewire_camera_publication_changed(compat);
   }
 }
 
@@ -954,6 +1020,9 @@ void publish_v4l2_cameras(PipeWireCompat *compat) {
     close(compat->camera_lock_fd);
     compat->camera_lock_fd = -1;
   }
+  if (compat->published_cameras->len == 0) {
+    complete_camera_ready_callbacks(compat);
+  }
   pw_core_sync(compat->core, PW_ID_CORE, 0);
 }
 
@@ -1023,6 +1092,9 @@ void free_pipewire_compat(PipeWireCompat *compat) {
   if (compat->published_cameras != NULL) {
     g_ptr_array_free(compat->published_cameras, TRUE);
   }
+  if (compat->camera_ready_callbacks != NULL) {
+    g_ptr_array_free(compat->camera_ready_callbacks, TRUE);
+  }
   if (compat->links != NULL) {
     g_ptr_array_free(compat->links, TRUE);
   }
@@ -1067,6 +1139,8 @@ PipeWireCompat *new_pipewire_compat(BridgeState *state) {
       g_ptr_array_new_with_free_func((GDestroyNotify)free_pipewire_link);
   compat->published_cameras =
       g_ptr_array_new_with_free_func(destroy_published_camera);
+  compat->camera_ready_callbacks =
+      g_ptr_array_new_with_free_func(free_camera_ready_callback);
   compat->loop = pw_main_loop_new(NULL);
   if (compat->loop == NULL) {
     free_pipewire_compat(compat);
