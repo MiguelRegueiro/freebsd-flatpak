@@ -66,7 +66,7 @@ fn force_unmount_requires_a_still_mounted_owned_path() {
     )
     .unwrap();
     let attempts = attempts.into_inner();
-    assert_eq!(attempts.iter().filter(|force| !**force).count(), 8);
+    assert_eq!(attempts.iter().filter(|force| !**force).count(), 1);
     assert_eq!(attempts.iter().filter(|force| **force).count(), 1);
 }
 
@@ -280,6 +280,58 @@ fn live_nested_process_preserves_nested_and_parent_ownership() {
     let active = active_roots_from_records(&records, &processes).unwrap();
     assert!(active.contains(&nested));
     assert!(active.contains(&parent));
+}
+
+#[test]
+fn stale_nested_mount_tree_is_ordered_before_its_sources_and_parent() {
+    let base = std::env::temp_dir().join(format!(
+        "freebsd-flatpak-nested-mount-order-{}",
+        std::process::id()
+    ));
+    let chroots = base.join("chroots");
+    let parent = chroots.join("org.example.App/parent");
+    let nested = chroots.join("org.example.App/nested");
+    fs::create_dir_all(parent.join("usr")).unwrap();
+    fs::create_dir_all(nested.join(".freebsd-flatpak-mount-sources/0")).unwrap();
+    fs::create_dir_all(nested.join("usr")).unwrap();
+    fs::write(parent.join(".flatpak-info"), "[Instance]\n").unwrap();
+    fs::write(nested.join(".flatpak-info"), "[Instance]\n").unwrap();
+
+    let mounts = vec![
+        MountInfo {
+            source: PathBuf::from("/runtime"),
+            mountpoint: parent.join("usr"),
+            options: "read-only".to_string(),
+        },
+        MountInfo {
+            source: parent.join("usr"),
+            mountpoint: nested.join(".freebsd-flatpak-mount-sources/0"),
+            options: "read-only".to_string(),
+        },
+        MountInfo {
+            source: nested.join(".freebsd-flatpak-mount-sources/0"),
+            mountpoint: nested.join("usr"),
+            options: "read-only".to_string(),
+        },
+    ];
+    let roots = BTreeSet::from([parent.clone(), nested.clone()]);
+    let root_order = order_sandbox_roots_for_recovery(&chroots, roots, &[], &mounts);
+    assert_eq!(root_order, vec![nested.clone(), parent.clone()]);
+
+    let nested_mount_order = order_mounts_for_recovery(mounts[1..].to_vec());
+    assert_eq!(nested_mount_order[0].mountpoint, nested.join("usr"));
+    assert_eq!(
+        nested_mount_order[1].mountpoint,
+        nested.join(".freebsd-flatpak-mount-sources/0")
+    );
+
+    let processes = SandboxProcessSnapshot::for_test(vec![(42, nested.join("work"))]);
+    let roots = BTreeSet::from([parent.clone(), nested.clone()]);
+    let active = active_sandbox_roots(&chroots, &[], &mounts, &roots, &processes).unwrap();
+    assert!(active.contains(&nested));
+    assert!(active.contains(&parent));
+
+    fs::remove_dir_all(base).unwrap();
 }
 
 #[test]

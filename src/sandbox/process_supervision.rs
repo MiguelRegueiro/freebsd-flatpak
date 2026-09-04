@@ -498,21 +498,6 @@ impl ProcstatLayout {
     }
 }
 
-pub(super) fn process_rooted_in(pid: i32, root: &Path) -> Result<bool> {
-    use std::process::Command;
-
-    let output = Command::new("procstat")
-        .arg("-f")
-        .arg(pid.to_string())
-        .output()
-        .with_context(|| format!("inspect process {pid} root"))?;
-    if !output.status.success() {
-        return Ok(false);
-    }
-    let text = String::from_utf8(output.stdout)?;
-    Ok(SandboxProcessSnapshot::parse(&text).references_root(root))
-}
-
 #[cfg(test)]
 #[path = "tests/process_supervision.rs"]
 mod tests;

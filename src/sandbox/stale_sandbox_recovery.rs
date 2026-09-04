@@ -1,5 +1,5 @@
 use super::application_entrypoint::sandbox_name;
-use super::process_supervision::{process_rooted_in, SandboxProcessSnapshot};
+use super::process_supervision::SandboxProcessSnapshot;
 use crate::installation as state;
 use crate::installation::installation_paths::Installation;
 use crate::secure_mount;
@@ -16,52 +16,50 @@ pub fn recover_stale_mounts(paths: &Installation) -> Result<()> {
     state::ensure_layout(paths)?;
     recover_orphaned_document_mounts(paths)?;
 
-    let records = order_run_records_for_recovery(state::read_sandbox_ownership_records(paths)?);
-    let process_snapshot = SandboxProcessSnapshot::capture()?;
-    let active_roots = active_roots_from_records(&records, &process_snapshot)?;
+    let records = state::read_sandbox_ownership_records(paths)?;
+    let mounts = mount_infos()?;
+    let roots = sandbox_roots(&paths.chroots(), &records, &mounts);
+    let processes = SandboxProcessSnapshot::capture()?;
+    let active = active_sandbox_roots(&paths.chroots(), &records, &mounts, &roots, &processes)?;
+    let stale = roots.difference(&active).cloned().collect::<BTreeSet<_>>();
 
-    for record in records {
-        let Some(record_path) = record.get("_path").map(PathBuf::from) else {
+    for root in order_sandbox_roots_for_recovery(&paths.chroots(), stale, &records, &mounts) {
+        // A launcher publishes ownership before mounting. Re-read all three
+        // kernel/state views immediately before teardown so a concurrent live
+        // primary or nested instance is never recovered as stale.
+        let current_records = state::read_sandbox_ownership_records(paths)?;
+        let current_mounts = mount_infos()?;
+        let current_roots = sandbox_roots(&paths.chroots(), &current_records, &current_mounts);
+        let current_processes = SandboxProcessSnapshot::capture()?;
+        let current_active = active_sandbox_roots(
+            &paths.chroots(),
+            &current_records,
+            &current_mounts,
+            &current_roots,
+            &current_processes,
+        )?;
+        if current_active.contains(&root) {
             continue;
-        };
-        let root = record.get("root").map(PathBuf::from);
-
-        if root
-            .as_ref()
-            .is_some_and(|root| active_roots.contains(root))
-        {
-            continue;
         }
 
-        if let Some(root) = root {
-            terminate_chroot_processes(&root)?;
-            unmount_under(&root)?;
-            remove_instance_root(&root)?;
-        }
-        state::remove_run_record(&record_path)?;
-    }
-
-    // Refresh active roots after observing the mount table. A concurrent run
-    // publishes its record before creating any mounts, so every mount that can
-    // appear here has an ownership record visible in this second snapshot.
-    let chroot_root = paths.chroots();
-    let mut stale_mounts = mount_points_under(&chroot_root)?;
-    let active_roots = active_run_roots(paths)?;
-    stale_mounts.retain(|mountpoint| !belongs_to_any_root(mountpoint, &active_roots));
-    let mut stale_roots = BTreeSet::new();
-    for mountpoint in &stale_mounts {
-        if let Some(root) = chroot_root_for_mount(&chroot_root, mountpoint) {
-            stale_roots.insert(root);
-        }
-    }
-    for root in stale_roots {
         terminate_chroot_processes(&root)?;
-        terminate_chroot_mount_holders(&root)?;
+        unmount_under(&root)?;
+        if mount_points_under(&root)?.is_empty() {
+            remove_instance_root(&root)?;
+            for record in &current_records {
+                if record
+                    .get("root")
+                    .is_some_and(|value| Path::new(value) == root.as_path())
+                {
+                    if let Some(record_path) = record.get("_path") {
+                        state::remove_run_record(Path::new(record_path))?;
+                    }
+                }
+            }
+        }
     }
-    let mut stale_mounts = mount_points_under(&chroot_root)?;
-    stale_mounts.retain(|mountpoint| !belongs_to_any_root(mountpoint, &active_roots));
-    unmount_mountpoints(stale_mounts)?;
-    Ok(())
+
+    recover_orphaned_document_mounts(paths)
 }
 
 pub fn app_has_mounts(paths: &Installation, app_id: &str) -> Result<bool> {
@@ -124,12 +122,79 @@ fn mount_identity(path: &Path) -> Result<(u64, u64)> {
     Ok((metadata.dev(), metadata.ino()))
 }
 
+fn sandbox_roots(
+    chroots: &Path,
+    records: &[BTreeMap<String, String>],
+    mounts: &[MountInfo],
+) -> BTreeSet<PathBuf> {
+    let mut roots = records
+        .iter()
+        .filter_map(|record| record.get("root").map(PathBuf::from))
+        .collect::<BTreeSet<_>>();
+    for mount in mounts {
+        if let Some(root) = chroot_root_for_mount(chroots, &mount.mountpoint) {
+            roots.insert(root);
+        }
+    }
+    roots
+}
+
+fn active_sandbox_roots(
+    chroots: &Path,
+    records: &[BTreeMap<String, String>],
+    mounts: &[MountInfo],
+    roots: &BTreeSet<PathBuf>,
+    processes: &SandboxProcessSnapshot,
+) -> Result<BTreeSet<PathBuf>> {
+    let mut active = active_roots_from_records(records, processes)?;
+    active.extend(
+        roots
+            .iter()
+            .filter(|root| processes.references_root(root))
+            .cloned(),
+    );
+
+    loop {
+        let mut changed = false;
+        for record in records {
+            let Some(root) = record.get("root").map(PathBuf::from) else {
+                continue;
+            };
+            if active.contains(&root) {
+                if let Some(parent) = record.get("parent_root").map(PathBuf::from) {
+                    changed |= active.insert(parent);
+                }
+            }
+        }
+        for mount in mounts {
+            let Some(target_root) = chroot_root_for_mount(chroots, &mount.mountpoint) else {
+                continue;
+            };
+            if !active.contains(&target_root) {
+                continue;
+            }
+            if let Some(source_root) = chroot_root_for_mount(chroots, &mount.source) {
+                changed |= active.insert(source_root);
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    Ok(active)
+}
+
+#[cfg(test)]
 fn active_run_roots(paths: &Installation) -> Result<Vec<PathBuf>> {
     let records = state::read_sandbox_ownership_records(paths)?;
+    let mounts = mount_infos()?;
+    let roots = sandbox_roots(&paths.chroots(), &records, &mounts);
     let processes = SandboxProcessSnapshot::capture()?;
-    Ok(active_roots_from_records(&records, &processes)?
-        .into_iter()
-        .collect())
+    Ok(
+        active_sandbox_roots(&paths.chroots(), &records, &mounts, &roots, &processes)?
+            .into_iter()
+            .collect(),
+    )
 }
 
 fn active_roots_from_records(
@@ -168,6 +233,96 @@ fn active_roots_from_records(
     Ok(active)
 }
 
+fn order_sandbox_roots_for_recovery(
+    chroots: &Path,
+    roots: BTreeSet<PathBuf>,
+    records: &[BTreeMap<String, String>],
+    mounts: &[MountInfo],
+) -> Vec<PathBuf> {
+    let mut dependencies = BTreeSet::new();
+    for record in records {
+        let Some(root) = record.get("root").map(PathBuf::from) else {
+            continue;
+        };
+        if let Some(parent) = record.get("parent_root").map(PathBuf::from) {
+            if roots.contains(&root) && roots.contains(&parent) {
+                dependencies.insert((root, parent));
+            }
+        }
+    }
+    for mount in mounts {
+        let Some(target_root) = chroot_root_for_mount(chroots, &mount.mountpoint) else {
+            continue;
+        };
+        let Some(source_root) = chroot_root_for_mount(chroots, &mount.source) else {
+            continue;
+        };
+        if target_root != source_root
+            && roots.contains(&target_root)
+            && roots.contains(&source_root)
+        {
+            dependencies.insert((target_root, source_root));
+        }
+    }
+    topological_path_order(roots, &dependencies)
+}
+
+fn order_mounts_for_recovery(mounts: Vec<MountInfo>) -> Vec<MountInfo> {
+    let paths = mounts
+        .iter()
+        .map(|mount| mount.mountpoint.clone())
+        .collect::<BTreeSet<_>>();
+    let mut dependencies = BTreeSet::new();
+    for mount in &mounts {
+        for possible_parent in &mounts {
+            if mount.mountpoint != possible_parent.mountpoint
+                && (mount.mountpoint.starts_with(&possible_parent.mountpoint)
+                    || mount.source.starts_with(&possible_parent.mountpoint))
+            {
+                dependencies.insert((mount.mountpoint.clone(), possible_parent.mountpoint.clone()));
+            }
+        }
+    }
+    let ordered = topological_path_order(paths, &dependencies);
+    let by_path = mounts
+        .into_iter()
+        .map(|mount| (mount.mountpoint.clone(), mount))
+        .collect::<BTreeMap<_, _>>();
+    ordered
+        .into_iter()
+        .filter_map(|path| by_path.get(&path).cloned())
+        .collect()
+}
+
+fn topological_path_order(
+    mut remaining: BTreeSet<PathBuf>,
+    dependencies: &BTreeSet<(PathBuf, PathBuf)>,
+) -> Vec<PathBuf> {
+    let mut ordered = Vec::with_capacity(remaining.len());
+    while !remaining.is_empty() {
+        let ready = remaining
+            .iter()
+            .filter(|candidate| {
+                !dependencies
+                    .iter()
+                    .any(|(before, after)| after == *candidate && remaining.contains(before))
+            })
+            .max_by(|left, right| {
+                left.components()
+                    .count()
+                    .cmp(&right.components().count())
+                    .then_with(|| left.cmp(right))
+            })
+            .cloned()
+            .or_else(|| remaining.iter().next_back().cloned())
+            .expect("remaining recovery path");
+        remaining.remove(&ready);
+        ordered.push(ready);
+    }
+    ordered
+}
+
+#[cfg(test)]
 fn order_run_records_for_recovery(
     mut records: Vec<BTreeMap<String, String>>,
 ) -> Vec<BTreeMap<String, String>> {
@@ -190,6 +345,7 @@ fn order_run_records_for_recovery(
     records
 }
 
+#[cfg(test)]
 fn record_ownership_depth(
     record: &BTreeMap<String, String>,
     parents: &BTreeMap<PathBuf, Option<PathBuf>>,
@@ -207,6 +363,7 @@ fn record_ownership_depth(
     depth
 }
 
+#[cfg(test)]
 pub(super) fn belongs_to_any_root(path: &Path, roots: &[PathBuf]) -> bool {
     roots.iter().any(|root| path.starts_with(root))
 }
@@ -253,8 +410,9 @@ fn mount_points() -> Result<Vec<PathBuf>> {
         .collect())
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct MountInfo {
+    source: PathBuf,
     mountpoint: PathBuf,
     options: String,
 }
@@ -269,8 +427,12 @@ fn mount_infos() -> Result<Vec<MountInfo>> {
         .lines()
         .filter_map(|line| {
             line.split_once(" on ")
-                .and_then(|(_, rest)| rest.split_once(" ("))
-                .map(|(mountpoint, options)| MountInfo {
+                .and_then(|(source, rest)| {
+                    rest.split_once(" (")
+                        .map(|(mountpoint, options)| (source, mountpoint, options))
+                })
+                .map(|(source, mountpoint, options)| MountInfo {
+                    source: PathBuf::from(source),
                     mountpoint: PathBuf::from(mountpoint),
                     options: options.trim_end_matches(')').to_string(),
                 })
@@ -279,27 +441,15 @@ fn mount_infos() -> Result<Vec<MountInfo>> {
 }
 
 fn unmount_under(root: &Path) -> Result<()> {
-    unmount_mountpoints(mount_points_under(root)?)
-}
-
-fn terminate_chroot_mount_holders(root: &Path) -> Result<()> {
-    let mut pids = BTreeSet::new();
-    for mountpoint in mount_points_under(root)? {
-        for pid in mount_holders(&mountpoint)? {
-            if pid == std::process::id() as i32 {
-                continue;
-            }
-            if process_rooted_in(pid, root)? {
-                pids.insert(pid);
-            }
-        }
-    }
-
-    for pid in pids {
-        eprintln!("recovering stale sandbox mount holder pid {pid}");
-        terminate_process(pid);
-    }
-    Ok(())
+    let mounts = mount_infos()?
+        .into_iter()
+        .filter(|mount| mount.mountpoint.starts_with(root))
+        .collect::<Vec<_>>();
+    let ordered = order_mounts_for_recovery(mounts)
+        .into_iter()
+        .map(|mount| mount.mountpoint)
+        .collect();
+    unmount_mountpoints(ordered)
 }
 
 pub(super) fn terminate_chroot_processes(root: &Path) -> Result<()> {
@@ -351,28 +501,6 @@ fn terminate_processes_with(
         }
     }
     processes()
-}
-
-fn mount_holders(mountpoint: &Path) -> Result<Vec<i32>> {
-    let output = Command::new("fstat")
-        .arg("-f")
-        .arg(mountpoint)
-        .output()
-        .with_context(|| format!("find mount holders for {}", mountpoint.display()))?;
-    if !output.status.success() {
-        bail!(
-            "fstat -f {} failed with status {}",
-            mountpoint.display(),
-            output.status
-        );
-    }
-    let text = String::from_utf8(output.stdout)?;
-    Ok(text
-        .lines()
-        .skip(1)
-        .filter_map(|line| line.split_whitespace().nth(2))
-        .filter_map(|pid| pid.parse::<i32>().ok())
-        .collect())
 }
 
 pub(super) fn chroot_root_for_mount(chroot_root: &Path, mountpoint: &Path) -> Option<PathBuf> {
@@ -475,26 +603,20 @@ fn sandbox_mount_target(mountpoint: &Path) -> Result<(PathBuf, PathBuf, (u64, u6
 pub(super) fn unmount_mountpoint_with(
     mountpoint: &Path,
     allow_force: bool,
-    action: &str,
+    _action: &str,
     mut mounted: impl FnMut(&Path) -> Result<bool>,
     mut unmount: impl FnMut(&Path, bool) -> Result<()>,
-    mut retry_pause: impl FnMut(),
+    _retry_pause: impl FnMut(),
 ) -> Result<()> {
-    let mut last_error = None;
-    for _ in 0..8 {
-        if !mounted(mountpoint)? {
-            return Ok(());
-        }
-        match unmount(mountpoint, false) {
-            Ok(()) => return Ok(()),
-            Err(error) => {
-                last_error = Some(error);
-                if !mounted(mountpoint)? {
-                    return Ok(());
-                }
-                retry_pause();
-            }
-        }
+    if !mounted(mountpoint)? {
+        return Ok(());
+    }
+    let normal_error = match unmount(mountpoint, false) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if !mounted(mountpoint)? {
+        return Ok(());
     }
 
     if allow_force && mounted(mountpoint)? {
@@ -510,10 +632,7 @@ pub(super) fn unmount_mountpoint_with(
         return Ok(());
     }
 
-    let Some(error) = last_error else {
-        bail!("{action} {} was not attempted", mountpoint.display());
-    };
-    Err(error)
+    Err(normal_error)
 }
 
 pub(super) fn run_command(mut command: Command, action: &str) -> Result<()> {
@@ -527,30 +646,4 @@ pub(super) fn run_command(mut command: Command, action: &str) -> Result<()> {
         bail!("{action} failed with status {status}");
     }
     Ok(())
-}
-
-fn process_alive(pid: i32) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
-fn terminate_process(pid: i32) {
-    unsafe {
-        libc::kill(pid, libc::SIGTERM);
-    }
-    for _ in 0..20 {
-        if !process_alive(pid) {
-            return;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-
-    unsafe {
-        libc::kill(pid, libc::SIGKILL);
-    }
-    for _ in 0..20 {
-        if !process_alive(pid) {
-            return;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
 }
